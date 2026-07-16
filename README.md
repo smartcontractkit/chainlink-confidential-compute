@@ -1,4 +1,4 @@
-# Confidential Compute
+# Confidential Compute 
 
 A framework for building Confidential Compute applications, which use trusted execution environments (TEEs) and threshold-encrypted secrets in conjunction.
 
