@@ -1,0 +1,60 @@
+environment: &env staging
+domain: &domain cre
+changesets:
+  - job_propose_arbitrary:
+      payload:
+        domain: *domain
+        environment: *env
+        donName: "workflow_1_zone-a"
+        job_name: &jobName "confidential-http-capabilities-v2"
+        template: "confidential-http"
+        inputs:
+          jobName: *jobName
+          command: "/usr/local/bin/confidential-http"
+          config: |
+            {
+              "InsecureSkipTLSVerify": false,
+              "EncryptedAPIKeys": "896803ee748795154f4d43c781f6ff91c23d9e10697ff8fdb195581b6a2db852,69b6edd515be8ca5acc9c94515b55bf6c635f6fafc452df3fc26098f7c179f04,9d2d902db7c2d75ffc3dd4cff4a70f93e7ace5f8f9f4fff6f9e512239a2a2935,f32436e8554e1ad99f3751682bea0c7058c3079295df2fc252c122c6a6256566,deb8e63fb276addfcb987956da035d97b2f2279c8b367c349fe8174530a18220,af546e571c7ffa311382a263a6ba92a908d2e0b918010079bbce610a859da12c,9dcbb68288a52c3439afd223c4414b678733b7667ff20e21d6261d1be5bc8c61",
+              "WorkflowOwnerRPS": 10,
+              "WorkflowOwnerBurst": 1000,
+              "GlobalRPS": 100,
+              "GlobalBurst": 10000
+            }
+        donFilters:
+          - key: "don_name"
+            value: "workflow_1_zone-a"
+          - key: "environment"
+            value: *env
+          - key: "product"
+            value: *domain
+          - key: "zone"
+            value: "zone-a"
+  - capability_registry_add_capability:
+      payload:
+        registryChainSel: 16015286601757825753
+        registryQualifier: "zone-a"
+        donName: "workflow_1_zone-a"
+        capabilityConfigs:
+          - capability:
+              capabilityID: "confidential-http@1.0.0-alpha"
+              metadata:
+                capabilityType: 1
+            config:
+              defaultConfig:
+                fields:
+                  Enclaves:
+                    listValue:
+                      fields:
+                        - mapValue:
+                            fields:
+                              EnclaveExtraData:
+                                bytesValue: ZXh0cmEgZGF0YQ==
+                              EnclaveID:
+                                bytesValue: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+                              EnclaveType:
+                                stringValue: NITRO
+                              EnclaveURL:
+                                stringValue: https://example.com/enclave
+                              TrustedValues:
+                                bytesValue: dHJ1c3RlZCB2YWx1ZXM=
+    force: true

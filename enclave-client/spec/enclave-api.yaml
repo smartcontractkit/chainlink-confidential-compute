@@ -1,0 +1,157 @@
+openapi: 3.0.0
+info:
+  title: Compute Enclave API
+  version: 1.0.0
+  description: Specification by which enclave clients can reach out to enclaves to fetch ephemeral public keys & current configuration, and request computation on ciphertexts.
+servers:
+  - url: / 
+paths:
+  /publicKeys:
+    get:
+      summary: Fetch the live public encryption keys of the enclave.
+      parameters:
+        - name: requestID
+          in: query
+          description: ID of the request for which the public keys are being fetched.
+          required: false
+          type: string
+          format: byte
+      responses:
+        '200':
+          description: Successful retrieval of the public keys.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  publicKeys:
+                    type: string
+                    format: byte
+                    description: The current live public encryption keys of the enclave.
+                  config:
+                    type: string
+                    format: byte
+                    description: Configuration used during the request.
+                  attestation:
+                    type: string
+                    format: byte
+                    description: Base64-encoded attestation of the computed publicKey.
+                required:
+                  - publicKeys
+                  - config
+                  - attestation
+        '500':
+          description: Internal Server Error.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    description: Error message.
+  /requests:
+    post:
+      summary: Request computation on encrypted data.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+                properties:
+                  requestID:
+                    type: string
+                    format: byte
+                    description: Unique ID for the request.
+                  publicData:
+                    type: string
+                    format: byte
+                    description: Non-sensitive data to be used by the enclave application.
+                  ciphertexts:
+                    type: string
+                    format: byte
+                    description: Ciphertexts to be decrypted and used by the enclave application.
+                  encryptedDecryptionKeyShares:
+                    type: string
+                    format: byte
+                    description: Encrypted decryption key shares of the ciphertexts.
+                  ciphertextsHash:
+                    type: string
+                    format: byte
+                    description: Hash of ciphertexts, optionally used to save bandwidth.
+                  encryptedDecryptionKeySharesHash:
+                    type: string
+                    format: byte
+                    description: Hash of the encrypted decryption key shares, optionally used to save bandwidth.
+                  enclaveEphemeralPublicKey:
+                    type: string
+                    format: byte
+                    description: Ephemeral public key for the enclave that should be used to decrypt the ciphertexts.
+                  publicKey:
+                    type: string
+                    description: Public key of the set of nodes that generated the encrypted decryption key shares.
+                  signature:
+                    type: string
+                    description: Signature of the full request object signed by the client requesting execution.
+                required:
+                  - requestID
+                  - publicData
+                  - ciphertexts
+                  - encryptedDecryptionKeyShares
+                  - enclaveEphemeralPublicKey
+                  - publicKey
+                  - signature
+      responses:
+        '200':
+          description: Request processed successfully.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    requestID:
+                      type: string
+                      format: byte
+                      description: ID of the request.
+                    output:
+                      type: string
+                      format: byte
+                      description: Result of the requested computation.
+                    config:
+                      type: string
+                      format: byte
+                      description: Configuration used during the computation.
+                    attestation:
+                      type: string
+                      format: byte
+                      description: Attestation of the output.
+                  required:
+                    - requestID
+                    - output
+                    - config
+                    - attestation
+        '400':
+          description: Bad Request (Invalid format, mismatched verification keys, or signature verification failure).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    description: Error message.
+        '500':
+          description: Internal Server Error.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    description: Error message.

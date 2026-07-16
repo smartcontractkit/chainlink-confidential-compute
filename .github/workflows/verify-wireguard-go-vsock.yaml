@@ -1,0 +1,33 @@
+name: Verify wireguard-go-vsock Binary
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  push:
+    branches:
+      - 'release/**'
+
+jobs:
+  verify-reproducible-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.5'
+
+      - name: Build wireguard-go-vsock from source
+        run: |
+          git clone https://github.com/seedcx/wireguard-go-vsock.git /tmp/wireguard-go-vsock
+          cd /tmp/wireguard-go-vsock
+          git checkout 5a4ddc8ae0ff255e7fd3ea25a0397ae55a66b956
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -v -trimpath -ldflags="-s -w" -o "wireguard-go-vsock"
+
+      - name: Verify reproducible build
+        run: |
+          echo "Comparing newly built binary with the one in the repository..."
+          diff ./enclave/nitro/wireguard-go-vsock /tmp/wireguard-go-vsock/wireguard-go-vsock
+          echo "Success: The pre-built binary is reproducible."

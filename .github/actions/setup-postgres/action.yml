@@ -1,0 +1,45 @@
+name: Setup Postgresql
+description: Setup postgres docker container via docker-compose, allowing usage of a custom command, see https://github.com/orgs/community/discussions/26688
+inputs:
+  base-path:
+    description: Path to the base of the repo
+    required: false
+    default: ./confidential-compute
+runs:
+  using: composite
+  steps:
+    - name: Install Docker Compose
+      run: |
+        echo "Checking Docker Compose installation..."
+        if command -v docker-compose >/dev/null 2>&1; then
+          echo "Docker Compose is already installed"
+          docker-compose --version
+        else
+          echo "Installing Docker Compose..."
+          # Download and install Docker Compose
+          DOCKER_COMPOSE_VERSION="v2.23.0"
+          sudo curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+          # Create symlink for 'docker compose' command (v2 style)
+          sudo ln -sf /usr/local/bin/docker-compose /usr/local/bin/docker-compose-v2
+          echo "Docker Compose installed successfully"
+          docker-compose --version
+        fi
+      shell: bash
+    - name: Start postgres service
+      run: |
+        echo "Starting postgres with docker-compose..."
+        docker-compose --version
+        docker-compose up -d
+        echo "Containers started:"
+        docker-compose ps
+      shell: bash
+      working-directory: ${{ inputs.base-path }}/.github/actions/setup-postgres
+    - name: Wait for postgres service to be healthy
+      run: |
+        echo "Waiting for postgres to become healthy..."
+        chmod +x ./wait-for-healthy-postgres.sh
+        ./wait-for-healthy-postgres.sh
+        echo "Postgres is ready!"
+      shell: bash
+      working-directory: ${{ inputs.base-path }}/.github/actions/setup-postgres

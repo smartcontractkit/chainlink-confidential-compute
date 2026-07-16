@@ -1,0 +1,44 @@
+# Binaries and build artifacts
+**/host-server
+*.eif
+**/*.measurements.json
+**/*.b64
+**/blockscout/*
+**/compose/*
+**/logs/*
+**/test.state.yaml
+**/host-server.log
+**/config_tracker
+**/.DS_Store
+**/node_modules/
+**/.tmp-capability*
+**/bun.lock
+**/package.json
+**/*.wasm
+
+# Key files
+**/signing_key.json
+**/tdh2_keys.json
+**/eth_signing_keys.json
+**/enclave-public-key.json
+**/scripts/*.json
+**/pcr_measurements.json
+
+# Configuration files
+**/.vscode/*
+**/copilot-instructions.md
+**/.idea/*
+
+# Certificate material
+**/nlb-selfsigned-certs/*
+**/*.pem
+**/*.crt
+**/host-server-**
+
+# Compiled environment entrypoint binaries (from `go build ./environments/{fake,nitro}`).
+# Scoped to the app directory so the `environments/fake`, `environments/nitro`,
+# `enclave/fake`, and `enclave/nitro` source directories are NOT ignored.
+enclave/apps/*/fake
+enclave/apps/*/nitro
+**/CLAUDE.md
+enclave/nitro/host/host

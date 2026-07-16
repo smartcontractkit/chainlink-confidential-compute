@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+option go_package = "github.com/smartcontractkit/confidential-compute/capabilities/framework";
+
+package framework;
+
+import "types/frameworktypes/framework.proto";
+
+// Test-specific input for testing the generic enclave capability
+message TestInput {
+    string test_field = 1;
+    repeated string test_array = 2;
+    int32 test_number = 3;
+}
+
+message TestOutput {
+    string result = 1;
+    bool success = 2;
+}
+
+message TestActionInput {
+    repeated frameworktypes.SecretIdentifier vault_don_secrets = 1;
+    TestInput input = 2;
+}

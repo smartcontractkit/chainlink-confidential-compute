@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+option go_package = "github.com/smartcontractkit/confidential-compute/types/frameworktypes";
+
+package frameworktypes;
+
+// SecretIdentifier specifies a secret that needs to be fetched from a vault.
+message SecretIdentifier {
+    string key = 1;
+    string namespace = 2;
+    optional string owner = 3;
+}
+
+

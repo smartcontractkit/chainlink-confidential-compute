@@ -1,0 +1,10 @@
+.git
+.github
+.claude
+tests
+dashboards
+docs
+runbooks
+scripts
+**/host-server
+*.log

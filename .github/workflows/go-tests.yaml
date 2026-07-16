@@ -1,0 +1,1210 @@
+# Go Tests.
+#
+# Pull requests run the full module test suite against FAKE enclaves on regular
+# GitHub-hosted runners — no Nitro hardware required — for fast feedback.
+# Release-branch pushes and a nightly schedule run the heavy integration + e2e
+# suites against REAL Nitro enclaves on self-hosted runners to catch
+# hardware/attestation regressions the fake environment can't.
+name: Go Tests
+on:
+  pull_request:
+    branches:
+      - main
+    # `labeled` is included so applying the "e2e-real-enclaves" label to a PR
+    # triggers a run that adds the real-enclave suite (see the setup job).
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches:
+      - main
+      - 'release/**'
+  schedule:
+    # Nightly real-enclave run at 07:00 UTC.
+    - cron: '0 7 * * *'
+env:
+  CHAINLINK_COMMIT_SHA: a1ea8cd880345a3a6c80bf70f079c7dc783d5493
+  LEGACY_COMMIT_SHA: 24ffd2435ed7d6bca45525c2189d720b7a4ef6bc # v0.0.14, the commit pointing to whatever is capability gitref is deployed in Chainlink's plugins.private.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.private.yaml#L50.
+  LEGACY_ENCLAVE_RELEASE: v1.3.0 # The release version whose enclaves are currently deployed in production. Update this when deploying new enclaves.
+  # Pinned refs for the supporting CRE Docker images, used as GHCR cache keys.
+  JD_VERSION: 0.22.1 # job-distributor release (checked out as v${JD_VERSION})
+  ATLAS_SHA: da84cb72d3a160e02896247d46ab4b9806ebee2f # chip-ingress + chip-config
+  CTF_SHA: dd420c0d953334e3fef9a109b6816de706f6be90 # chip-router
+jobs:
+  # Emit the test matrix based on the triggering event. Release-branch pushes
+  # run the real-enclave e2e + integration suite plus the backwards-compat and
+  # legacy-enclaves variants; the nightly schedule runs only the real-enclave
+  # e2e + integration suite. Pull requests exercise fake enclaves for the
+  # standard and remote-legacy variants. Backwards-compatibility runs a prior-release
+  # capability plugin, which predates fake enclaves and cannot validate their
+  # attestation, so for now it runs against real enclaves on the self-hosted
+  # Nitro runner. TODO(PRIV-506): once a prior release with fake-enclave support
+  # exists, switch this variant back to fake enclaves on the hosted runners.
+  #
+  # Applying the "e2e-real-enclaves" label to a PR additionally runs the e2e +
+  # integration suites against real Nitro enclaves on the self-hosted runner.
+  setup:
+    name: Configure test matrix
+    runs-on:
+      - runs-on=${{ github.run_id }}
+      - cpu=4+8
+      - ram=8+16
+      - family=c7i+c7a+c6i
+      - volume=40gb
+    permissions: {}
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      # false on pushes to main (those runs only warm the build cache); the
+      # single source of truth for "should the full suite run" — jobs gate on it.
+      run-suite: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+    steps:
+      - id: set-matrix
+        run: |
+          # ---- Catalog of test variants ----
+          # Each entry is one matrix "include" object. "real" picks the
+          # self-hosted Nitro runner (vs. fake enclaves on hosted runners);
+          # "portion" (fake only) selects which slice the "Test Go modules" step
+          # runs, so the two heavy e2e suites run in parallel with the unit tests.
+          UNIT='{"name":"Unit tests (fake enclaves)","real":false,"legacy":false,"legacy-enclaves":false,"portion":"unit"}'
+          E2E_HTTP='{"name":"E2E confidential HTTP (fake enclaves)","real":false,"legacy":false,"legacy-enclaves":false,"portion":"e2e-http"}'
+          E2E_WORKFLOWS='{"name":"E2E workflow engine (fake enclaves)","real":false,"legacy":false,"legacy-enclaves":false,"portion":"e2e-workflows"}'
+          REAL_E2E='{"name":"e2e + integration (real enclaves)","real":true,"legacy":false,"legacy-enclaves":false}'
+          BACKWARDS_COMPAT='{"name":"Test backwards compatibility (real enclaves)","real":true,"legacy":true,"legacy-enclaves":false}'
+          LEGACY_ENCLAVES='{"name":"Test against legacy enclaves","real":false,"legacy":false,"legacy-enclaves":true}'
+
+          # ---- Select variants for the triggering event ----
+          case "${{ github.event_name }}" in
+            pull_request)
+              # Fake-enclave suites for fast feedback, plus the real-enclave
+              # backwards-compat and remote-legacy variants.
+              VARIANTS=("$UNIT" "$E2E_HTTP" "$E2E_WORKFLOWS" "$BACKWARDS_COMPAT" "$LEGACY_ENCLAVES")
+              # Opt-in: the "e2e-real-enclaves" label adds a real Nitro e2e +
+              # integration run on the self-hosted runner.
+              if [ "${{ contains(github.event.pull_request.labels.*.name, 'e2e-real-enclaves') }}" = "true" ]; then
+                VARIANTS+=("$REAL_E2E")
+              fi
+              ;;
+            push)
+              # Release-branch pushes: the same real/legacy set a PR runs, minus
+              # the fake-enclave suites. Pushes to main are gated out by
+              # run-suite, so this only runs on release/** pushes.
+              VARIANTS=("$REAL_E2E" "$BACKWARDS_COMPAT" "$LEGACY_ENCLAVES")
+              ;;
+            *)
+              # Nightly schedule: real Nitro enclaves only.
+              VARIANTS=("$REAL_E2E")
+              ;;
+          esac
+
+          # Join the selected variants into the matrix JSON.
+          IFS=,
+          echo "matrix={\"include\":[${VARIANTS[*]}]}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build all modules
+    runs-on:
+      - runs-on=${{ github.run_id }}
+      - cpu=16+32
+      - ram=8+64
+      - family=c7i+c7a+c6i
+      - volume=100gb
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      # Records CPU/memory/disk usage for the job. Must be the first step so it
+      # captures the whole run. Metrics land in the job summary; flip
+      # skip_comment to 'false' (and add pull-requests: write) to post to the PR.
+      - name: Monitor runner metrics
+        uses: kalverra/octometrics-action@34b3cdaea1a1bd2d42be0e4fd2b6f0e5c3e87392 # v0.1.2
+        with:
+          job_name: Build all modules
+          version: 'latest'
+          skip_comment: 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Free disk space
+        if: false
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift 2>/dev/null || true
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          path: confidential-compute
+
+      - name: Clean up global Git config
+        run: |
+          # List and remove any existing insteadOf configurations for github.com
+          git config --global --get-regexp 'url\..*\.insteadof' | grep 'github.com' | cut -d' ' -f1 | sed 's/\.insteadof$//' | xargs -I {} git config --global --unset-all {}.insteadOf || true
+          # Clean up any empty url sections
+          git config --global --remove-section url 2>/dev/null || true
+          echo "Cleaned up global Git configuration"
+      - name: Setup GitHub Token
+        id: setup-github-token
+        uses: smartcontractkit/.github/actions/setup-github-token@ef78fa97bf3c77de6563db1175422703e9e6674f # setup-github-token@0.2.1
+        with:
+          aws-role-arn: ${{ secrets.AWS_OIDC_GLOBAL_READ_ONLY_TOKEN_ISSUER_ROLE_ARN }}
+          aws-lambda-url: ${{ secrets.AWS_INFRA_RELENG_TOKEN_ISSUER_LAMBDA_URL }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          aws-role-duration-seconds: "1800"
+          set-git-config: true
+
+      - name: Configure Git for private modules
+        env:
+          GITHUB_TOKEN: ${{ steps.setup-github-token.outputs.access-token }}
+        run: |
+          git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GOPRIVATE=github.com/smartcontractkit/*" >> $GITHUB_ENV
+          echo "GOPROXY=https://proxy.golang.org,direct" >> $GITHUB_ENV
+          echo "GOSUMDB=sum.golang.org" >> $GITHUB_ENV
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.4'
+          cache: false
+
+      # Explicit cache (not setup-go's built-in) so restore-keys gives a partial
+      # restore when go.sum changes instead of a full miss. Warmed on main; every
+      # PR restores from it.
+      - name: Cache Go modules and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-cache-${{ runner.os }}-${{ hashFiles('confidential-compute/**/go.sum') }}
+          restore-keys: |
+            go-cache-${{ runner.os }}-
+
+      - name: Cache wasi-sdk
+        id: wasi-sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/wasi-sdk
+          key: linux-wasi-sdk-27
+
+      - name: Install wasi-sdk
+        if: steps.wasi-sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -L https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-27/wasi-sdk-27.0-x86_64-linux.tar.gz | tar -xz
+          sudo rm -rf /opt/wasi-sdk
+          sudo mv wasi-sdk-27.0-x86_64-linux /opt/wasi-sdk
+
+      - name: Set WASI_CLANG environment variable
+        run: echo "WASI_CLANG=/opt/wasi-sdk/bin/clang" >> $GITHUB_ENV
+
+      - name: Deploy Wasmtime C API and Configure CGO
+        run: |
+          # 1. Configuration: Define the target path and specific version. Use a
+          #    home-relative path so this works on both GitHub-hosted and
+          #    self-hosted runners regardless of the runner user.
+          WASM_BASE_PATH="${HOME}/.wasmtime"
+          WASM_VERSION="v36.0.3"
+          WASM_ARCH="x86_64-linux" # Assuming X86_64 based on linker
+
+          # 2. Define the download URL and file name.
+          WASM_TAR_NAME="wasmtime-${WASM_VERSION}-${WASM_ARCH}-c-api.tar.xz"
+          WASM_URL="https://github.com/bytecodealliance/wasmtime/releases/download/${WASM_VERSION}/${WASM_TAR_NAME}"
+
+          echo "Downloading Wasmtime C API from: ${WASM_URL}"
+
+          # 3. Download the C API bundle into the temporary runner folder.
+          curl -fL "${WASM_URL}" -o "${RUNNER_TEMP}/${WASM_TAR_NAME}"
+
+          # 4. Clean up and create target directories with **SUDO** to fix permissions.
+          sudo rm -rf "${WASM_BASE_PATH}"
+          sudo mkdir -p "${WASM_BASE_PATH}/lib"
+          sudo mkdir -p "${WASM_BASE_PATH}/include"
+          sudo mkdir -p "${WASM_BASE_PATH}/bin"
+
+          # 5. Extract the archive into the temporary runner folder.
+          EXTRACTED_DIR="${RUNNER_TEMP}/wasmtime-${WASM_VERSION}-${WASM_ARCH}-c-api" #
+          tar -xf "${RUNNER_TEMP}/${WASM_TAR_NAME}" -C "${RUNNER_TEMP}"
+
+          # 6. Move the files to the final CGO-defined locations using **SUDO**.
+          echo "Moving library files to ${WASM_BASE_PATH}/lib"
+          sudo mv "${EXTRACTED_DIR}/lib/"* "${WASM_BASE_PATH}/lib/"
+
+          echo "Moving header files to ${WASM_BASE_PATH}/include"
+          sudo mv "${EXTRACTED_DIR}/include/"* "${WASM_BASE_PATH}/include/"
+
+          # 7. Install the executable binary using **SUDO**.
+          if [ -f "${EXTRACTED_DIR}/wasmtime" ]; then
+            sudo mv "${EXTRACTED_DIR}/wasmtime" "${WASM_BASE_PATH}/bin/"
+            sudo chmod +x "${WASM_BASE_PATH}/bin/wasmtime"
+            echo "Wasmtime binary installed."
+          fi
+
+          # 8. Configure CGO and PATH variables (no sudo needed here)
+          echo "CGO_LDFLAGS=-L${WASM_BASE_PATH}/lib -lwasmtime" >> $GITHUB_ENV
+          echo "CGO_CFLAGS=-I${WASM_BASE_PATH}/include" >> $GITHUB_ENV
+          echo "${WASM_BASE_PATH}/bin" >> $GITHUB_PATH
+
+          # 9. Verification
+          echo "Wasmtime installation check (listing lib directory):"
+          ls -la "${WASM_BASE_PATH}/lib"
+
+          echo "CGO linking environment is ready."
+
+      - name: Build all Go modules
+        working-directory: confidential-compute
+        run: |
+          echo "Finding all Go modules..."
+          find . -name "go.mod" -type f | while read -r gomod; do
+            dir=$(dirname "$gomod")
+            echo "Building module in $dir"
+            # Special build for workflow modules (WASM)
+            if [[ "$dir" == ./capabilities/workflows ]]; then
+              echo "Skipping build for workflows parent module (no main package)"
+              continue
+            fi
+            cd "$dir"
+            if [[ "$dir" =~ ^./capabilities/workflows/.+ ]]; then
+              echo "Building workflow module as WASM..."
+              GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 go build -o workflow.wasm .
+            else
+              # Build with reduced parallelism and memory usage
+              GOMAXPROCS=2 go build -ldflags="-s -w" ./...
+            fi
+            cd - > /dev/null
+          done
+
+  # Build the heavy CRE Docker images once and cache them in GHCR, keyed on their
+  # pinned refs. GitHub-hosted runners get a fresh Docker daemon each run, so the
+  # test job's local image reuse never hits there; pulling prebuilt images from
+  # the registry avoids multi-GB rebuilds on every PR. The build steps are all
+  # gated on a per-image cache miss, so the common (warm-cache) path is just pulls.
+  prebuild-images:
+    name: Prepare cached images
+    needs: setup
+    if: ${{ needs.setup.outputs.run-suite == 'true' }}
+    runs-on:
+      - runs-on=${{ github.run_id }}
+      - cpu=16+32
+      - ram=8+64
+      - family=c7i+c7a+c6i
+      - volume=200gb
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    outputs:
+      chainlink_ref: ${{ steps.cache.outputs.chainlink_ref }}
+      jd_ref: ${{ steps.cache.outputs.jd_ref }}
+      chip_ingress_ref: ${{ steps.cache.outputs.chip_ingress_ref }}
+      chip_config_ref: ${{ steps.cache.outputs.chip_config_ref }}
+      chip_router_ref: ${{ steps.cache.outputs.chip_router_ref }}
+    steps:
+      - name: Monitor runner metrics
+        uses: kalverra/octometrics-action@34b3cdaea1a1bd2d42be0e4fd2b6f0e5c3e87392 # v0.1.2
+        with:
+          job_name: Prepare cached images
+          version: 'latest'
+          skip_comment: 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Free disk space
+        if: false
+        run: |
+          echo "Disk before cleanup:"; df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/share/swift 2>/dev/null || true
+          sudo docker image prune -af 2>/dev/null || true
+          echo "Disk after cleanup:"; df -h /
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Resolve refs and check registry cache
+        id: cache
+        run: |
+          # GHCR requires a lowercase repository path.
+          base="ghcr.io/${GITHUB_REPOSITORY,,}"
+          declare -A REFS=(
+            [chainlink]="${base}/chainlink:${CHAINLINK_COMMIT_SHA}"
+            [jd]="${base}/job-distributor:${JD_VERSION}"
+            [chip_ingress]="${base}/chip-ingress:${ATLAS_SHA}"
+            [chip_config]="${base}/chip-config:${ATLAS_SHA}"
+            [chip_router]="${base}/chip-router:${CTF_SHA}"
+          )
+          for k in "${!REFS[@]}"; do
+            echo "${k}_ref=${REFS[$k]}" >> "$GITHUB_OUTPUT"
+            if docker pull "${REFS[$k]}" >/dev/null 2>&1; then
+              echo "  ${REFS[$k]} -> cached"
+              echo "${k}_hit=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "  ${REFS[$k]} -> MISS (will build)"
+              echo "${k}_hit=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      # Token + Go setup only when something actually needs building.
+      - name: Clean up global Git config
+        if: steps.cache.outputs.chainlink_hit != 'true' || steps.cache.outputs.jd_hit != 'true' || steps.cache.outputs.chip_ingress_hit != 'true' || steps.cache.outputs.chip_config_hit != 'true' || steps.cache.outputs.chip_router_hit != 'true'
+        run: |
+          git config --global --get-regexp 'url\..*\.insteadof' | grep 'github.com' | cut -d' ' -f1 | sed 's/\.insteadof$//' | xargs -I {} git config --global --unset-all {}.insteadOf || true
+          git config --global --remove-section url 2>/dev/null || true
+
+      - name: Setup GitHub Token
+        if: steps.cache.outputs.chainlink_hit != 'true' || steps.cache.outputs.jd_hit != 'true' || steps.cache.outputs.chip_ingress_hit != 'true' || steps.cache.outputs.chip_config_hit != 'true' || steps.cache.outputs.chip_router_hit != 'true'
+        id: setup-github-token
+        uses: smartcontractkit/.github/actions/setup-github-token@ef78fa97bf3c77de6563db1175422703e9e6674f # setup-github-token@0.2.1
+        with:
+          aws-role-arn: ${{ secrets.AWS_OIDC_GLOBAL_READ_ONLY_TOKEN_ISSUER_ROLE_ARN }}
+          aws-lambda-url: ${{ secrets.AWS_INFRA_RELENG_TOKEN_ISSUER_LAMBDA_URL }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          aws-role-duration-seconds: "1800"
+          set-git-config: true
+
+      - name: Configure Git for private modules
+        if: steps.cache.outputs.chainlink_hit != 'true' || steps.cache.outputs.jd_hit != 'true' || steps.cache.outputs.chip_ingress_hit != 'true' || steps.cache.outputs.chip_config_hit != 'true' || steps.cache.outputs.chip_router_hit != 'true'
+        env:
+          GITHUB_TOKEN: ${{ steps.setup-github-token.outputs.access-token }}
+        run: |
+          git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GOPRIVATE=github.com/smartcontractkit/*" >> $GITHUB_ENV
+          echo "GOPROXY=https://proxy.golang.org,direct" >> $GITHUB_ENV
+          echo "GOSUMDB=sum.golang.org" >> $GITHUB_ENV
+
+      # chip-ingress / chip-config vendor Go modules on the runner before building.
+      - uses: actions/setup-go@v6
+        if: steps.cache.outputs.chip_ingress_hit != 'true' || steps.cache.outputs.chip_config_hit != 'true'
+        with:
+          go-version: '1.26.4'
+          cache: false
+
+      # ---- chainlink ----
+      - name: Checkout chainlink repository
+        if: steps.cache.outputs.chainlink_hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: smartcontractkit/chainlink
+          ref: ${{ env.CHAINLINK_COMMIT_SHA }}
+          path: chainlink
+      - name: Build and push chainlink image
+        if: steps.cache.outputs.chainlink_hit != 'true'
+        working-directory: chainlink
+        env:
+          GITHUB_TOKEN: ${{ steps.setup-github-token.outputs.access-token }}
+          IMAGE_REF: ${{ steps.cache.outputs.chainlink_ref }}
+        run: |
+          GIT_AUTH_TOKEN_FILE=$(mktemp)
+          echo "$GITHUB_TOKEN" > "$GIT_AUTH_TOKEN_FILE"
+          # The e2e supplies confidential-http and confidential-workflows as local
+          # capability binaries, so strip them from the private plugin manifest
+          # before building. Otherwise the image build pulls an unrelated pinned CC
+          # version and can fail on version conflicts. CL_INSTALL_PRIVATE_PLUGINS=true
+          # (the default) bakes in the remaining CRE plugins (cron, consensus,
+          # http_action, http_trigger) the workflow nodes launch.
+          if [ -f plugins/plugins.private.yaml ]; then
+            awk '/^  (confidential-http|confidential-workflows):/{skip=1;next} skip&&(/^  [^ ]/||/^[^ ]/){skip=0} !skip{print}' plugins/plugins.private.yaml > plugins/plugins.private.yaml.tmp
+            mv plugins/plugins.private.yaml.tmp plugins/plugins.private.yaml
+          fi
+          docker build \
+            --secret id=GIT_AUTH_TOKEN,src="$GIT_AUTH_TOKEN_FILE" \
+            --build-arg CL_INSTALL_PRIVATE_PLUGINS=true \
+            --build-arg CL_IS_PROD_BUILD=false \
+            -f core/chainlink.Dockerfile \
+            -t "${IMAGE_REF}" .
+          rm -f "$GIT_AUTH_TOKEN_FILE"
+          docker push "${IMAGE_REF}"
+
+      # ---- job-distributor ----
+      - name: Checkout job-distributor
+        if: steps.cache.outputs.jd_hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: smartcontractkit/job-distributor
+          ref: v${{ env.JD_VERSION }}
+          token: ${{ steps.setup-github-token.outputs.access-token }}
+          path: job-distributor
+      - name: Build and push job-distributor image
+        if: steps.cache.outputs.jd_hit != 'true'
+        working-directory: job-distributor
+        env:
+          IMAGE_REF: ${{ steps.cache.outputs.jd_ref }}
+        run: |
+          docker build -f e2e/Dockerfile.e2e -t "${IMAGE_REF}" .
+          docker push "${IMAGE_REF}"
+
+      # ---- atlas: chip-ingress + chip-config (share one checkout) ----
+      - name: Checkout atlas
+        if: steps.cache.outputs.chip_ingress_hit != 'true' || steps.cache.outputs.chip_config_hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: smartcontractkit/atlas
+          ref: ${{ env.ATLAS_SHA }}
+          token: ${{ steps.setup-github-token.outputs.access-token }}
+          path: atlas
+      - name: Build and push chip-ingress image
+        if: steps.cache.outputs.chip_ingress_hit != 'true'
+        working-directory: atlas
+        env:
+          IMAGE_REF: ${{ steps.cache.outputs.chip_ingress_ref }}
+        run: |
+          pushd chip-ingress && go mod vendor && popd
+          docker build -f chip-ingress/Dockerfile -t "${IMAGE_REF}" chip-ingress
+          docker push "${IMAGE_REF}"
+      - name: Build and push chip-config image
+        if: steps.cache.outputs.chip_config_hit != 'true'
+        working-directory: atlas
+        env:
+          IMAGE_REF: ${{ steps.cache.outputs.chip_config_ref }}
+        run: |
+          pushd chip-config && go mod vendor && popd
+          docker build -f chip-config/Dockerfile -t "${IMAGE_REF}" chip-config
+          docker push "${IMAGE_REF}"
+
+      # ---- chainlink-testing-framework: chip-router ----
+      - name: Checkout chainlink-testing-framework
+        if: steps.cache.outputs.chip_router_hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: smartcontractkit/chainlink-testing-framework
+          ref: ${{ env.CTF_SHA }}
+          token: ${{ steps.setup-github-token.outputs.access-token }}
+          path: chainlink-testing-framework
+      - name: Build and push chip-router image
+        if: steps.cache.outputs.chip_router_hit != 'true'
+        working-directory: chainlink-testing-framework
+        env:
+          IMAGE_REF: ${{ steps.cache.outputs.chip_router_ref }}
+        run: |
+          docker build -f framework/components/chiprouter/Dockerfile -t "${IMAGE_REF}" framework/components/chiprouter
+          docker push "${IMAGE_REF}"
+
+  test:
+    name: ${{ matrix.name }}
+    # Real-enclave variants (the nightly run and the backwards-compatibility
+    # variant) require the self-hosted Nitro instance; fake-enclave variants run
+    # on regular GitHub-hosted runners.
+    runs-on: ${{ matrix.real && fromJSON('["self-hosted", "Linux", "X64"]') || fromJSON(format('["runs-on={0}", "cpu=16+32", "ram=8+64", "family=c7i+c7a+c6i", "volume=200gb"]', github.run_id)) }}
+    if: ${{ needs.setup.outputs.run-suite == 'true' }}
+    needs: [setup, build, prebuild-images]
+    timeout-minutes: 120
+    permissions:
+      id-token: write
+      # write (not read) so the legacy-enclaves leg's mutex action can push the
+      # lock ref to its branch; only that leg uses it.
+      contents: write
+      actions: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      # Monitor only the hosted (fake) variants; the self-hosted Nitro runner
+      # isn't a metered runner and octometrics has nothing useful to report there.
+      - name: Monitor runner metrics
+        if: ${{ !matrix.real }}
+        uses: kalverra/octometrics-action@34b3cdaea1a1bd2d42be0e4fd2b6f0e5c3e87392 # v0.1.2
+        with:
+          job_name: ${{ matrix.name }}
+          version: 'latest'
+          skip_comment: 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Free disk space
+        if: false
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift 2>/dev/null || true
+          sudo docker image prune -af 2>/dev/null || true
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          path: confidential-compute
+
+      - name: Ensure no Docker containers are running
+        run: |
+          echo "Cleaning up all Docker containers..."
+          # Stop all running containers
+          docker ps -q | xargs -r docker stop || true
+          # Remove all containers
+          docker ps -a -q | xargs -r docker rm || true
+          echo "Docker cleanup completed."
+
+      # The persistent self-hosted daemon never evicted BuildKit cache, which
+      # eventually filled the root disk. Set a hard GC ceiling so cache can't grow
+      # unbounded within a run (the end-of-run prune handles cross-run buildup).
+      # Idempotent: only rewrites config + restarts Docker when the setting is
+      # missing, so steady-state runs are untouched. Done before any long-lived
+      # container starts so the restart is non-disruptive.
+      - name: Cap Docker build cache (BuildKit GC ceiling)
+        if: matrix.real
+        run: |
+          sudo mkdir -p /etc/docker
+          current='{}'
+          [ -s /etc/docker/daemon.json ] && current=$(sudo cat /etc/docker/daemon.json)
+          normalized=$(echo "$current" | jq -S .)
+          desired=$(echo "$current" | jq -S '.builder.gc.enabled = true | .builder.gc.defaultKeepStorage = "20GB"')
+          if [ "$desired" != "$normalized" ]; then
+            echo "$desired" | sudo tee /etc/docker/daemon.json
+            sudo systemctl restart docker
+            sudo timeout 60 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+            echo "BuildKit GC ceiling applied."
+          else
+            echo "BuildKit GC ceiling already configured."
+          fi
+
+      - name: Log in to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Checkout chainlink repository
+        uses: actions/checkout@v4
+        with:
+          repository: smartcontractkit/chainlink
+          ref: ${{ env.CHAINLINK_COMMIT_SHA }}
+          path: chainlink
+
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh &> /dev/null; then
+            echo "GitHub CLI not found, installing..."
+            if command -v dnf &> /dev/null; then
+              curl -fsSL https://cli.github.com/packages/rpm/gh-cli.repo | sudo tee /etc/yum.repos.d/github-cli.repo
+              sudo dnf install -y gh
+            else
+              sudo apt-get update && sudo apt-get install -y gh
+            fi
+          else
+            echo "GitHub CLI already installed: $(gh --version)"
+          fi
+
+      - name: Clean up global Git config
+        run: |
+          # List and remove any existing insteadOf configurations for github.com
+          git config --global --get-regexp 'url\..*\.insteadof' | grep 'github.com' | cut -d' ' -f1 | sed 's/\.insteadof$//' | xargs -I {} git config --global --unset-all {}.insteadOf || true
+          # Clean up any empty url sections
+          git config --global --remove-section url 2>/dev/null || true
+          echo "Cleaned up global Git configuration"
+
+      - name: Setup GitHub Token
+        id: setup-github-token
+        uses: smartcontractkit/.github/actions/setup-github-token@ef78fa97bf3c77de6563db1175422703e9e6674f # setup-github-token@0.2.1
+        with:
+          aws-role-arn: ${{ secrets.AWS_OIDC_GLOBAL_READ_ONLY_TOKEN_ISSUER_ROLE_ARN }}
+          aws-lambda-url: ${{ secrets.AWS_INFRA_RELENG_TOKEN_ISSUER_LAMBDA_URL }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          aws-role-duration-seconds: "1800"
+          set-git-config: true
+
+      - name: Configure Git for private modules
+        env:
+          GITHUB_TOKEN: ${{ steps.setup-github-token.outputs.access-token }}
+        run: |
+          git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GOPRIVATE=github.com/smartcontractkit/*" >> $GITHUB_ENV
+          echo "GOPROXY=https://proxy.golang.org,direct" >> $GITHUB_ENV
+          echo "GOSUMDB=sum.golang.org" >> $GITHUB_ENV
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.4'
+          cache: false
+
+      # Only cache on the ephemeral hosted (fake-enclave) runners. The self-hosted
+      # Nitro runner (real variants) persists GOMODCACHE/GOCACHE on disk across
+      # runs, so actions/cache is redundant there. Shares the build job's key so
+      # PRs restore the main-warmed cache; restore-keys gives a partial restore
+      # when go.sum changes.
+      - name: Cache Go modules and build
+        if: ${{ !matrix.real }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-cache-${{ runner.os }}-${{ hashFiles('confidential-compute/**/go.sum') }}
+          restore-keys: |
+            go-cache-${{ runner.os }}-
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        run: |
+          if ! command -v pnpm &> /dev/null; then
+            echo "Installing pnpm..."
+            npm install -g pnpm
+            echo "pnpm installed: $(pnpm --version)"
+          else
+            echo "pnpm already installed: $(pnpm --version)"
+          fi
+
+      # The CRE environment setup (RunSetup -> checkBun) provisions Bun. When Bun
+      # is already on PATH, checkBun short-circuits and never shells out to brew;
+      # install it directly here to avoid the flaky `brew tap oven-sh/bun` path,
+      # which intermittently dies with "Error: Broken pipe" in CI.
+      - name: Install Bun
+        run: |
+          if ! command -v bun &> /dev/null; then
+            echo "Bun not found, installing..."
+            curl -fsSL https://bun.sh/install | bash
+            echo "$HOME/.bun/bin" >> $GITHUB_PATH
+            echo "Bun installed: $("$HOME/.bun/bin/bun" --version)"
+          else
+            echo "Bun already installed: $(bun --version)"
+          fi
+
+      - name: Install lsof
+        if: ${{ !matrix.legacy-enclaves }}
+        run: |
+          if ! command -v lsof &> /dev/null; then
+            echo "lsof not found, installing..."
+            if command -v dnf &> /dev/null; then
+              sudo dnf install -y lsof
+            else
+              sudo apt-get update && sudo apt-get install -y lsof
+            fi
+          else
+            echo "lsof already installed: $(lsof -v 2>&1 | head -1)"
+          fi
+
+      - name: Cache wasi-sdk
+        if: ${{ !matrix.legacy-enclaves }}
+        id: wasi-sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/wasi-sdk
+          key: linux-wasi-sdk-27
+
+      - name: Install wasi-sdk
+        if: ${{ !matrix.legacy-enclaves && steps.wasi-sdk-cache.outputs.cache-hit != 'true' }}
+        run: |
+          curl -L https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-27/wasi-sdk-27.0-x86_64-linux.tar.gz | tar -xz
+          sudo rm -rf /opt/wasi-sdk
+          sudo mv wasi-sdk-27.0-x86_64-linux /opt/wasi-sdk
+      - name: Set WASI_CLANG environment variable
+        if: ${{ !matrix.legacy-enclaves }}
+        run: echo "WASI_CLANG=/opt/wasi-sdk/bin/clang" >> $GITHUB_ENV
+
+      - name: Install Nitro CLI
+        # Real-enclave variants run on the self-hosted Nitro instance and need
+        # nitro-cli; fake-enclave runs don't.
+        if: ${{ matrix.real }}
+        run: |
+          sudo dnf update -y
+          sudo dnf install -y aws-nitro-enclaves-cli
+          # Provision huge pages before allocator start (drop_caches + compact_memory
+          # works around fragmentation on long-uptime self-hosted runners).
+          echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+          echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
+          sleep 1
+          sudo sysctl -w vm.nr_hugepages=1024
+          # Flush stale ENCLAVE iptables rules accumulated by past nitro-cli runs.
+          # nitro-enclaves-allocator appends one of each per enclave start and never
+          # removes them, slowing every packet through docker bridge over time.
+          while sudo iptables -t nat -D POSTROUTING -s 100.64.0.0/24 -o ens5 -j MASQUERADE -m comment --comment "ENCLAVE: NAT masquerade" 2>/dev/null; do :; done
+          while sudo iptables -D FORWARD -j ENCLAVE_FORWARD -m comment --comment "ENCLAVE: main chain" 2>/dev/null; do :; done
+          sudo systemctl start nitro-enclaves-allocator
+          sudo systemctl enable nitro-enclaves-allocator
+          echo "PATH=/usr/bin:/usr/local/bin:$PATH" >> $GITHUB_ENV
+
+      - name: Fetch legacy enclave PCR measurements
+        if: ${{ matrix.legacy-enclaves }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Fetching PCR measurements for legacy enclave release ${{ env.LEGACY_ENCLAVE_RELEASE }}..."
+
+          # Get the release notes to find the workflow run URL
+          RELEASE_BODY=$(gh release view "${{ env.LEGACY_ENCLAVE_RELEASE }}" --repo "${{ github.repository }}" --json body --jq '.body')
+          echo "Release body: $RELEASE_BODY"
+
+          # Extract the workflow run ID from the release notes URL
+          RUN_ID=$(echo "$RELEASE_BODY" | grep -oP 'actions/runs/\K[0-9]+' || true)
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::Could not find workflow run ID in release notes for ${{ env.LEGACY_ENCLAVE_RELEASE }}"
+            exit 1
+          fi
+          echo "Found workflow run ID: $RUN_ID"
+
+          # Get the build-enclave-and-plugin job ID. The build is now a matrix
+          # across enclave apps, so match the confidential-http job (which builds
+          # the enclave the CI test connects to). Fall back to the pre-matrix
+          # single-job name for older releases.
+          JOB_ID=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}/jobs" \
+            --jq '.jobs[] | select(.name == "build-enclave-and-plugin" or (.name | startswith("build-enclave-and-plugin (confidential-http"))) | .id' | head -1)
+          echo "Found job ID: $JOB_ID"
+
+          # Download job logs and parse PCR measurements
+          JOB_LOG=$(gh api "repos/${{ github.repository }}/actions/jobs/${JOB_ID}/logs" 2>/dev/null || true)
+
+          # The build logs two measurement blocks: the secure image (printed
+          # first) and the insecure (ALLOW_RECONFIG) image whose PCRs differ.
+          # The deployed CI enclaves run the insecure EIF, so parse the block
+          # logged after the insecure image build, not the secure one.
+          INSECURE_LOG=$(echo "$JOB_LOG" | sed -n '/nitro-enclave-insecure:latest/,$p')
+
+          PCR0=$(echo "$INSECURE_LOG" | grep -oP '"PCR0"\s*:\s*"\K[0-9a-f]+' | head -1 || true)
+          PCR1=$(echo "$INSECURE_LOG" | grep -oP '"PCR1"\s*:\s*"\K[0-9a-f]+' | head -1 || true)
+          PCR2=$(echo "$INSECURE_LOG" | grep -oP '"PCR2"\s*:\s*"\K[0-9a-f]+' | head -1 || true)
+
+          if [ -z "$PCR0" ] || [ -z "$PCR1" ] || [ -z "$PCR2" ]; then
+            echo "::error::Could not parse PCR measurements from job $JOB_ID logs"
+            exit 1
+          fi
+
+          # Write pcr_measurements.json matching the format produced by nitro-cli
+          cat > "${{ github.workspace }}/confidential-compute/pcr_measurements.json" << PCREOF
+          {
+            "Measurements": {
+              "HashAlgorithm": "Sha384 { ... }",
+              "PCR0": "${PCR0}",
+              "PCR1": "${PCR1}",
+              "PCR2": "${PCR2}"
+            }
+          }
+          PCREOF
+
+          echo "PCR measurements:"
+          cat "${{ github.workspace }}/confidential-compute/pcr_measurements.json"
+
+      - name: Configure Docker DNS for Tailscale enclaves
+        if: ${{ matrix.legacy-enclaves }}
+        run: |
+          # The DON node containers created during the test must resolve the
+          # *.ts.net enclave hostnames via Tailscale MagicDNS. The CRE framework
+          # puts them on a custom Docker network, where they use Docker's
+          # embedded resolver (127.0.0.11), which forwards external queries to
+          # the daemon's configured DNS — not any host resolv.conf (on this
+          # systemd-resolved host Docker only sees the cloud uplink, never the
+          # tailnet split-DNS resolver). Point the daemon at MagicDNS so every
+          # container inherits it. Done before any long-lived container
+          # (postgres, nodes) starts so the required daemon restart is
+          # non-disruptive. MagicDNS need not be reachable yet — Tailscale
+          # connects later and the setting is only used at container creation.
+          sudo mkdir -p /etc/docker
+          existing='{}'
+          [ -s /etc/docker/daemon.json ] && existing=$(sudo cat /etc/docker/daemon.json)
+          echo "$existing" | jq '. + {dns: ["100.100.100.100", "8.8.8.8"]}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          sudo timeout 60 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+
+      - name: Setup Postgres
+        uses: ./confidential-compute/.github/actions/setup-postgres
+
+      - name: Install PostgreSQL client
+        run: |
+          if command -v dnf &> /dev/null; then
+            sudo dnf update -y
+            sudo dnf install -y postgresql15
+          else
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          fi
+      - name: Set Database URL
+        run: |
+          echo "CL_DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@localhost:5432/chainlink_test?sslmode=disable" >> $GITHUB_ENV
+      - name: Setup DB
+        run: make testdb
+        working-directory: chainlink
+        env:
+          CL_DATABASE_URL: ${{ env.CL_DATABASE_URL }}
+
+      # Note: the confidential-http and confidential-workflows plugins are
+      # stripped from plugins.private.yaml in the prebuild-images job (where the
+      # chainlink image is actually built), not here — the test job's chainlink
+      # checkout is only used for make testdb and the chiprouter relative-path
+      # resolution.
+
+      - name: Pull cached Docker images from GHCR
+        env:
+          CL_REF: ${{ needs.prebuild-images.outputs.chainlink_ref }}
+          JD_REF: ${{ needs.prebuild-images.outputs.jd_ref }}
+          CI_REF: ${{ needs.prebuild-images.outputs.chip_ingress_ref }}
+          CC_REF: ${{ needs.prebuild-images.outputs.chip_config_ref }}
+          CR_REF: ${{ needs.prebuild-images.outputs.chip_router_ref }}
+        run: |
+          # Built/cached once by the prebuild-images job. Pull each and apply the
+          # local tags the CRE/CTF harness expects.
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker pull "${CL_REF}"
+          docker tag  "${CL_REF}" "chainlink:${CHAINLINK_COMMIT_SHA}"
+          docker tag  "${CL_REF}" chainlink:latest
+          docker pull "${JD_REF}"
+          docker tag  "${JD_REF}" "job-distributor:${JD_VERSION}"
+          docker pull "${CI_REF}"
+          docker tag  "${CI_REF}" chip-ingress:local-cre
+          docker pull "${CC_REF}"
+          docker tag  "${CC_REF}" chip-config:local-cre
+          docker pull "${CR_REF}"
+          docker tag  "${CR_REF}" local-cre-chip-router:v1.0.1
+          echo "Cached images pulled and retagged for local use."
+
+      - name: Build legacy capability binaries
+        if: matrix.legacy
+        working-directory: confidential-compute
+        env:
+          GITHUB_TOKEN: ${{ steps.setup-github-token.outputs.access-token }}
+        run: |
+          echo "Building legacy capability binaries from commit ${{ env.LEGACY_COMMIT_SHA }}..."
+
+          # Save current commit hash (works in detached HEAD state)
+          CURRENT_COMMIT=$(git rev-parse HEAD)
+          echo "Current commit: $CURRENT_COMMIT"
+          echo "Current state: $(git rev-parse --abbrev-ref HEAD)"
+
+          # Fetch the specific legacy commit (shallow clone won't have it)
+          git fetch origin ${{ env.LEGACY_COMMIT_SHA }}
+
+          # Checkout legacy commit
+          git checkout ${{ env.LEGACY_COMMIT_SHA }}
+
+          # Build legacy binaries
+          mkdir -p tests/e2e/binaries/legacy
+
+          # Build confidential-http legacy binary
+          echo "Building confidential-http legacy binary..."
+          cd enclave/apps/confidential-http/capability/cmd/confidential-http
+          go mod tidy
+          GOOS=linux GOARCH=amd64 go build -gcflags "all=-N -l" -o ../../../../../../tests/e2e/binaries/legacy/confidential-http
+          cd -
+
+          # Restore original commit
+          git checkout "$CURRENT_COMMIT"
+          echo "Restored to commit: $(git rev-parse HEAD)"
+
+          echo "Legacy binaries built successfully:"
+          ls -lh tests/e2e/binaries/legacy/
+
+      - name: Set PRIOR_VERSION_BINARY_PATHS
+        if: matrix.legacy
+        run: |
+          echo "PRIOR_VERSION_BINARY_PATHS=confidential-http:${{ github.workspace }}/confidential-compute/tests/e2e/binaries/legacy/confidential-http" >> $GITHUB_ENV
+
+      - name: Symlink chainlink core for chiprouter relative path
+        run: |
+          # chainlink/system-tests/lib/cre/chiprouter (added in chainlink #21820 +
+          # #22189 wiring) hardcodes relativePathToRepoRoot = "../../../../" and
+          # filepath.Abs-resolves it against cwd. Upstream tests run 4 dirs deep in
+          # chainlink/system-tests/tests/<suite>/<sub>/ so it lands on the repo
+          # root. CC tests live 2 dirs deep in confidential-compute/tests/e2e/, so
+          # 4 .. lands one level above the workspace. Symlink core there so the
+          # lookup of "core/scripts/cre/environment/state/local_cre.toml" resolves.
+          ln -sfn "${{ github.workspace }}/chainlink/core" "$(dirname "${{ github.workspace }}")/core"
+          ls -la "$(dirname "${{ github.workspace }}")/core" | head -2
+
+      - name: Test Go modules
+        if: ${{ !matrix.legacy-enclaves }}
+        working-directory: confidential-compute
+        env:
+          GITHUB_TOKEN: ${{ steps.setup-github-token.outputs.access-token }}
+          CTF_CONFIGS: configs/workflow-don.toml
+          CTF_JD_IMAGE: job-distributor:0.22.1
+          CTF_CHAINLINK_IMAGE: chainlink:${{ env.CHAINLINK_COMMIT_SHA }}
+        run: |
+          echo "Re-configuring git for this step..."
+          git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+          echo "Cleaning up any previous test state..."
+          rm -f chainlink/core/scripts/cre/environment/state/local_cre.toml
+          rm -f chainlink/core/scripts/cre/environment/state/env_artifact.json
+          # Clean up JD database volume if it exists
+          docker volume rm job-distributor-db-volume || true
+
+          # Scheduled/release runs (and the backwards-compat variant) exercise REAL
+          # enclaves and only run the ./tests module (integration + tests/e2e).
+          if [ "${{ matrix.real }}" = "true" ]; then
+            echo "Real-enclave run: testing the ./tests module against Nitro enclaves"
+            # Leave ENCLAVE_TYPE unset so the harness provisions real Nitro enclaves.
+            # Skip the confidential-echo reference app: it's a local-dev example
+            # not run in CI (building it as a real enclave would only add time).
+            cd tests
+            GOMAXPROCS=2 go test -v ./... -skip '^TestConfidentialEchoEnclave$' -timeout 90m -p 1
+            exit 0
+          fi
+
+          # Fake-enclave runs are split into parallel portions (see the test
+          # matrix in the setup job). Drive tests.UseFakeEnclave() so local fake
+          # enclaves are provisioned.
+          export ENCLAVE_TYPE=FAKE
+          case "${{ matrix.portion }}" in
+            e2e-http)
+              echo "Fake-enclave run: confidential-HTTP e2e (matches make e2e-local-conf-http)"
+              cd tests/e2e
+              CTF_CONFIGS=configs/workflow-don.toml \
+                GOMAXPROCS=2 go test -v ./... -run '^TestConfidentialHTTPE2E$' -timeout 90m -p 1
+              ;;
+            e2e-workflows)
+              echo "Fake-enclave run: workflow-engine e2e (matches make e2e-local-conf-workflows)"
+              cd tests/e2e
+              CTF_CONFIGS=configs/workflow-don-engine.toml \
+                GOMAXPROCS=2 go test -v ./... -run '^TestConfidentialWorkflowsEngineE2E$' -timeout 90m -p 1
+              ;;
+            unit|*)
+              echo "Fake-enclave run: unit tests across all modules, plus the tests/ root integration suite (tests/e2e excluded)"
+              # The two tests/e2e suites run in their own portions above. The
+              # ./tests module is handled explicitly after the generic loop so we
+              # run only its root package (enclave_test.go) against fake enclaves,
+              # not the heavy e2e suites. (The confidential-echo reference app is a
+              # local-dev example and is not run in CI.)
+              MODULES=""
+              while read -r gomod; do
+                dir=$(dirname "$gomod")
+                # Skip workflow modules (WASM-only, no tests)
+                if [[ "$dir" == ./capabilities/workflows ]]; then
+                  echo "Skipping workflows parent module (no main package)"
+                  continue
+                fi
+                if [[ "$dir" =~ ^./capabilities/workflows/.+ ]]; then
+                  echo "Skipping workflow module in $dir (WASM-only)"
+                  continue
+                fi
+                if [[ "$dir" == */testdata || "$dir" == */testdata/* ]]; then
+                  echo "Skipping testdata fixture module in $dir (WASM-only, no tests)"
+                  continue
+                fi
+                if [[ "$dir" == ./tests ]]; then
+                  # Run explicitly below (root package only, excluding tests/e2e).
+                  continue
+                fi
+                MODULES="$MODULES $dir"
+              done < <(find . -name "go.mod" -type f)
+
+              for dir in $MODULES; do
+                echo "Testing module in $dir"
+                cd "$dir"
+                GOMAXPROCS=2 go test -v ./... -timeout 30m -p 1
+                cd - > /dev/null
+              done
+
+              # tests/ root integration suite against fake enclaves. Use `.` (not
+              # ./...) so only enclave_test.go runs and the tests/e2e suites are
+              # left to their dedicated portions.
+              echo "Testing tests/ root integration suite (fake enclaves, excluding tests/e2e)"
+              cd tests
+              GOMAXPROCS=2 go test -v . -skip '^TestConfidentialEchoEnclave$' -timeout 30m -p 1
+              cd - > /dev/null
+              ;;
+          esac
+
+      - name: Clean stale Tailscale download cache
+        if: ${{ matrix.legacy-enclaves }}
+        run: rm -f ~/.cache/tailscale.tgz
+
+      - name: Connect to Tailscale
+        if: ${{ matrix.legacy-enclaves }}
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID_RUN_STAGING_CI }}
+          audience: ${{ secrets.TS_AUDIENCE_RUN_STAGING_CI }}
+          tags: tag:confidential-compute-gha
+          args: --accept-dns=true
+
+      - name: Debug Tailscale connectivity
+        if: ${{ matrix.legacy-enclaves }}
+        run: |
+          echo "=== Tailscale status ==="
+          tailscale status
+          echo ""
+          echo "=== Tailscale DNS config ==="
+          tailscale debug prefs | grep -i dns || true
+          echo ""
+          echo "=== Resolving ci-enclave-1 ==="
+          tailscale ip ci-enclave-1 || true
+          echo ""
+          echo "=== /etc/resolv.conf ==="
+          cat /etc/resolv.conf
+
+      - name: Verify containers resolve enclave hostnames
+        if: ${{ matrix.legacy-enclaves }}
+        run: |
+          # Tailscale is now connected, so MagicDNS (configured as the Docker
+          # daemon's DNS earlier) is reachable. Confirm a fresh container
+          # resolves an enclave hostname before the test creates the DON nodes.
+          echo "Verifying a fresh container resolves the enclave hostname via MagicDNS..."
+          docker run --rm alpine nslookup ci-enclave-1.tailf8f749.ts.net
+
+      - name: Set remote enclave URLs
+        if: ${{ matrix.legacy-enclaves }}
+        run: |
+          echo "REMOTE_ENCLAVE_URLS=${{ vars.LEGACY_REMOTE_ENCLAVE_URLS }}" >> $GITHUB_ENV
+
+      # The legacy/live enclaves are a single shared resource reached over
+      # Tailscale, so two CI runs reconfiguring them at once corrupt each other's
+      # signer set. Acquire a cross-run mutex before the first enclave mutation.
+      - name: Acquire live-enclave lock
+        if: ${{ matrix.legacy-enclaves }}
+        uses: ben-z/gh-action-mutex@1ebad517141198e08d47cf72f3c0975316620a65 # v1.0.0-alpha.10
+        with:
+          branch: ci-live-enclave-lock
+
+      - name: Verify enclave connectivity
+        if: ${{ matrix.legacy-enclaves }}
+        run: |
+          # Legacy enclaves return 503 on /publicKeys until a config is set, so
+          # prime each one with a minimal non-zero config first. The e2e test
+          # re-POSTs the real signer config later (reconfig is allowed). Then
+          # confirm /publicKeys serves keys.
+          config_json='{"signers":[],"masterPublicKey":null,"t":1,"f":0}'
+          body="{\"config\":\"$(printf '%s' "$config_json" | base64 | tr -d '\n')\"}"
+
+          IFS=',' read -ra URLS <<< "$REMOTE_ENCLAVE_URLS"
+          for url in "${URLS[@]}"; do
+            echo "Priming $url/config with seed config..."
+            primed=false
+            for i in $(seq 1 30); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+                -X POST -H 'Content-Type: application/json' --data "$body" "$url/config" || true)
+              # 200 = config accepted, 409 = already configured; either means the enclave is ready.
+              if [ "$code" = "200" ] || [ "$code" = "409" ]; then
+                echo "  seeded (HTTP $code)"; primed=true; break
+              fi
+              echo "  attempt $i: HTTP ${code:-no-response}, retrying..."
+              sleep 2
+            done
+            if [ "$primed" != true ]; then
+              echo "failed to seed $url after retries" >&2; exit 1
+            fi
+
+            echo "Testing connectivity to $url/publicKeys..."
+            curl -f --retry 3 --retry-delay 5 --max-time 10 "$url/publicKeys"
+            echo ""
+          done
+
+      - name: Test against legacy enclaves
+        if: ${{ matrix.legacy-enclaves }}
+        working-directory: confidential-compute
+        env:
+          CI: true
+          GITHUB_TOKEN: ${{ steps.setup-github-token.outputs.access-token }}
+          CTF_CONFIGS: configs/workflow-don.toml
+          CTF_JD_IMAGE: job-distributor:0.22.1
+          CTF_CHAINLINK_IMAGE: chainlink:${{ env.CHAINLINK_COMMIT_SHA }}
+          PCR_MEASUREMENTS_FILE: ${{ github.workspace }}/confidential-compute/pcr_measurements.json
+        run: |
+          git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+          cd tests/e2e
+          GOMAXPROCS=2 go test -v -tags=e2e ./... -timeout 30m -p 1
+
+      - name: Collect e2e diagnostics
+        if: always()
+        working-directory: confidential-compute
+        run: |
+          set +e
+          DIAG_DIR="tests/e2e/logs/diagnostics"
+          mkdir -p "$DIAG_DIR/docker-logs" "$DIAG_DIR/workflow-dirs"
+
+          {
+            echo "date=$(date -Is)"
+            echo "matrix_name=${{ matrix.name }}"
+            echo "runner=$(hostname)"
+            echo "pwd=$(pwd)"
+          } > "$DIAG_DIR/summary.txt"
+
+          ss -ltnp > "$DIAG_DIR/ss-ltnp.txt" 2>&1 || true
+          ip addr show > "$DIAG_DIR/ip-addr.txt" 2>&1 || true
+          ip route show > "$DIAG_DIR/ip-route.txt" 2>&1 || true
+          sudo -n iptables -S > "$DIAG_DIR/iptables-filter.txt" 2>&1 || true
+          sudo -n iptables -t nat -S > "$DIAG_DIR/iptables-nat.txt" 2>&1 || true
+          docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}' > "$DIAG_DIR/docker-ps.txt" 2>&1 || true
+
+          docker ps -a --format '{{.Names}}' | grep -E '(workflow|capabilities|bootstrap|gateway|chainlink)' | while read -r container; do
+            safe_name="$(printf '%s' "$container" | tr -c 'A-Za-z0-9_.-' '_')"
+            docker logs --tail 20000 "$container" > "$DIAG_DIR/docker-logs/${safe_name}.log" 2>&1 || true
+            docker exec "$container" sh -lc 'hostname; ls -la /home/chainlink/workflows || true' > "$DIAG_DIR/workflow-dirs/${safe_name}.txt" 2>&1 || true
+            docker inspect --format 'name={{.Name}}{{"\n"}}image={{.Config.Image}}{{"\n"}}state={{json .State}}{{"\n"}}networks={{json .NetworkSettings.Networks}}' "$container" > "$DIAG_DIR/${safe_name}-inspect.txt" 2>&1 || true
+          done
+
+      - name: Upload e2e test logs (raw docker + test logger)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-logs-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: confidential-compute/tests/e2e/logs/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Cleanup Nitro Enclaves and Ports
+        if: ${{ always() && !matrix.legacy-enclaves }}
+        run: |
+          echo "Cleaning up Nitro enclaves and processes on ports..."
+          # Terminate all running enclaves (no-op when nitro-cli isn't installed)
+          command -v nitro-cli >/dev/null 2>&1 && nitro-cli describe-enclaves 2>/dev/null | jq -r '.[].EnclaveName' | xargs -I {} nitro-cli terminate-enclave --enclave-name {} 2>/dev/null || true
+          # Kill processes on common enclave ports
+          for port in 8080 8081 8082 8083; do
+            lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
+          done
+          # Kill any orphaned wireguard-go-vsock processes
+          sudo pkill -f wireguard-go-vsock 2>/dev/null || true
+          echo "Nitro enclaves and port cleanup completed."
+      # The real-enclave variants run on the persistent self-hosted Nitro box, so
+      # Docker state survives between runs. Keep only the local CRE images the
+      # harness reuses (see "Pull cached Docker images from GHCR"); drop every
+      # other image plus all build cache. The pinned images are already built, so
+      # this never forces a rebuild — and accumulated BuildKit cache from the
+      # EIF/enclave builds is what previously filled the root disk. Skipped on the
+      # fake variants since those run on ephemeral runners with discarded disks.
+      - name: Cleanup Docker (preserve pinned CRE images, prune build cache)
+        if: always() && matrix.real
+        run: |
+          KEEP_TAGS=(
+            "chainlink:latest"
+            "chainlink:${CHAINLINK_COMMIT_SHA}"
+            "job-distributor:${JD_VERSION}"
+            "chip-ingress:local-cre"
+            "chip-config:local-cre"
+            "local-cre-chip-router:v1.0.1"
+          )
+          docker ps -a -q | xargs -r docker rm -f || true
+          # Resolve pinned tags to image IDs (skip any not present). chainlink:<sha>
+          # shares an ID with chainlink:latest, so rmi on a stale alias just untags.
+          keep_ids="$(for t in "${KEEP_TAGS[@]}"; do docker image inspect -f '{{.Id}}' "$t" 2>/dev/null || true; done | sort -u)"
+          echo "Preserving image IDs:"; printf '  %s\n' ${keep_ids:-<none>}
+          comm -23 <(docker images -q --no-trunc | sort -u) <(printf '%s\n' ${keep_ids}) | xargs -r docker rmi -f || true
+          docker image prune -f || true
+          docker network prune -f || true
+          docker volume prune -f || true
+          docker builder prune -af || true
+          echo "Docker cleanup completed (pinned CRE images preserved, build cache dropped)."
+          df -h / | tail -1
+      - name: Cleanup PostgreSQL
+        if: always()
+        run: |
+          sudo systemctl stop postgresql 2>/dev/null || true
+          sudo pkill -f postgres 2>/dev/null || true
+          sudo rm -rf /var/lib/pgsql/data/* 2>/dev/null || true
+          sudo rm -rf /var/lib/postgresql/* 2>/dev/null || true
+          sudo rm -rf /tmp/postgresql* 2>/dev/null || true
+          echo "PostgreSQL cleanup completed."
+
+  ensure-passing-tests:
+    name: Ensure passing tests
+    runs-on:
+      - runs-on=${{ github.run_id }}
+      - cpu=4+8
+      - ram=8+16
+      - family=c7i+c7a+c6i
+      - volume=40gb
+    needs: [setup, build, prebuild-images, test]
+    if: ${{ always() && needs.setup.outputs.run-suite == 'true' }}
+    permissions: {}
+    steps:
+      - name: Check results
+        run: |
+          if [[ "${{ needs.build.result }}" != "success" ]]; then
+            echo "Build failed"
+            exit 1
+          fi
+          if [[ "${{ needs.prebuild-images.result }}" != "success" ]]; then
+            echo "prebuild-images job failed"
+            exit 1
+          fi
+          results=("${{ needs.test.result }}")
+          for result in "${results[@]}"; do
+            if [[ "$result" != "success" ]]; then
+              echo "Test job failed with result: $result"
+              exit 1
+            fi
+          done
+          echo "All jobs passed successfully"

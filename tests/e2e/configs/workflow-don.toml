@@ -1,0 +1,140 @@
+
+[[blockchains]]
+  type = "anvil"
+  chain_id = "1337"
+  container_name = "anvil-1337"
+  image = "ghcr.io/foundry-rs/foundry:v1.7.1"
+  docker_cmd_params = ["-b", "0.5", "--mixed-mining"]
+
+[[blockchains]]
+  type = "anvil"
+  chain_id = "2337"
+  port = "8546"
+  container_name = "anvil-2337"
+  image = "ghcr.io/foundry-rs/foundry:v1.7.1"
+  docker_cmd_params = ["-b", "0.5", "--mixed-mining"]
+
+[jd]
+  csa_encryption_key = "d1093c0060d50a3c89c189b2e485da5a3ce57f3dcb38ab7e2c0d5f0bb2314a44" # any random 32 byte hex string
+  image = "job-distributor:0.22.1"
+
+[chip_router]
+  image = "local-cre-chip-router:v1.0.1"
+
+[fake]
+  port = 8171
+
+[fake_http]
+  port = 8666
+
+#[s3provider]
+#  # use all defaults
+#  port = 9000
+#  console_port = 9001
+
+[infra]
+  # either "docker" or "crib"
+  type = "docker"
+
+#[infra.crib]
+#  namespace = "crib-local"
+#  folder_location = "/absolute/path/to/crib/deployments/cre"
+#  provider = "kind"  # or "aws"
+
+[[nodesets]]
+  nodes = 5
+  name = "workflow"
+  don_family = "test-don-family"
+  don_types = ["workflow"]
+  override_mode = "all"
+  http_port_range_start = 10100
+  p2p_port_range_start = 10110
+
+  env_vars = { CL_EVM_CMD = "", OTEL_SERVICE_NAME = "chainlink-node", OTEL_TRACES_EXPORTER = "none", OTEL_LOGS_EXPORTER = "none", OTEL_METRICS_EXPORTER = "none" }
+  supported_evm_chains = [1337, 2337]
+  capabilities = ["vault", "confidential-http", "cron", "http-action", "http-trigger", "consensus", "don-time"]
+  registry_based_launch_allowlist = ["cron-trigger@1.0.0"]
+
+  [nodesets.db]
+    image = "postgres:12.0"
+    port = 13000
+
+[[nodesets.node_specs]]
+    roles = ["plugin"]
+    [nodesets.node_specs.node]
+      #docker_ctx = "../../../chainlink"
+      #docker_file = "core/chainlink.Dockerfile"
+      #image = "chainlink-tmp:latest"
+      capabilities = ["./binaries/confidential-http"]
+      user_config_overrides = """
+      [Log]
+      Level = 'warn'
+      JSONConsole = true
+
+      [Telemetry]
+      Enabled = false
+      LogStreamingEnabled = false
+
+      [Tracing]
+      Enabled = false
+
+      [P2P]
+      EnableExperimentalRageP2P = true
+
+      [CRE]
+      EnableDKGRecipient = true
+
+      # Remove this bit to allow downloading workflows from remote sources
+      [CRE.WorkflowFetcher]
+      URL = "file:///home/chainlink/workflows"
+      """
+
+
+[[nodesets]]
+  nodes = 1
+  name = "bootstrap-gateway"
+  don_family = "test-don-family"
+  don_types = ["bootstrap", "gateway"]
+  override_mode = "each"
+  http_port_range_start = 10300
+  p2p_port_range_start = 10310
+
+  env_vars = { CL_EVM_CMD = "", OTEL_SERVICE_NAME = "chainlink-node", OTEL_TRACES_EXPORTER = "none", OTEL_LOGS_EXPORTER = "none", OTEL_METRICS_EXPORTER = "none", CL_CRE_SETTINGS_DEFAULT = '{"PerWorkflow":{"HTTPTrigger":{"RateLimit":"100rps:100"}}}' }
+  supported_evm_chains = [1337, 2337]
+
+  [nodesets.db]
+    image = "postgres:12.0"
+    port = 13200
+
+  [[nodesets.node_specs]]
+    roles = ["bootstrap", "gateway"]
+    [nodesets.node_specs.node]
+      #docker_ctx = "../../../chainlink"
+      #docker_file = "core/chainlink.Dockerfile"
+      #image = "chainlink-tmp:latest"
+      # 5002 is the web API capabilities port for incoming requests
+      # 15002 is the vault port for incoming requests
+      custom_ports = ["5002:5002","15002:15002"]
+      # image = "chainlink-tmp:latest"
+      user_config_overrides = """
+      [Log]
+      Level = 'warn'
+      JSONConsole = true
+
+      [Telemetry]
+      Enabled = false
+      LogStreamingEnabled = false
+
+      [Tracing]
+      Enabled = false
+
+      [P2P]
+      EnableExperimentalRageP2P = true
+
+      [CRE]
+      EnableDKGRecipient = true
+
+      # Remove this bit to allow downloading workflows from remote sources
+      [CRE.WorkflowFetcher]
+      URL = "file:///home/chainlink/workflows"
+      """

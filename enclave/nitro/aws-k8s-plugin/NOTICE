@@ -1,0 +1,6 @@
+This product includes software developed by Amazon.com, Inc. or its affiliates:
+
+Files in enclave/nitro/aws-k8s-plugin/ are modified from:
+https://github.com/aws/aws-nitro-enclaves-with-k8s
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+Licensed under the Apache License, Version 2.0

@@ -1,0 +1,68 @@
+openapi: 3.0.0
+info:
+  title: Compute Enclave Admin API
+  version: 1.0.0
+  description: Specification by which enclave admins can update their enclaves' current configurations.
+servers:
+  - url: / 
+paths:
+  /config:
+    post:
+      summary: Enables the operator of an enclave to update its configuration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                config:
+                  type: string
+                  format: byte
+                  description: Configuration to be applied to the enclave.
+                signature:
+                  type: string
+                  format: byte
+                  description: Signature over the configuration to provide authentication.
+              required:
+                - config
+                - signature
+      responses:
+        '200':
+          description: Configuration successfully updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  config:
+                    type: string
+                    format: byte
+                    description: New configuration of the enclave.
+                  attestation:
+                    type: string
+                    format: byte
+                    description: Attestation of the new configuration
+                required:
+                  - config
+                  - attestation
+        '400':
+          description: Bad Request (Invalid format or signature verification failure)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    description: Error message
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    description: Error message

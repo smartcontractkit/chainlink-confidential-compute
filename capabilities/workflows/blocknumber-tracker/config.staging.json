@@ -1,0 +1,11 @@
+{
+  "schedule": "0 * * * * *",
+  "url": "https:/rpc.com/example-endpoint",
+  "evms": [
+    {
+      "reserveManagerAddress": "0xd8c1F54593f8D5CBA92011335ef6AcC9E4F1c4a1",
+      "chainName": "ethereum-testnet-sepolia",
+      "gasLimit": 1000000
+    }
+  ]
+}

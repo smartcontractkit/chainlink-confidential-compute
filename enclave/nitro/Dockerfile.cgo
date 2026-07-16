@@ -1,0 +1,108 @@
+# Dockerfile.cgo -- CGO-capable builder for enclave apps that need native C
+# libraries (e.g. wasmtime-go for confidential-workflows).
+#
+# wasmtime-go bundles libwasmtime.a in its Go module, so no external install
+# is needed. We just need a glibc-based builder (not alpine) and CGO_ENABLED=1.
+#
+# Usage:
+#   docker build -f enclave/nitro/Dockerfile.cgo . -t confidential-workflows-enclave \
+#       --build-arg APP_NAME=confidential-workflows
+
+FROM golang:1.26-bookworm AS builder
+
+# Allow Go to fetch a newer toolchain when a submodule's go.mod requires it,
+# so future minor bumps in chainlink-common (or our own modules) do not need
+# another Dockerfile edit. Default in this image is GOTOOLCHAIN=local, which
+# fails fast with "go.mod requires go >= X" if the base lags the go directive.
+ENV GOTOOLCHAIN=auto
+
+ARG HOST_CID=3
+ARG ENCLAVE_CID=16
+ENV HOST_CID=$HOST_CID
+ENV ENCLAVE_CID=$ENCLAVE_CID
+
+WORKDIR /app
+
+# Copy root module.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the app's separate module and download its deps.
+ARG APP_NAME=confidential-workflows
+COPY enclave/apps/${APP_NAME}/go.mod enclave/apps/${APP_NAME}/go.sum ./enclave/apps/${APP_NAME}/
+RUN cd enclave/apps/${APP_NAME} && go mod download
+
+# Copy source files.
+COPY enclave/ ./enclave/
+COPY types/ ./types/
+COPY util/ ./util/
+
+# Build with CGO enabled. wasmtime-go links libwasmtime.a statically via #cgo directives.
+RUN cd enclave/apps/${APP_NAME} && \
+    CGO_ENABLED=1 GOOS=linux go build \
+        -o /enclave-app ./environments/nitro/
+
+FROM amazonlinux:latest
+
+ARG HOST_CID=3
+ARG ENCLAVE_CID=16
+ENV HOST_CID=$HOST_CID
+ENV ENCLAVE_CID=$ENCLAVE_CID
+
+ARG GATEWAY_URL=""
+ENV GATEWAY_URL=$GATEWAY_URL
+
+ARG STORAGE_SERVICE_URL=""
+ENV STORAGE_SERVICE_URL=$STORAGE_SERVICE_URL
+ARG STORAGE_SERVICE_TLS=""
+ENV STORAGE_SERVICE_TLS=$STORAGE_SERVICE_TLS
+
+# Enclave DNS resolver (empty falls back to the AWS VPC resolver 169.254.169.253
+# in setup-enclave-networking.sh)
+ARG DNS_RESOLVER=""
+ENV DNS_RESOLVER=$DNS_RESOLVER
+
+# Install required packages for networking and time synchronization.
+RUN dnf upgrade -y && \
+    dnf install -y \
+    hostname \
+    iputils \
+    iproute \
+    wireguard-tools \
+    bind-utils \
+    procps-ng \
+    curl-minimal \
+    ca-certificates \
+    chrony && \
+    dnf clean all
+
+# Configure chrony for AWS PTP clock synchronization.
+RUN echo "refclock PHC /dev/ptp0 poll 0 offset 0 prefer" > /etc/chrony.conf && \
+    echo "makestep 1.0 3" >> /etc/chrony.conf
+
+# Create directory structure for WireGuard keys.
+RUN mkdir -p /etc/wireguard
+
+COPY enclave/nitro/wireguard-go-vsock /usr/bin/
+COPY enclave/nitro/outbound-https/setup-enclave-networking.sh /usr/bin/
+
+RUN chmod +x /usr/bin/wireguard-go-vsock /usr/bin/setup-enclave-networking.sh
+
+COPY enclave/nitro/.wireguard/host-public-key /etc/wireguard/
+COPY enclave/nitro/.wireguard/enclave-private-key /etc/wireguard/
+
+COPY --from=builder /enclave-app /usr/bin/
+
+ARG ALLOW_RECONFIG=
+ENV ALLOW_RECONFIG=$ALLOW_RECONFIG
+
+# Create startup script that initializes chrony and then runs the enclave app.
+RUN echo '#!/bin/sh' > /start.sh && \
+    echo 'chronyd' >> /start.sh && \
+    echo 'chronyc wait syncing' >> /start.sh && \
+    echo 'ARGS=""' >> /start.sh && \
+    echo 'if [ "$ALLOW_RECONFIG" = "true" ]; then ARGS="$ARGS --allow-reconfig"; fi' >> /start.sh && \
+    echo 'exec /usr/bin/enclave-app $ARGS' >> /start.sh && \
+    chmod +x /start.sh
+
+ENTRYPOINT ["/start.sh"]

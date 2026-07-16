@@ -1,0 +1,145 @@
+name: Build Config Tracker Image
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    branches:
+      - main
+  push:
+    branches:
+      - 'release/**'
+
+jobs:
+  check-label:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      has-deploy-label: ${{ steps.check.outputs.has-label }}
+    steps:
+      - name: Check for deploy-images label
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "has-label=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'deploy-images') }}" == "true" ]]; then
+            echo "has-label=true" >> $GITHUB_OUTPUT
+          else
+            echo "has-label=false" >> $GITHUB_OUTPUT
+          fi
+
+  build-image:
+    needs: check-label
+    if: needs.check-label.outputs.has-deploy-label == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
+
+      - name: Generate docker metadata
+        id: meta
+        uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8d19755c6f78e81 # v5.5.1
+        env:
+          DOCKER_METADATA_PR_HEAD_SHA: "true"
+        with:
+          images: on-chain-config-tracker
+          tags: |
+            type=sha,prefix=on-chain-config-tracker-sha-
+            type=ref,event=tag,prefix=on-chain-config-tracker-
+
+      - name: Build Docker image
+        uses: docker/build-push-action@4a13e500e55cf31b7a5d59a38ab2040ab0f42f56 # v5.1.0
+        with:
+          context: .
+          file: enclave/config-tracker/Dockerfile
+          outputs: type=docker,dest=/tmp/tracker-image.tar
+          tags: on-chain-config-tracker:latest
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tracker-image
+          path: /tmp/tracker-image.tar
+          retention-days: 1
+
+  push-image:
+    needs: build-image
+    strategy:
+      matrix:
+        account: ["312157985241", "816722353863", "648030273096"]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          fetch-depth: 0
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tracker-image
+          path: /tmp
+
+      - name: Load Docker image
+        run: |
+          docker load --input /tmp/tracker-image.tar
+          docker image ls -a
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@be2e7ad815e27b890489a89ce2717b0f9e26b56e
+        with:
+          role-to-assume: arn:aws:iam::${{ matrix.account }}:role/custom-ga-confidential-compute-deployer
+          aws-region: us-west-2
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@d71acafb877819c463f4efa25c0be407a9913780
+        with:
+          registries: ${{ matrix.account }}
+
+      - name: Generate docker metadata
+        id: meta
+        uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8d19755c6f78e81 # v5.5.1
+        env:
+          DOCKER_METADATA_PR_HEAD_SHA: "true"
+        with:
+          images: ${{ matrix.account }}.dkr.ecr.us-west-2.amazonaws.com/containers/enclave
+          tags: |
+            type=sha,prefix=on-chain-config-tracker-sha-
+            type=ref,event=tag,prefix=on-chain-config-tracker-
+
+      - name: Tag and Push Docker image
+        run: |
+          echo "${{ steps.meta.outputs.tags }}" | while read -r tag; do
+            if [ -n "$tag" ]; then
+              echo "Tagging and pushing $tag"
+              docker tag on-chain-config-tracker:latest "$tag"
+              docker push "$tag"
+            fi
+          done
+
+      - name: Save image details
+        if: matrix.account == '312157985241'
+        shell: bash
+        run: |
+          FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)
+          echo "### Docker Image" >> $GITHUB_STEP_SUMMARY
+          echo "Pushed to: $FIRST_TAG (and other accounts)" >> $GITHUB_STEP_SUMMARY

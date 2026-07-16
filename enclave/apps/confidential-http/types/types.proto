@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+option go_package = "github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-http/types";
+
+import "types/frameworktypes/framework.proto";
+import "google/protobuf/duration.proto";
+
+package types;
+
+// HeaderValues represents multiple values for a single header key.
+message HeaderValues {
+  repeated string values = 1;
+}
+
+// Request contains the specific HTTP fields used to make an HTTP request from the enclave.
+message Request {
+  // URL is the endpoint to which the request is sent.
+  string url = 1;
+  // Method is the HTTP method used to make the request (GET, POST, PUT, DELETE, etc.).
+  string method = 2;
+  // Body is the request body - either a string template or raw bytes.
+  oneof body {
+    string body_string = 3;
+    bytes body_bytes = 8;
+  }
+  // multi_headers are the request headers as name-value pairs.
+  // Supports multiple values per header key.
+  map<string, HeaderValues> multi_headers = 4;
+  // TemplatePublicValues are the public values that will be used to fill in the request body and header templates.
+  // It is a mapping of the template variable names to their values.
+  map<string, string> template_public_values = 5;
+  // CustomRootCaCertPEM is an optional field that allows the user to specify a custom root CA certificate
+  // (in PEM Format) for the request. The enclave will use this root CA certificate to verify the external
+  // server's TLS certificate.
+  bytes custom_root_ca_cert_pem = 6;
+  // Timeout is the request timeout duration.
+  google.protobuf.Duration timeout = 7;
+  // encrypt_output controls whether the enclave response should be encrypted.
+  // If true, the response will be AES-GCM encrypted using the
+  // "san_marino_aes_gcm_encryption_key" secret.
+  // Default is false (response returned unencrypted).
+  bool encrypt_output = 9;
+}
+
+// ConfidentialHTTPRequest is the input type users provide.
+message ConfidentialHTTPRequest {
+  repeated frameworktypes.SecretIdentifier vault_don_secrets = 1;
+  Request request = 2;
+}
+
+// Response is what the user receives.
+message Response {
+  uint32 status_code = 1;
+  bytes body = 2;
+  // multi_headers are the response headers.
+  // Supports multiple values per header key.
+  map<string, HeaderValues> multi_headers = 3;
+}

@@ -1,0 +1,1480 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": 0,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "panels": [],
+      "title": "Request Overview",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "Rate of requests received vs completed (per-request, deduplicated across nodes)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "req/s",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "avg by () (sum by (node_id) (rate(confidential_http_1_0_0_alpha_requests_received_total{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])))",
+          "legendFormat": "Received",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "avg by () (sum by (node_id) (rate(confidential_http_1_0_0_alpha_requests_completed_total{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])))",
+          "legendFormat": "Completed",
+          "refId": "B"
+        }
+      ],
+      "title": "Request Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "Total requests received in the last 24 hours",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_requests_received_total{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h]))))",
+          "legendFormat": "Received (24h)",
+          "refId": "A"
+        }
+      ],
+      "title": "Request Volume (24h)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "Total requests completed in the last 24 hours",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_requests_completed_total{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h]))))",
+          "legendFormat": "Completed (24h)",
+          "refId": "A"
+        }
+      ],
+      "title": "Completed (24h)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "Ratio of completed to received requests",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "green",
+                "value": 0.95
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "avg by () (sum by (node_id) (rate(confidential_http_1_0_0_alpha_requests_completed_total{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[15m]))) / avg by () (sum by (node_id) (rate(confidential_http_1_0_0_alpha_requests_received_total{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[15m])))",
+          "legendFormat": "Success Rate",
+          "refId": "A"
+        }
+      ],
+      "title": "Success Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "Rate limit events in the last hour",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 5
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_rate_limit_exceeded{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h])))) or vector(0)",
+          "legendFormat": "Rate Limited",
+          "refId": "A"
+        }
+      ],
+      "title": "Rate Limits (1h)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "All errors combined in the last hour",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 5
+      },
+      "id": 6,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_execute_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_enclave_params_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_vault_don_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_compute_request_signature_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_attestation_validation_failed{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_enclave_attestation_creation_failed{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h])))) or vector(0)",
+          "legendFormat": "Total Errors",
+          "refId": "A"
+        }
+      ],
+      "title": "Errors Total (1h)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "Attestation validation + creation failures",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 5
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_attestation_validation_failed{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_enclave_attestation_creation_failed{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h])))) or vector(0)",
+          "legendFormat": "Attestation Failures",
+          "refId": "A"
+        }
+      ],
+      "title": "Attestation Failures (1h)",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "id": 102,
+      "panels": [],
+      "title": "Latency Breakdown",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "Average duration per processing stage: signature verification, secret shares combining, app execution",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "sum(rate(confidential_http_1_0_0_alpha_enclave_signature_verification_completed_duration_sum{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])) / sum(rate(confidential_http_1_0_0_alpha_enclave_signature_verification_completed_duration_count{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m]))",
+          "legendFormat": "Signature Verification",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "sum(rate(confidential_http_1_0_0_alpha_enclave_shares_combining_completed_duration_sum{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])) / sum(rate(confidential_http_1_0_0_alpha_enclave_shares_combining_completed_duration_count{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m]))",
+          "legendFormat": "Shares Combining",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "sum(rate(confidential_http_1_0_0_alpha_enclave_app_execution_completed_duration_sum{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])) / sum(rate(confidential_http_1_0_0_alpha_enclave_app_execution_completed_duration_count{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m]))",
+          "legendFormat": "App Execution (HTTP calls)",
+          "refId": "C"
+        }
+      ],
+      "title": "Latency Breakdown (Average)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "Breakdown of error counts over the last 24 hours",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 12,
+        "y": 10
+      },
+      "id": 16,
+      "options": {
+        "displayMode": "gradient",
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_execute_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h])))) or vector(0)",
+          "legendFormat": "Execute",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_enclave_params_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h])))) or vector(0)",
+          "legendFormat": "Enclave Params",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_vault_don_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h])))) or vector(0)",
+          "legendFormat": "VaultDON",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_compute_request_signature_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h])))) or vector(0)",
+          "legendFormat": "Signature",
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_attestation_validation_failed{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h])))) or vector(0)",
+          "legendFormat": "Attest Validation",
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_enclave_attestation_creation_failed{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h])))) or vector(0)",
+          "legendFormat": "Attest Creation",
+          "refId": "F"
+        }
+      ],
+      "title": "Error Counts (24h)",
+      "type": "bargauge"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "id": 103,
+      "panels": [],
+      "title": "Adoption & Usage",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "Distinct workflow IDs that sent at least one request in the last 24h",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 19
+      },
+      "id": 104,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "count(count by (workflow_id) (rate(confidential_http_1_0_0_alpha_requests_received_total{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h]) > 0))",
+          "legendFormat": "Active Workflows",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Workflows (24h)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "Distinct workflow owners that sent at least one request in the last 24h",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 19
+      },
+      "id": 105,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "count(count by (workflow_owner) (rate(confidential_http_1_0_0_alpha_requests_received_total{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h]) > 0))",
+          "legendFormat": "Unique Owners",
+          "refId": "A"
+        }
+      ],
+      "title": "Unique Workflow Owners (24h)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "Request volume per workflow owner over the last 24h",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "workflow_owner"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 420
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 19
+      },
+      "id": 106,
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ]
+        },
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ]
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "sort_desc(round(avg by (workflow_owner) (sum by (node_id, workflow_owner) (increase(confidential_http_1_0_0_alpha_requests_received_total{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h])))))",
+          "legendFormat": "{{workflow_owner}}",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "title": "Requests by Owner (24h)",
+      "type": "table",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "Requests",
+              "workflow_owner": "Owner"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "Total execution seconds consumed in the last 24h (sum of all request durations)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 19
+      },
+      "id": 107,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_enclave_request_completed_duration_sum{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h]))))",
+          "legendFormat": "Chargeable Seconds",
+          "refId": "A"
+        }
+      ],
+      "title": "Chargeable Seconds (24h)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "Average enclave CPU utilization over the last 24h",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 19
+      },
+      "id": 108,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "mean"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "expr": "avg(container_cpu_utilization_ratio{k8s_namespace_name=\"enclave\", k8s_container_name=\"enclave\"})",
+          "legendFormat": "CPU",
+          "refId": "A"
+        }
+      ],
+      "title": "Enclave CPU (avg)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "P4169E866C3094E38"
+      },
+      "description": "Average enclave memory utilization over the last 24h",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 23
+      },
+      "id": 109,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "mean"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P4169E866C3094E38"
+          },
+          "expr": "avg(k8s_container_memory_node_utilization_ratio{k8s_namespace_name=\"enclave\", k8s_container_name=\"enclave\"})",
+          "legendFormat": "Memory",
+          "refId": "A"
+        }
+      ],
+      "title": "Enclave Memory (avg)",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "id": 110,
+      "panels": [],
+      "title": "Latency Percentiles",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+      },
+      "description": "P95 and P99 end-to-end execution latency",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "id": 111,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.3.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(confidential_http_1_0_0_alpha_enclave_request_completed_duration_bucket{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])))",
+          "legendFormat": "P95",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(confidential_http_1_0_0_alpha_enclave_request_completed_duration_bucket{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])))",
+          "legendFormat": "P99",
+          "refId": "B"
+        }
+      ],
+      "title": "Latency Percentiles (P95 / P99)",
+      "type": "timeseries"
+    }
+  ],
+  "preload": false,
+  "refresh": "30s",
+  "schemaVersion": 42,
+  "tags": [
+    "confidential-compute",
+    "enclave",
+    "cre"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "staging-testnet",
+          "value": "staging-testnet"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+        },
+        "definition": "label_values(confidential_http_1_0_0_alpha_requests_received_total, platformEnv)",
+        "includeAll": false,
+        "label": "Environment",
+        "name": "platformEnv",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(confidential_http_1_0_0_alpha_requests_received_total, platformEnv)"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+        },
+        "definition": "label_values(confidential_http_1_0_0_alpha_requests_received_total{platformEnv=~\"$platformEnv\"}, donID)",
+        "includeAll": true,
+        "label": "DON ID",
+        "multi": true,
+        "name": "donID",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(confidential_http_1_0_0_alpha_requests_received_total{platformEnv=~\"$platformEnv\"}, donID)"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
+        },
+        "definition": "label_values(confidential_http_1_0_0_alpha_requests_received_total{platformEnv=~\"$platformEnv\"}, zone)",
+        "includeAll": true,
+        "label": "Zone",
+        "multi": true,
+        "name": "zone",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(confidential_http_1_0_0_alpha_requests_received_total{platformEnv=~\"$platformEnv\"}, zone)"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Confidential HTTP - Business Logic Dashboard",
+  "uid": "ed8abb45-d104-4e46-976e-f0ed51197027",
+  "version": 3
+}
