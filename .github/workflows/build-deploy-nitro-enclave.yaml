@@ -223,8 +223,29 @@ jobs:
         id: create-insecure-eif
         run: |
           docker load --input /tmp/${{ matrix.app }}-nitro-insecure-image.tar
-          sudo nitro-cli build-enclave --docker-uri "${{ matrix.nitro_prefix }}-insecure:latest" --output-file go-enclave-outbound-insecure.eif
+          BUILD_OUTPUT=$(sudo nitro-cli build-enclave --docker-uri "${{ matrix.nitro_prefix }}-insecure:latest" --output-file go-enclave-outbound-insecure.eif)
+          echo "$BUILD_OUTPUT"
           ls -la go-enclave-outbound-insecure.eif
+
+          # Extract PCR measurements for the insecure image
+          MEASUREMENTS_SECTION=$(echo "$BUILD_OUTPUT" | awk '/^{/,/^}$/' | sed 's/^}/}/')
+          echo "$MEASUREMENTS_SECTION" > pcr_measurements_insecure.json
+
+          if [ -f pcr_measurements_insecure.json ]; then
+            MEASUREMENTS=$(cat pcr_measurements_insecure.json)
+            PCR0=$(echo "$MEASUREMENTS" | grep -oP '"PCR0": "\K[^"]+' || echo "N/A")
+            PCR1=$(echo "$MEASUREMENTS" | grep -oP '"PCR1": "\K[^"]+' || echo "N/A")
+            PCR2=$(echo "$MEASUREMENTS" | grep -oP '"PCR2": "\K[^"]+' || echo "N/A")
+
+            echo "**Insecure PCR Measurements [FOR TESTING ONLY] (${{ matrix.app }}):**" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "PCR0: $PCR0" >> $GITHUB_STEP_SUMMARY
+            echo "PCR1: $PCR1" >> $GITHUB_STEP_SUMMARY
+            echo "PCR2: $PCR2" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
           # Overwrite the EIF so the plugin Dockerfile picks it up
           sudo cp go-enclave-outbound-insecure.eif go-enclave-outbound.eif
 

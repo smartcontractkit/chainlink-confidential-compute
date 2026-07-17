@@ -27,9 +27,9 @@ env:
   # Optional PCR override: when all three are set, the legacy-enclaves leg uses
   # these measurements directly instead of fetching them from the release build
   # logs. Leave blank to fetch from LEGACY_ENCLAVE_RELEASE.
-  LEGACY_ENCLAVE_PCR0: 303248e65822a65d77c4c610e6454e1c248ee53e9f9ef4986b1bb20a860498217e4bfdaab608340e907da3f2db4122fb
+  LEGACY_ENCLAVE_PCR0: 7cf9af0301ac6aff79c3f0c3d069c72ceb75cd6aebf118754de8368023bed3ad51d97c7e370fee0bf83719772be709f8
   LEGACY_ENCLAVE_PCR1: 4b4d5b3661b3efc12920900c80e126e4ce783c522de6c02a2a5bf7af3a2b9327b86776f188e4be1c1c404a129dbda493
-  LEGACY_ENCLAVE_PCR2: bf4ef8bea291058e35d4dd1e26d03fe3f5a7e542138250b3567cc44edc88398e324f183d292939a2f878fbec22b09177
+  LEGACY_ENCLAVE_PCR2: e651899c697e2aced754cba2b0cd49c3ae73b0d0fbac104adf93a6e0869bc5237452fcfac5aacbd84dea199121812416
   # Pinned refs for the supporting CRE Docker images, used as GHCR cache keys.
   JD_VERSION: 0.22.1 # job-distributor release (checked out as v${JD_VERSION})
   ATLAS_SHA: da84cb72d3a160e02896247d46ab4b9806ebee2f # chip-ingress + chip-config

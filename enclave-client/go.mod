@@ -5,6 +5,7 @@ go 1.26.4
 replace github.com/smartcontractkit/confidential-compute => ../
 
 require (
+	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260714160921-4033d0253977
 	github.com/smartcontractkit/confidential-compute v0.0.0-00010101000000-000000000000
 	github.com/stretchr/testify v1.11.1
@@ -19,7 +20,6 @@ require (
 	github.com/cloudevents/sdk-go/v2 v2.16.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/doyensec/safeurl v0.2.2 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.8 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
