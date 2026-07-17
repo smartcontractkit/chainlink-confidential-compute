@@ -39,11 +39,11 @@ jobs:
   # run the real-enclave e2e + integration suite plus the backwards-compat and
   # legacy-enclaves variants; the nightly schedule runs only the real-enclave
   # e2e + integration suite. Pull requests exercise fake enclaves for the
-  # standard and remote-legacy variants. Backwards-compatibility runs a prior-release
-  # capability plugin, which predates fake enclaves and cannot validate their
-  # attestation, so for now it runs against real enclaves on the self-hosted
-  # Nitro runner. TODO(PRIV-506): once a prior release with fake-enclave support
-  # exists, switch this variant back to fake enclaves on the hosted runners.
+  # standard and backwards-compat variants, plus the remote legacy-enclaves
+  # variant. Backwards-compatibility runs a prior-release capability plugin
+  # against fake enclaves via the confidential-HTTP e2e portion (the prior
+  # release now supports fake enclaves, so it no longer needs the self-hosted
+  # Nitro runner).
   #
   # Applying the "e2e-real-enclaves" label to a PR additionally runs the e2e +
   # integration suites against real Nitro enclaves on the self-hosted runner.
@@ -73,14 +73,14 @@ jobs:
           E2E_HTTP='{"name":"E2E confidential HTTP (fake enclaves)","real":false,"legacy":false,"legacy-enclaves":false,"portion":"e2e-http"}'
           E2E_WORKFLOWS='{"name":"E2E workflow engine (fake enclaves)","real":false,"legacy":false,"legacy-enclaves":false,"portion":"e2e-workflows"}'
           REAL_E2E='{"name":"e2e + integration (real enclaves)","real":true,"legacy":false,"legacy-enclaves":false}'
-          BACKWARDS_COMPAT='{"name":"Test backwards compatibility (real enclaves)","real":true,"legacy":true,"legacy-enclaves":false}'
+          BACKWARDS_COMPAT='{"name":"Test backwards compatibility (fake enclaves)","real":false,"legacy":true,"legacy-enclaves":false,"portion":"e2e-http"}'
           LEGACY_ENCLAVES='{"name":"Test against legacy enclaves","real":false,"legacy":false,"legacy-enclaves":true}'
 
           # ---- Select variants for the triggering event ----
           case "${{ github.event_name }}" in
             pull_request)
-              # Fake-enclave suites for fast feedback, plus the real-enclave
-              # backwards-compat and remote-legacy variants.
+              # Fake-enclave suites for fast feedback (including backwards-compat),
+              # plus the remote legacy-enclaves variant.
               VARIANTS=("$UNIT" "$E2E_HTTP" "$E2E_WORKFLOWS" "$BACKWARDS_COMPAT" "$LEGACY_ENCLAVES")
               # Opt-in: the "e2e-real-enclaves" label adds a real Nitro e2e +
               # integration run on the self-hosted runner.
@@ -89,9 +89,11 @@ jobs:
               fi
               ;;
             push)
-              # Release-branch pushes: the same real/legacy set a PR runs, minus
-              # the fake-enclave suites. Pushes to main are gated out by
-              # run-suite, so this only runs on release/** pushes.
+              # Release-branch pushes: the real e2e + integration suite plus the
+              # backwards-compat and remote legacy-enclaves variants (dropping the
+              # plain fake-enclave unit/e2e suites a PR runs for fast feedback).
+              # Pushes to main are gated out by run-suite, so this only runs on
+              # release/** pushes.
               VARIANTS=("$REAL_E2E" "$BACKWARDS_COMPAT" "$LEGACY_ENCLAVES")
               ;;
             *)
@@ -486,9 +488,9 @@ jobs:
 
   test:
     name: ${{ matrix.name }}
-    # Real-enclave variants (the nightly run and the backwards-compatibility
-    # variant) require the self-hosted Nitro instance; fake-enclave variants run
-    # on regular GitHub-hosted runners.
+    # Real-enclave variants (the nightly run and the label-triggered e2e +
+    # integration suite) require the self-hosted Nitro instance; fake-enclave
+    # variants run on regular GitHub-hosted runners.
     runs-on: ${{ matrix.real && fromJSON('["self-hosted", "Linux", "X64"]') || fromJSON(format('["runs-on={0}", "cpu=16+32", "ram=8+64", "family=c7i+c7a+c6i", "volume=200gb"]', github.run_id)) }}
     if: ${{ needs.setup.outputs.run-suite == 'true' }}
     needs: [setup, build, prebuild-images]
@@ -925,8 +927,9 @@ jobs:
           # Clean up JD database volume if it exists
           docker volume rm job-distributor-db-volume || true
 
-          # Scheduled/release runs (and the backwards-compat variant) exercise REAL
-          # enclaves and only run the ./tests module (integration + tests/e2e).
+          # Real-enclave runs (the nightly schedule, release pushes, and the
+          # label-triggered variant) only run the ./tests module (integration +
+          # tests/e2e).
           if [ "${{ matrix.real }}" = "true" ]; then
             echo "Real-enclave run: testing the ./tests module against Nitro enclaves"
             # Leave ENCLAVE_TYPE unset so the harness provisions real Nitro enclaves.
