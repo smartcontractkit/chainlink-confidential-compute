@@ -278,7 +278,7 @@ jobs:
           - name: confidential-workflows
             nitro_prefix: nitro-workflows
             plugin_prefix: enclave-workflows
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
