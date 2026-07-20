@@ -55,6 +55,7 @@ jobs:
       - ram=8+16
       - family=c7i+c7a+c6i
       - volume=40gb
+      - spot=false
     permissions: {}
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
@@ -114,6 +115,7 @@ jobs:
       - ram=8+64
       - family=c7i+c7a+c6i
       - volume=100gb
+      - spot=false
     permissions:
       id-token: write
       contents: read
@@ -291,6 +293,7 @@ jobs:
       - ram=8+64
       - family=c7i+c7a+c6i
       - volume=200gb
+      - spot=false
     permissions:
       id-token: write
       contents: read
@@ -491,7 +494,7 @@ jobs:
     # Real-enclave variants (the nightly run and the label-triggered e2e +
     # integration suite) require the self-hosted Nitro instance; fake-enclave
     # variants run on regular GitHub-hosted runners.
-    runs-on: ${{ matrix.real && fromJSON('["self-hosted", "Linux", "X64"]') || fromJSON(format('["runs-on={0}", "cpu=16+32", "ram=8+64", "family=c7i+c7a+c6i", "volume=200gb"]', github.run_id)) }}
+    runs-on: ${{ matrix.real && fromJSON('["self-hosted", "Linux", "X64"]') || fromJSON(format('["runs-on={0}", "cpu=16+32", "ram=8+64", "family=c7i+c7a+c6i", "volume=200gb", "spot=false"]', github.run_id)) }}
     if: ${{ needs.setup.outputs.run-suite == 'true' }}
     needs: [setup, build, prebuild-images]
     timeout-minutes: 120
@@ -1202,6 +1205,7 @@ jobs:
       - ram=8+16
       - family=c7i+c7a+c6i
       - volume=40gb
+      - spot=false
     needs: [setup, build, prebuild-images, test]
     if: ${{ always() && needs.setup.outputs.run-suite == 'true' }}
     permissions: {}
