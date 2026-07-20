@@ -239,6 +239,8 @@ func (a *httpEnclaveApp) executeHTTPRequest(request *enclavetypes.Request, templ
 	if err != nil {
 		return enclavetypes.Response{}, fmt.Errorf("error creating http request")
 	}
+	// Enforces the no-reuse boundary even when a custom HTTP client is injected.
+	httpReq.Close = true
 
 	// Apply all template values assigned to the request headers.
 	for headerName, headerValues := range request.MultiHeaders {

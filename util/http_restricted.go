@@ -28,7 +28,15 @@ func newSafeurlClient(tlsConfig *tls.Config) *safeurl.WrappedClient {
 	if tlsConfig != nil {
 		builder = builder.SetTlsConfig(tlsConfig)
 	}
-	return safeurl.Client(builder.Build())
+	client := safeurl.Client(builder.Build())
+	transport, ok := client.Client.Transport.(*http.Transport)
+	if !ok {
+		panic("safeurl client uses an unsupported HTTP transport")
+	}
+	// The client is shared across workflows, so connection reuse would carry
+	// TCP/TLS and server-side connection state across workflow boundaries.
+	transport.DisableKeepAlives = true
+	return client
 }
 
 // NewRestrictedHTTPClient returns an HTTP client that blocks connections to
