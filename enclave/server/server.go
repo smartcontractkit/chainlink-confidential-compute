@@ -69,9 +69,9 @@ type RequestTemplate struct {
 
 // DefaultMaxConcurrentExecutions caps concurrent executions when unset.
 // Conservative for confidential-workflows (a fresh WASM runtime per execution vs
-// a fixed enclave memory budget); lighter apps raise it via
-// WithMaxConcurrentExecutions.
-const DefaultMaxConcurrentExecutions int64 = 6
+// a fixed enclave memory budget); 8 is empirically healthy on staging. Lighter
+// apps raise it via WithMaxConcurrentExecutions.
+const DefaultMaxConcurrentExecutions int64 = 8
 
 // ServerOption configures an enclaveServer.
 type ServerOption func(*enclaveServer)
