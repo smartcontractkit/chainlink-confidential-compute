@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/semaphore"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/smartcontractkit/confidential-compute/enclave/services/attestor"
@@ -54,11 +53,9 @@ type enclaveServer struct {
 	// attestationGroup collapses concurrent pubKeyAttestations misses for the
 	// same content into a single NSM attestation.
 	attestationGroup singleflight.Group
-	// execSem bounds concurrent /requests executions. The enclave runs on a fixed
-	// memory carve-out and instantiates a fresh WASM runtime per execution, so
-	// unbounded concurrency can exhaust memory and wedge the enclave. Excess
-	// requests are rejected fast with 429 rather than run (backpressure).
-	execSem                 *semaphore.Weighted
+	// execSlots caps concurrent executions; full -> 429, so a burst cannot
+	// exhaust the fixed enclave memory and wedge it.
+	execSlots               chan struct{}
 	maxConcurrentExecutions int64
 }
 
@@ -70,13 +67,10 @@ type RequestTemplate struct {
 	ContentType string   `json:"contentType"`
 }
 
-// DefaultMaxConcurrentExecutions bounds concurrent /requests executions when the
-// caller does not override it. Deliberately conservative for the heaviest app
-// (confidential-workflows instantiates a fresh WASM runtime per execution against
-// a fixed enclave memory budget), so this protects against OOM/wedge. Lighter
-// apps (e.g. confidential-http) should raise it via WithMaxConcurrentExecutions.
-// Raise it only against a measured per-execution footprint (see GET /memory);
-// prefer scaling out + a host-side queue over a very large value.
+// DefaultMaxConcurrentExecutions caps concurrent executions when unset.
+// Conservative for confidential-workflows (a fresh WASM runtime per execution vs
+// a fixed enclave memory budget); lighter apps raise it via
+// WithMaxConcurrentExecutions.
 const DefaultMaxConcurrentExecutions int64 = 6
 
 // ServerOption configures an enclaveServer.
@@ -130,7 +124,7 @@ func NewEnclaveServer(
 	for _, opt := range opts {
 		opt(s)
 	}
-	s.execSem = semaphore.NewWeighted(s.maxConcurrentExecutions)
+	s.execSlots = make(chan struct{}, s.maxConcurrentExecutions)
 	return s
 }
 
@@ -551,17 +545,15 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bound concurrent executions so a burst cannot exhaust the enclave's fixed
-	// memory and wedge it. Reject fast with 429 instead of running unbounded work;
-	// the host is expected to queue/retry on this signal, not push harder.
-	if !s.execSem.TryAcquire(1) {
-		responseEmitter.Emit("execution_rejected_at_capacity", map[string]any{
-			"max_concurrent": s.maxConcurrentExecutions,
-		})
+	// Bound concurrent executions so a burst can't exhaust enclave memory.
+	select {
+	case s.execSlots <- struct{}{}:
+		defer func() { <-s.execSlots }()
+	default:
+		responseEmitter.Emit("execution_rejected_at_capacity", map[string]any{"max_concurrent": s.maxConcurrentExecutions})
 		responseEmitter.WriteErrorResponse(w, "enclave at capacity: too many concurrent executions", http.StatusTooManyRequests)
 		return
 	}
-	defer s.execSem.Release(1)
 
 	s.configLock.Lock()
 	config := s.config.Copy()

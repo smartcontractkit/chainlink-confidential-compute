@@ -781,9 +781,10 @@ func TestHandleExecute_ConcurrencyPushback(t *testing.T) {
 		return resp
 	}
 
-	// Saturate the execution semaphore; the next execute must be rejected fast
-	// with 429 (before any body read / signature verification).
-	require.True(t, s.execSem.TryAcquire(2))
+	// Fill both execution slots; the next execute must be rejected fast with 429
+	// (before any body read / signature verification).
+	s.execSlots <- struct{}{}
+	s.execSlots <- struct{}{}
 	resp := post()
 	body, _ := io.ReadAll(resp.Body)
 	require.NoError(t, resp.Body.Close())
@@ -792,7 +793,8 @@ func TestHandleExecute_ConcurrencyPushback(t *testing.T) {
 
 	// Free the slots; requests are admitted again (they fail later validation,
 	// but are no longer rejected at the concurrency gate).
-	s.execSem.Release(2)
+	<-s.execSlots
+	<-s.execSlots
 	resp2 := post()
 	require.NoError(t, resp2.Body.Close())
 	require.NotEqual(t, http.StatusTooManyRequests, resp2.StatusCode)
