@@ -945,7 +945,8 @@ func (c *enclavePool) validateAttestationAgainstMultipleMeasurements(enclave typ
 			if combinedErr == nil {
 				combinedErr = errors.New("no trusted measurements configured")
 			}
-			return false, fmt.Errorf("attestation validation failed for enclave %x: %w", enclave.EnclaveID, combinedErr)
+			return false, fmt.Errorf("attestation validation failed for enclave %x (received %s): %w",
+				enclave.EnclaveID, attestationvalidator.DescribeMeasurements(attestation), combinedErr)
 		}
 	}
 }
