@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/semaphore"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/smartcontractkit/confidential-compute/enclave/services/attestor"
@@ -53,6 +54,12 @@ type enclaveServer struct {
 	// attestationGroup collapses concurrent pubKeyAttestations misses for the
 	// same content into a single NSM attestation.
 	attestationGroup singleflight.Group
+	// execSem bounds concurrent /requests executions. The enclave runs on a fixed
+	// memory carve-out and instantiates a fresh WASM runtime per execution, so
+	// unbounded concurrency can exhaust memory and wedge the enclave. Excess
+	// requests are rejected fast with 429 rather than run (backpressure).
+	execSem                 *semaphore.Weighted
+	maxConcurrentExecutions int64
 }
 
 type RequestTemplate struct {
@@ -61,6 +68,27 @@ type RequestTemplate struct {
 	Body        string   `json:"body"`
 	Method      string   `json:"method"`
 	ContentType string   `json:"contentType"`
+}
+
+// DefaultMaxConcurrentExecutions bounds concurrent /requests executions when the
+// caller does not override it. Deliberately conservative for the heaviest app
+// (confidential-workflows instantiates a fresh WASM runtime per execution against
+// a fixed enclave memory budget), so this protects against OOM/wedge. Lighter
+// apps (e.g. confidential-http) should raise it via WithMaxConcurrentExecutions.
+// Raise it only against a measured per-execution footprint (see GET /memory);
+// prefer scaling out + a host-side queue over a very large value.
+const DefaultMaxConcurrentExecutions int64 = 6
+
+// ServerOption configures an enclaveServer.
+type ServerOption func(*enclaveServer)
+
+// WithMaxConcurrentExecutions overrides the concurrent-execution limit.
+func WithMaxConcurrentExecutions(n int64) ServerOption {
+	return func(s *enclaveServer) {
+		if n > 0 {
+			s.maxConcurrentExecutions = n
+		}
+	}
 }
 
 func NewEnclaveServer(
@@ -73,6 +101,7 @@ func NewEnclaveServer(
 	emitter types.Emitter,
 	config types.EnclaveConfig,
 	allowReconfig bool,
+	opts ...ServerOption,
 ) *enclaveServer {
 	replayCacheTTL := types.DefaultKeypairExpiration
 	inProgressReqs := util.NewBoundedCache[struct{}](&replayCacheTTL, nil, types.MaxReplayCacheEntries)
@@ -82,21 +111,27 @@ func NewEnclaveServer(
 	pubKeyAttestationTTL := types.PublicKeyAttestationCacheTTL
 	pubKeyAttestations := util.NewCache[[]byte](&pubKeyAttestationTTL, nil)
 
-	return &enclaveServer{
-		app:                app,
-		attestor:           attestor,
-		logger:             logger,
-		keychain:           keychain,
-		verifier:           verifier,
-		combiner:           combiner,
-		emitter:            emitter,
-		config:             config,
-		allowReconfig:      allowReconfig,
-		inProgressReqs:     inProgressReqs,
-		executedReqs:       executedReqs,
-		pendingConfigVotes: pendingConfigVotes,
-		pubKeyAttestations: pubKeyAttestations,
+	s := &enclaveServer{
+		app:                     app,
+		attestor:                attestor,
+		logger:                  logger,
+		keychain:                keychain,
+		verifier:                verifier,
+		combiner:                combiner,
+		emitter:                 emitter,
+		config:                  config,
+		allowReconfig:           allowReconfig,
+		inProgressReqs:          inProgressReqs,
+		executedReqs:            executedReqs,
+		pendingConfigVotes:      pendingConfigVotes,
+		pubKeyAttestations:      pubKeyAttestations,
+		maxConcurrentExecutions: DefaultMaxConcurrentExecutions,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	s.execSem = semaphore.NewWeighted(s.maxConcurrentExecutions)
+	return s
 }
 
 // Handler returns the HTTP handler for the enclave server.
@@ -515,6 +550,18 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		responseEmitter.WriteErrorResponse(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// Bound concurrent executions so a burst cannot exhaust the enclave's fixed
+	// memory and wedge it. Reject fast with 429 instead of running unbounded work;
+	// the host is expected to queue/retry on this signal, not push harder.
+	if !s.execSem.TryAcquire(1) {
+		responseEmitter.Emit("execution_rejected_at_capacity", map[string]any{
+			"max_concurrent": s.maxConcurrentExecutions,
+		})
+		responseEmitter.WriteErrorResponse(w, "enclave at capacity: too many concurrent executions", http.StatusTooManyRequests)
+		return
+	}
+	defer s.execSem.Release(1)
 
 	s.configLock.Lock()
 	config := s.config.Copy()

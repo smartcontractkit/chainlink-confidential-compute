@@ -7,6 +7,7 @@ import (
 
 	"github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-http/app"
 	"github.com/smartcontractkit/confidential-compute/enclave/nitro"
+	"github.com/smartcontractkit/confidential-compute/enclave/server"
 	"github.com/smartcontractkit/confidential-compute/enclave/services/combiner"
 	"github.com/smartcontractkit/confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/confidential-compute/enclave/services/keychain"
@@ -48,6 +49,10 @@ func main() {
 		emitter.NewNoOpEmitter(),
 		vsockPort,
 		*allowReconfig,
+		// confidential-http executions are light (a bounded HTTP round-trip, no
+		// WASM), so it can safely run far more concurrently than the workflows
+		// default. Set in code so no infra config is required to avoid throttling.
+		server.WithMaxConcurrentExecutions(200),
 	)
 	if err != nil {
 		logger.Fatalf("Failed to start Nitro enclave: %v", err)

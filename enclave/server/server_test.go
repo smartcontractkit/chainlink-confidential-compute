@@ -747,6 +747,57 @@ func TestPublicKey_WithRequestID(t *testing.T) {
 	})
 }
 
+func TestHandleExecute_ConcurrencyPushback(t *testing.T) {
+	verifier := signatureverifier.NewEd25519SignatureVerifier()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	logger := log.New(new(bytes.Buffer), "", 0)
+	s := NewEnclaveServer(
+		newMockEnclaveApp(),
+		&mockAttestor{},
+		logger,
+		keychain.NewBoxKeychain(logger, nil, nil, nil),
+		verifier,
+		&mockCombiner{},
+		emitter.NewNoOpEmitter(),
+		types.EnclaveConfig{},
+		false,
+		WithMaxConcurrentExecutions(2),
+	)
+	go func() { _ = s.Start(listener) }()
+	serverURL := "http://" + listener.Addr().String()
+
+	post := func() *http.Response {
+		var resp *http.Response
+		require.Eventually(t, func() bool {
+			req, _ := http.NewRequest(http.MethodPost, serverURL+"/requests", bytes.NewReader([]byte("[]")))
+			r, e := http.DefaultClient.Do(req)
+			if e != nil {
+				return false
+			}
+			resp = r
+			return true
+		}, 2*time.Second, 20*time.Millisecond)
+		return resp
+	}
+
+	// Saturate the execution semaphore; the next execute must be rejected fast
+	// with 429 (before any body read / signature verification).
+	require.True(t, s.execSem.TryAcquire(2))
+	resp := post()
+	body, _ := io.ReadAll(resp.Body)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+	require.Contains(t, string(body), "at capacity")
+
+	// Free the slots; requests are admitted again (they fail later validation,
+	// but are no longer rejected at the concurrency gate).
+	s.execSem.Release(2)
+	resp2 := post()
+	require.NoError(t, resp2.Body.Close())
+	require.NotEqual(t, http.StatusTooManyRequests, resp2.StatusCode)
+}
+
 func TestHandleExecute_QuorumValidation(t *testing.T) {
 	t.Parallel()
 
