@@ -65,16 +65,7 @@ type Fetcher struct {
 // (HTTPS only, private-network blocking, no redirects). Method, timeout, and
 // response body caps are applied per-request in Fetch.
 func NewFetcher(policy Policy) *Fetcher {
-	client := util.NewRestrictedHTTPClient()
-	// The restricted client keeps idle connections pooled indefinitely.
-	// Requests here are sparse, so a pooled connection has usually been closed
-	// server-side by the time it is reused, producing a bare EOF on POSTs
-	// (which Go will not auto-retry). Open a fresh connection per request to
-	// eliminate that race.
-	if tr, ok := client.Client.Transport.(*http.Transport); ok {
-		tr.DisableKeepAlives = true
-	}
-	return NewFetcherWithClient(policy, client)
+	return NewFetcherWithClient(policy, util.NewRestrictedHTTPClient())
 }
 
 // NewFetcherWithClient builds a Fetcher backed by a caller-supplied HTTP client.

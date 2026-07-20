@@ -28,7 +28,16 @@ func newSafeurlClient(tlsConfig *tls.Config) *safeurl.WrappedClient {
 	if tlsConfig != nil {
 		builder = builder.SetTlsConfig(tlsConfig)
 	}
-	return safeurl.Client(builder.Build())
+	client := safeurl.Client(builder.Build())
+	// safeurl's default transport keeps idle connections pooled indefinitely.
+	// Enclave traffic is sparse, so a pooled connection has usually been closed
+	// server-side by the time it is reused, producing a bare EOF on POSTs
+	// (which Go will not auto-retry). Open a fresh connection per request to
+	// eliminate that race.
+	if tr, ok := client.Client.Transport.(*http.Transport); ok {
+		tr.DisableKeepAlives = true
+	}
+	return client
 }
 
 // NewRestrictedHTTPClient returns an HTTP client that blocks connections to
