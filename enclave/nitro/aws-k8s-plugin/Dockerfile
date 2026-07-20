@@ -51,8 +51,8 @@ COPY --from=full_image /ne-deps/run /run
 COPY --from=full_image /ne-deps/usr /usr
 COPY --from=full_image /ne-deps/var /var
 
-# Install shadow-utils for user/group management
-RUN yum install -y shadow-utils && yum clean all
+# shadow-utils for user/group management; curl for the enclave health probe in run.sh
+RUN yum install -y shadow-utils curl && yum clean all
 
 # Create 'ne' group (GID 1001) to match host for /dev/nitro_enclaves access
 # Create primary group (GID 1000) and user with UID 1000, supplemental group 'ne'
