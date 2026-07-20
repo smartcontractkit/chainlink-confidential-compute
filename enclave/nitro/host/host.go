@@ -111,6 +111,7 @@ type hostServer struct {
 	responseCache        *util.Cache[*types.ExecuteResponse]
 	verifier             signatureverifier.SignatureVerifier
 	logger               cllogger.SugaredLogger
+	metrics              executionMetrics
 }
 
 type batchRequest struct {
@@ -134,7 +135,9 @@ type batchResponse struct {
 	err      error
 }
 
-func logPublicData(reqLog cllogger.SugaredLogger, appID string, publicData []byte) {
+func logPublicData(reqLog cllogger.SugaredLogger, appID string, publicData []byte) (metadata executionMetadata) {
+	metadata.appID = appID
+
 	switch appID {
 	case types.AppIDConfidentialHTTP:
 		var req confhttptypes.Request
@@ -144,7 +147,7 @@ func logPublicData(reqLog cllogger.SugaredLogger, appID string, publicData []byt
 				"appID", appID,
 				"publicDataLen", len(publicData),
 				"error", err)
-			return
+			return metadata
 		}
 
 		bodyKind := "none"
@@ -186,10 +189,11 @@ func logPublicData(reqLog cllogger.SugaredLogger, appID string, publicData []byt
 				"appID", appID,
 				"publicDataLen", len(publicData),
 				"error", err)
-			return
+			return metadata
 		}
 
-		executeRequestKind := "unset"
+		metadata.workflowID = execution.GetWorkflowId()
+		metadata.requestKind = "unset"
 		executeRequestConfigLen := 0
 		var maxResponseSize uint64
 		fields := []any{
@@ -212,18 +216,18 @@ func logPublicData(reqLog cllogger.SugaredLogger, appID string, publicData []byt
 			maxResponseSize = execReq.GetMaxResponseSize()
 			switch req := execReq.GetRequest().(type) {
 			case *sdkpb.ExecuteRequest_Subscribe:
-				executeRequestKind = "subscribe"
+				metadata.requestKind = "subscribe"
 			case *sdkpb.ExecuteRequest_Trigger:
-				executeRequestKind = "trigger"
+				metadata.requestKind = "trigger"
 				fields = append(fields, "triggerID", req.Trigger.GetId())
 			case *sdkpb.ExecuteRequest_PreHook:
-				executeRequestKind = "pre_hook"
+				metadata.requestKind = "pre_hook"
 				fields = append(fields, "triggerID", req.PreHook.GetId())
 			}
 		}
 
 		fields = append(fields,
-			"executeRequestKind", executeRequestKind,
+			"executeRequestKind", metadata.requestKind,
 			"executeRequestConfigLen", executeRequestConfigLen,
 			"maxResponseSize", maxResponseSize)
 		reqLog.Infow("decoded publicData", fields...)
@@ -234,6 +238,8 @@ func logPublicData(reqLog cllogger.SugaredLogger, appID string, publicData []byt
 			"appID", appID,
 			"publicDataLen", len(publicData))
 	}
+
+	return metadata
 }
 
 func NewHostServer(ctx context.Context, clientOverride *http.Client) *hostServer {
@@ -261,7 +267,8 @@ func NewHostServer(ctx context.Context, clientOverride *http.Client) *hostServer
 		config:               types.EnclaveConfig{},
 		verifier:             signatureverifier.NewEd25519SignatureVerifier(),
 		// No-op by default so tests stay quiet; main injects the real logger.
-		logger: cllogger.Sugared(cllogger.Nop()),
+		logger:  cllogger.Sugared(cllogger.Nop()),
+		metrics: noopExecutionMetrics{},
 	}
 }
 
@@ -609,7 +616,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		"ephemeralPK", ephemeralPKHex,
 		"bodyLen", len(body),
 		"arrivalTime", arrivalTime.Format(time.RFC3339Nano))
-	logPublicData(reqLog, execReq.AppID, execReq.PublicData)
+	metadata := logPublicData(reqLog, execReq.AppID, execReq.PublicData)
 
 	// Log hash input components for debugging hash divergence
 	reqLog.Debugw("hash inputs",
@@ -766,9 +773,16 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 				"signers", signers,
 				"signatureCount", len(requests))
 			go func() {
+				finishExecution := h.metrics.startExecution(metadata)
 				enclaveStart := time.Now()
 				resp, err := h.processBatch(requests)
 				enclaveDuration := time.Since(enclaveStart)
+				outcome := executionOutcomeSuccess
+				if err != nil {
+					outcome = executionOutcomeError
+				}
+				finishExecution(outcome)
+
 				if err != nil {
 					reqLog.Errorw("enclave execution failed",
 						"event", "ENCLAVE_ERR",
@@ -1012,9 +1026,24 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
+	telemetryCfg, err := loadHostTelemetryConfig(os.Getenv)
+	if err != nil {
+		log.Fatalf("invalid telemetry configuration: %v", err)
+	}
+	telemetry, err := newHostTelemetry(ctx, telemetryCfg, lggr)
+	if err != nil {
+		log.Fatalf("failed to initialize telemetry: %v", err)
+	}
+	metrics, err := newHostMetrics(telemetry.meter)
+	if err != nil {
+		_ = telemetry.close()
+		log.Fatalf("failed to initialize host metrics: %v", err)
+	}
+
 	// Start servers. Optionally handle the config endpoint on a different port.
 	host := NewHostServer(ctx, nil)
 	host.logger = lggr
+	host.metrics = metrics
 	mainMux := http.NewServeMux()
 
 	var configServer *http.Server
@@ -1120,6 +1149,9 @@ func main() {
 	}
 	if err := mainServer.Shutdown(shutdownCtx); err != nil {
 		lggr.Errorw("main server shutdown error", "error", err)
+	}
+	if err := telemetry.close(); err != nil {
+		lggr.Errorw("telemetry shutdown error", "error", err)
 	}
 
 	lggr.Infow("graceful shutdown complete")

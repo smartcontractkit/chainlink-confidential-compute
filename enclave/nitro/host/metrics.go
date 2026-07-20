@@ -83,7 +83,6 @@ func newHostMetrics(meter metric.Meter) (*hostMetrics, error) {
 
 func (m *hostMetrics) startExecution(metadata executionMetadata) func(string) {
 	ctx := context.Background()
-	startedAt := time.Now()
 
 	m.mu.Lock()
 	m.inflight++
@@ -98,6 +97,7 @@ func (m *hostMetrics) startExecution(metadata executionMetadata) func(string) {
 	}
 	m.mu.Unlock()
 
+	startedAt := time.Now()
 	var once sync.Once
 	return func(outcome string) {
 		once.Do(func() {
