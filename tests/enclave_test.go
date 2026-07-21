@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
-	enclavetypes "github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-http/types"
-	"github.com/smartcontractkit/confidential-compute/types"
-	"github.com/smartcontractkit/confidential-compute/util"
+	enclavetypes "github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"github.com/smartcontractkit/tdh2/go/tdh2/tdh2easy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -18,7 +18,7 @@ import (
 	nodeauthjwt "github.com/smartcontractkit/chainlink-common/pkg/nodeauth/jwt"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
 	storage_service "github.com/smartcontractkit/chainlink-protos/storage-service/go"
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"

@@ -11,14 +11,14 @@ import (
 	"log"
 
 	"github.com/hf/nsm"
-	outboundhttps "github.com/smartcontractkit/confidential-compute/enclave/nitro/outbound-https"
-	"github.com/smartcontractkit/confidential-compute/enclave/server"
-	"github.com/smartcontractkit/confidential-compute/enclave/services/attestor"
-	"github.com/smartcontractkit/confidential-compute/enclave/services/combiner"
-	"github.com/smartcontractkit/confidential-compute/enclave/services/keychain"
-	signatureverifier "github.com/smartcontractkit/confidential-compute/enclave/services/signature-verifier"
-	"github.com/smartcontractkit/confidential-compute/enclave/vsock"
-	"github.com/smartcontractkit/confidential-compute/types"
+	outboundhttps "github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/outbound-https"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/server"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/attestor"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
+	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/vsock"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 // OpenNitroAttestor opens an NSM session and returns a Nitro attestor along

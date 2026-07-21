@@ -7,7 +7,7 @@ import (
 	"strconv"
 
 	"github.com/mdlayher/vsock"
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 // IsFake returns true if the vsock backend is configured to emulate vsock over

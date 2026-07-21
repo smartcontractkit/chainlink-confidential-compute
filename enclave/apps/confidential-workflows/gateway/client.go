@@ -17,9 +17,9 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/jsonrpc2"
 
-	"github.com/smartcontractkit/confidential-compute/enclave/services/attestor"
-	"github.com/smartcontractkit/confidential-compute/types"
-	"github.com/smartcontractkit/confidential-compute/util"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/attestor"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 )
 
 const attestationHeader = "X-Attestation-Document"
