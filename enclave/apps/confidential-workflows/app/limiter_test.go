@@ -19,8 +19,11 @@ func TestExecutionLimiter_Unbounded(t *testing.T) {
 
 func TestExecutionLimiter_Bounded(t *testing.T) {
 	l := newExecutionLimiter(2)
-	if !l.tryAcquire() || !l.tryAcquire() {
-		t.Fatal("limiter rejected an acquire within capacity")
+	if !l.tryAcquire() {
+		t.Fatal("limiter rejected first acquire within capacity")
+	}
+	if !l.tryAcquire() {
+		t.Fatal("limiter rejected second acquire within capacity")
 	}
 	if l.tryAcquire() {
 		t.Fatal("limiter admitted an acquire beyond capacity")
