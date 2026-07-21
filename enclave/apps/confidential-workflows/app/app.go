@@ -237,7 +237,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		}
 	}
 
-	helper := &enclaveExecutionHelper{
+	var helper host.ExecutionHelper = &enclaveExecutionHelper{
 		requestID:        requestID,
 		workflowID:       execution.WorkflowId,
 		owner:            execution.GetOwner(),
@@ -257,6 +257,8 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 			Code:  http.StatusBadRequest,
 		}
 	}
+
+	helper = host.NewRestrictedExecutionHelper(helper, execution.Restrictions)
 
 	// Execute the WASM binary with the deserialized ExecuteRequest.
 	// The fetched binary is brotli-compressed.
