@@ -131,6 +131,15 @@ func (c *GatewayClient) SendRequest(ctx context.Context, method string, params j
 			return nil, err
 		}
 		attemptErrs = append(attemptErrs, fmt.Errorf("gateway %s: %w", url, err))
+		// Pause before failing over to give a briefly-unhealthy gateway a
+		// moment to recover; skip the wait after the final attempt.
+		if i < n-1 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(types.GatewayFailoverDelay):
+			}
+		}
 	}
 	return nil, fmt.Errorf("all %d gateways failed: %w", n, errors.Join(attemptErrs...))
 }
