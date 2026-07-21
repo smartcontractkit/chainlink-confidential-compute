@@ -90,14 +90,20 @@ func WithStorageService(url string, tls bool) Option {
 	}
 }
 
-// InjectSettings receives runtime config + secrets injected by the host over
-// vsock and wires up whatever arrived: the storage fetcher (once both the
-// endpoint and the ed25519 key are known) and, on the first gateway URL, the
-// remote dispatcher (via the factory). Fetcher tunables (max binary size, fetch
-// timeout, cache size) are applied when present, falling back to the defaults
-// in constants.go. An injected StorageServiceURL overrides the startup default.
-// Safe to call again (e.g. key rotation).
-func (a *confidentialWorkflowsApp) InjectSettings(req types.SettingsRequest) error {
+// InjectSettings receives the raw settings JSON injected by the host over vsock,
+// unmarshals the fields this app uses, and wires up whatever arrived: the
+// storage fetcher (once both the endpoint and the ed25519 key are known) and, on
+// the first gateway URL, the remote dispatcher (via the factory). Fetcher
+// tunables (max binary size, fetch timeout, cache size) are applied when
+// present, falling back to the defaults in constants.go. An injected
+// StorageServiceURL overrides the startup default. Safe to call again (e.g. key
+// rotation).
+func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
+	var req types.WorkflowSettings
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return fmt.Errorf("parsing settings: %w", err)
+	}
+
 	a.fetcher.SetMaxCacheBytes(int(req.MaxCacheBytes))
 
 	a.mu.Lock()
