@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -165,6 +166,50 @@ func TestNewHostTelemetryDisabled(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, telemetry.meter)
 	require.NotNil(t, telemetry.close)
-	require.NoError(t, telemetry.close())
-	require.NoError(t, telemetry.close())
+	require.NoError(t, telemetry.close(context.Background()))
+	require.NoError(t, telemetry.close(context.Background()))
+}
+
+func TestCloseWithContextReturnsCloseError(t *testing.T) {
+	closeErr := errors.New("close failed")
+
+	err := closeWithContext(context.Background(), func() error {
+		return closeErr
+	})
+
+	require.ErrorIs(t, err, closeErr)
+}
+
+func TestCloseWithContextStopsWaitingWhenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	done := make(chan error, 1)
+	go func() {
+		done <- closeWithContext(ctx, func() error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+
+	<-started
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+}
+
+func TestCloseWithContextDoesNotStartAfterDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+
+	err := closeWithContext(ctx, func() error {
+		called = true
+		return nil
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, called)
 }

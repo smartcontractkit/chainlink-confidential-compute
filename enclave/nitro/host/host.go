@@ -39,6 +39,9 @@ var (
 	cacheGCInterval = 10 * time.Minute
 )
 
+// Leave process-teardown headroom within Kubernetes' default 30-second grace period.
+const gracefulShutdownTimeout = 25 * time.Second
+
 var (
 	httpPort       = flag.Int("port", 8080, "HTTP port to listen on")
 	configHttpPort = flag.Int("config-port", 8081, "HTTP port for config endpoint (localhost only)")
@@ -1036,7 +1039,9 @@ func main() {
 	}
 	metrics, err := newHostMetrics(telemetry.meter)
 	if err != nil {
-		_ = telemetry.close()
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+		_ = telemetry.close(closeCtx)
+		closeCancel()
 		log.Fatalf("failed to initialize host metrics: %v", err)
 	}
 
@@ -1138,7 +1143,7 @@ func main() {
 	cancel()
 
 	// Give pending requests time to complete
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
 	defer shutdownCancel()
 
 	// Shutdown servers gracefully
@@ -1150,7 +1155,7 @@ func main() {
 	if err := mainServer.Shutdown(shutdownCtx); err != nil {
 		lggr.Errorw("main server shutdown error", "error", err)
 	}
-	if err := telemetry.close(); err != nil {
+	if err := telemetry.close(shutdownCtx); err != nil {
 		lggr.Errorw("telemetry shutdown error", "error", err)
 	}
 

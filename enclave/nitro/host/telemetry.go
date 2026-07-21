@@ -43,7 +43,26 @@ type hostTelemetryConfig struct {
 
 type hostTelemetry struct {
 	meter metric.Meter
-	close func() error
+	close func(context.Context) error
+}
+
+func closeWithContext(ctx context.Context, closeFn func() error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Beholder does not expose a context-aware Close, so bound how long the host waits for it.
+	closed := make(chan error, 1)
+	go func() {
+		closed <- closeFn()
+	}()
+
+	select {
+	case err := <-closed:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func loadHostTelemetryConfig(getenv func(string) string) (hostTelemetryConfig, error) {
@@ -104,7 +123,7 @@ func newHostTelemetry(ctx context.Context, cfg hostTelemetryConfig, lggr cllogge
 	if !cfg.Enabled {
 		return hostTelemetry{
 			meter: noop.NewMeterProvider().Meter(hostInstrumentationScope),
-			close: func() error { return nil },
+			close: func(context.Context) error { return nil },
 		}, nil
 	}
 
@@ -155,5 +174,10 @@ func newHostTelemetry(ctx context.Context, cfg hostTelemetryConfig, lggr cllogge
 	}
 
 	namedClient := client.ForName(hostInstrumentationScope)
-	return hostTelemetry{meter: namedClient.Meter, close: client.Close}, nil
+	return hostTelemetry{
+		meter: namedClient.Meter,
+		close: func(ctx context.Context) error {
+			return closeWithContext(ctx, client.Close)
+		},
+	}, nil
 }
