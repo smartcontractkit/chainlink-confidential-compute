@@ -3,7 +3,7 @@ package combiner
 import (
 	"fmt"
 
-	"github.com/smartcontractkit/confidential-compute/util"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"github.com/smartcontractkit/tdh2/go/tdh2/tdh2easy"
 )
 

@@ -4,9 +4,9 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-echo/app"
-	"github.com/smartcontractkit/confidential-compute/enclave/services/emitter"
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-echo/app"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

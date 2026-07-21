@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	enclaveclient "github.com/smartcontractkit/confidential-compute/enclave-client"
-	enclaveselector "github.com/smartcontractkit/confidential-compute/enclave-client/enclave-selector"
-	testdata "github.com/smartcontractkit/confidential-compute/enclave-client/test-data"
-	"github.com/smartcontractkit/confidential-compute/enclave/nitro"
-	"github.com/smartcontractkit/confidential-compute/types"
+	enclaveclient "github.com/smartcontractkit/chainlink-confidential-compute/enclave-client"
+	enclaveselector "github.com/smartcontractkit/chainlink-confidential-compute/enclave-client/enclave-selector"
+	testdata "github.com/smartcontractkit/chainlink-confidential-compute/enclave-client/test-data"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

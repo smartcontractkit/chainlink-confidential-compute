@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	"github.com/smartcontractkit/confidential-compute/capabilities/framework"
-	cctypes "github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework"
+	cctypes "github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 var _ framework.ConfidentialAction[*EnclaveActionInputAdapter, *confworkflowtypes.ConfidentialWorkflowResponse] = (*mockConfidentialAction)(nil)
