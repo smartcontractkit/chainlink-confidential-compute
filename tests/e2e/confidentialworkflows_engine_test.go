@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -54,9 +55,10 @@ type deferredGatewayProxy struct {
 	mu     sync.RWMutex
 	target *url.URL
 	server *http.Server
+	hits   atomic.Int64
 }
 
-func newDeferredGatewayProxy(t *testing.T) *deferredGatewayProxy {
+func newDeferredGatewayProxy(t *testing.T, port int) *deferredGatewayProxy {
 	t.Helper()
 	p := &deferredGatewayProxy{}
 	rp := &httputil.ReverseProxy{
@@ -71,6 +73,7 @@ func newDeferredGatewayProxy(t *testing.T) *deferredGatewayProxy {
 		},
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p.hits.Add(1)
 		p.mu.RLock()
 		hasTarget := p.target != nil
 		p.mu.RUnlock()
@@ -80,12 +83,17 @@ func newDeferredGatewayProxy(t *testing.T) *deferredGatewayProxy {
 		}
 		rp.ServeHTTP(w, r)
 	})
-	listener, err := net.Listen("tcp", "0.0.0.0:9999")
-	require.NoError(t, err, "failed to listen on port 9999 for gateway proxy")
+	addr := fmt.Sprintf("0.0.0.0:%d", port)
+	listener, err := net.Listen("tcp", addr)
+	require.NoError(t, err, "failed to listen on port %d for gateway proxy", port)
 	p.server = &http.Server{Handler: handler}
 	go func() { _ = p.server.Serve(listener) }()
 	return p
 }
+
+// Hits returns the number of requests the proxy has received. Used to assert a
+// dead gateway was actually reached, proving round-robin failover was exercised.
+func (p *deferredGatewayProxy) Hits() int64 { return p.hits.Load() }
 
 func (p *deferredGatewayProxy) SetTarget(rawURL string) error {
 	u, err := url.Parse(rawURL)
@@ -104,9 +112,11 @@ func (p *deferredGatewayProxy) Close() {
 
 // ---- Nitro enclave startup for engine ----
 
-// startNitroEnclavesForEngine starts a deferred gateway proxy on port 9999,
-// sets GATEWAY_URL so the EIF bakes it in, then builds and starts Nitro
-// enclaves for the confidential-workflows app.
+// startNitroEnclavesForEngine starts two deferred gateway proxies (a dead one
+// on :9998 and the real one on :9999), sets GATEWAY_URL to the comma-separated
+// pair so the EIF bakes it in, then builds and starts Nitro enclaves for the
+// confidential-workflows app. The dead-first ordering forces the enclave's
+// round-robin client to fail over on its first gateway call.
 
 // CRE-5142: enable us to use the real workflow storage service in local CRE.
 // engineTestStorageKeyHex is a deterministic ed25519 seed the enclave uses to
@@ -123,10 +133,17 @@ func enclaveHostAddr() string {
 }
 
 func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
-	[]types.Enclave, []string, *deferredGatewayProxy, *fakeStorageService, func(),
+	[]types.Enclave, []string, *deferredGatewayProxy, *deferredGatewayProxy, *fakeStorageService, func(),
 ) {
 	t.Helper()
-	proxy := newDeferredGatewayProxy(t)
+	// Two gateway front-proxies to exercise the enclave's round-robin failover.
+	// deadProxy (:9998) never gets a target, so it always returns 502; proxy
+	// (:9999) is pointed at the real gateway once the CRE env is up. GATEWAY_URL
+	// lists the dead one FIRST, so each enclave's cursor starts there: the first
+	// gateway call hits the 502 and must fail over to the healthy proxy. If
+	// failover regresses, that first call fails and the workflow errors out.
+	deadProxy := newDeferredGatewayProxy(t, 9998)
+	proxy := newDeferredGatewayProxy(t, 9999)
 
 	// Stand up the fake CRE storage service the enclave fetches the workflow
 	// binary from. Its artifact URL is set later, once the WASM server is up
@@ -138,20 +155,18 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
 	t.Setenv("STORAGE_SERVICE_TLS", "false")
 	t.Setenv("STORAGE_KEY", engineTestStorageKeyHex)
 
-	if tests.UseFakeEnclave() {
-		// Fake enclaves run as local processes, so they reach the deferred
-		// gateway proxy (:9999) over loopback rather than the Nitro wg0 address
-		// (100.64.0.3). No EIF/memory tuning.
-		t.Setenv("GATEWAY_URL", "http://localhost:9999")
-	} else {
-		t.Setenv("GATEWAY_URL", "http://100.64.0.3:9999")
+	// enclaveHostAddr resolves to loopback for fake enclaves (local processes)
+	// and the Nitro wg0 host IP (100.64.0.3) for real enclaves.
+	host := enclaveHostAddr()
+	t.Setenv("GATEWAY_URL", fmt.Sprintf("http://%s:9998,http://%s:9999", host, host))
+	if !tests.UseFakeEnclave() {
 		// confidential-workflows EIF is larger than confidential-http (wasmtime/CGO),
 		// so it needs more memory per enclave (~1148 MiB minimum).
 		t.Setenv("ENCLAVE_MEMORY_MIB", "1536")
 		t.Setenv("TOTAL_MEMORY_MIB", "4096")
 	}
 	enclaves, configURLs, enclaveCleanup := startNitroEnclaves(t, App{Name: "confidential-workflows"}, logger)
-	return enclaves, configURLs, proxy, storageSvc, enclaveCleanup
+	return enclaves, configURLs, proxy, deadProxy, storageSvc, enclaveCleanup
 }
 
 // ---- testConfidentialRelayFeature ----
@@ -413,9 +428,10 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	//    stands up the fake CRE storage service (STORAGE_SERVICE_URL) and sets
 	//    STORAGE_KEY; storageSvc's artifact URL is populated once the WASM
 	//    server is up (below).
-	enclaves, configURLs, gwProxy, storageSvc, enclaveCleanup := startNitroEnclavesForEngine(t, testLogger)
+	enclaves, configURLs, gwProxy, deadGwProxy, storageSvc, enclaveCleanup := startNitroEnclavesForEngine(t, testLogger)
 	defer enclaveCleanup()
 	defer gwProxy.Close()
+	defer deadGwProxy.Close()
 
 	// 2. Create capability job for confidential-workflows.
 	confCap, err := creJob.New("confidential-workflows", "1.0.0-alpha", "confidential-workflows", enclaves)
@@ -591,6 +607,14 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	//    is a no-op stub today, with PRIV-443 tracking the wiring. So we rely on this
 	//    engine-level log.
 	waitForWorkflowExecutionComplete(t, testEnv, testLogger, workflowID, 5*time.Minute)
+
+	// The GetSecret path routes through the enclave's gateway client, configured
+	// with a dead gateway first (:9998) and the real one second (:9999). The
+	// workflow only finishes if every gateway call failed over from the dead
+	// proxy to the healthy one. Assert the dead proxy was actually hit, so this
+	// test genuinely exercises round-robin failover rather than passing vacuously
+	// (e.g. if the cursor logic changed to skip the first URL).
+	require.Positive(t, deadGwProxy.Hits(), "dead gateway proxy was never hit; round-robin failover was not exercised")
 
 	// 8. The workflow has now loaded and executed inside the enclaves (WASM runtime
 	//    + binary resident, requests processed). The reported memory usage should

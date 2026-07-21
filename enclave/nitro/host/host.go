@@ -48,7 +48,7 @@ var (
 	storageKey     = flag.String("storage-key", os.Getenv("STORAGE_KEY"), "hex ed25519 CRE storage-service key to inject into the enclave over vsock (from a K8s secret). Reads STORAGE_KEY.")
 	storageSvcURL  = flag.String("storage-service-url", os.Getenv("STORAGE_SERVICE_URL"), "CRE storage-service gRPC address (host:port) to inject into the enclave. Reads STORAGE_SERVICE_URL.")
 	storageSvcTLS  = flag.Bool("storage-service-tls", os.Getenv("STORAGE_SERVICE_TLS") != "false", "whether the enclave should use TLS for the storage-service connection. Reads STORAGE_SERVICE_TLS (default true).")
-	gatewayURL     = flag.String("gateway-url", os.Getenv("GATEWAY_URL"), "Gateway URL for remote dispatch to inject into the enclave. Empty leaves the enclave local-only. Reads GATEWAY_URL.")
+	gatewayURL     = flag.String("gateway-url", os.Getenv("GATEWAY_URL"), "Gateway URL(s) for remote dispatch to inject into the enclave. Comma-separated for round-robin failover across multiple gateways. Empty leaves the enclave local-only. Reads GATEWAY_URL.")
 
 	maxBinarySize      = flag.Int64("max-binary-size", envInt64("MAX_BINARY_SIZE"), "max workflow-binary size in bytes the enclave accepts from storage. 0 uses the enclave default. Reads MAX_BINARY_SIZE.")
 	binaryFetchTimeout = flag.Duration("binary-fetch-timeout", envDuration("BINARY_FETCH_TIMEOUT"), "per-fetch timeout for downloading a workflow binary (e.g. 90s). 0 uses the enclave default. Reads BINARY_FETCH_TIMEOUT.")

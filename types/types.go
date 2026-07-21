@@ -41,8 +41,10 @@ const (
 //     uses to authenticate CRE storage-service DownloadArtifact calls.
 //   - StorageServiceURL / StorageServiceTLS: the storage-service gRPC endpoint
 //     the enclave fetches workflow binaries from.
-//   - GatewayURL: the Gateway endpoint for remote dispatch (dynamic secrets +
-//     capability calls). Empty leaves the enclave in local-only mode.
+//   - GatewayURL: the Gateway endpoint(s) for remote dispatch (dynamic secrets +
+//     capability calls). Accepts a comma-separated list; the enclave round-robins
+//     across them and fails over to the next on a transport/proxy error. Empty
+//     leaves the enclave in local-only mode.
 //   - MaxBinarySize: max decompressed workflow-binary size accepted from
 //     storage, in bytes. Zero falls back to the enclave's built-in default.
 //   - BinaryFetchTimeout: per-fetch timeout for downloading a workflow binary.
