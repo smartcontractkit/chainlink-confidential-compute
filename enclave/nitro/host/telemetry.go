@@ -65,6 +65,8 @@ func closeWithContext(ctx context.Context, closeFn func() error) error {
 	}
 }
 
+// This mirrors LOOP's environment-loaded telemetry config
+// https://github.com/smartcontractkit/chainlink-common/blob/4033d02539771c90bd1c5a6d39929d030d469aec/pkg/loop/config.go#L458-L477
 func loadHostTelemetryConfig(getenv func(string) string) (hostTelemetryConfig, error) {
 	cfg := hostTelemetryConfig{
 		Endpoint:         strings.TrimSpace(getenv(envTelemetryEndpoint)),
