@@ -53,11 +53,6 @@ type enclaveServer struct {
 	// attestationGroup collapses concurrent pubKeyAttestations misses for the
 	// same content into a single NSM attestation.
 	attestationGroup singleflight.Group
-	// execSlots caps concurrent executions; full -> 429, so a burst cannot
-	// exhaust the fixed enclave memory and wedge it. Nil when no app opts in
-	// via WithMaxConcurrentExecutions, in which case executions are unbounded.
-	execSlots               chan struct{}
-	maxConcurrentExecutions int64
 }
 
 type RequestTemplate struct {
@@ -66,22 +61,6 @@ type RequestTemplate struct {
 	Body        string   `json:"body"`
 	Method      string   `json:"method"`
 	ContentType string   `json:"contentType"`
-}
-
-// ServerOption configures an enclaveServer.
-type ServerOption func(*enclaveServer)
-
-// WithMaxConcurrentExecutions caps concurrent executions. Admission control is
-// off by default; an app opts in by passing a positive limit. confidential-
-// workflows derives its limit from enclave memory (a fresh WASM runtime per
-// execution vs a fixed memory budget); lighter apps set a high fixed limit or
-// none at all.
-func WithMaxConcurrentExecutions(n int64) ServerOption {
-	return func(s *enclaveServer) {
-		if n > 0 {
-			s.maxConcurrentExecutions = n
-		}
-	}
 }
 
 func NewEnclaveServer(
@@ -94,7 +73,6 @@ func NewEnclaveServer(
 	emitter types.Emitter,
 	config types.EnclaveConfig,
 	allowReconfig bool,
-	opts ...ServerOption,
 ) *enclaveServer {
 	replayCacheTTL := types.DefaultKeypairExpiration
 	inProgressReqs := util.NewBoundedCache[struct{}](&replayCacheTTL, nil, types.MaxReplayCacheEntries)
@@ -104,30 +82,21 @@ func NewEnclaveServer(
 	pubKeyAttestationTTL := types.PublicKeyAttestationCacheTTL
 	pubKeyAttestations := util.NewCache[[]byte](&pubKeyAttestationTTL, nil)
 
-	s := &enclaveServer{
-		app:                     app,
-		attestor:                attestor,
-		logger:                  logger,
-		keychain:                keychain,
-		verifier:                verifier,
-		combiner:                combiner,
-		emitter:                 emitter,
-		config:                  config,
-		allowReconfig:           allowReconfig,
-		inProgressReqs:          inProgressReqs,
-		executedReqs:            executedReqs,
-		pendingConfigVotes:      pendingConfigVotes,
-		pubKeyAttestations:      pubKeyAttestations,
+	return &enclaveServer{
+		app:                app,
+		attestor:           attestor,
+		logger:             logger,
+		keychain:           keychain,
+		verifier:           verifier,
+		combiner:           combiner,
+		emitter:            emitter,
+		config:             config,
+		allowReconfig:      allowReconfig,
+		inProgressReqs:     inProgressReqs,
+		executedReqs:       executedReqs,
+		pendingConfigVotes: pendingConfigVotes,
+		pubKeyAttestations: pubKeyAttestations,
 	}
-	for _, opt := range opts {
-		opt(s)
-	}
-	// Only allocate the semaphore when an app opted into a limit; otherwise
-	// execSlots stays nil and handleExecute runs executions unbounded.
-	if s.maxConcurrentExecutions > 0 {
-		s.execSlots = make(chan struct{}, s.maxConcurrentExecutions)
-	}
-	return s
 }
 
 // Handler returns the HTTP handler for the enclave server.
@@ -545,19 +514,6 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		responseEmitter.WriteErrorResponse(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
-	}
-
-	// Bound concurrent executions so a burst can't exhaust enclave memory. Apps
-	// that don't opt in (execSlots == nil) run unbounded.
-	if s.execSlots != nil {
-		select {
-		case s.execSlots <- struct{}{}:
-			defer func() { <-s.execSlots }()
-		default:
-			responseEmitter.Emit("execution_rejected_at_capacity", map[string]any{"max_concurrent": s.maxConcurrentExecutions})
-			responseEmitter.WriteErrorResponse(w, "enclave at capacity: too many concurrent executions", http.StatusTooManyRequests)
-			return
-		}
 	}
 
 	s.configLock.Lock()

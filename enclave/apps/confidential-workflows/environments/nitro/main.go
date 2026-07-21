@@ -10,7 +10,6 @@ import (
 	"github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-workflows/gateway"
 	"github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-workflows/memlimit"
 	"github.com/smartcontractkit/confidential-compute/enclave/nitro"
-	"github.com/smartcontractkit/confidential-compute/enclave/server"
 	"github.com/smartcontractkit/confidential-compute/enclave/services/combiner"
 	"github.com/smartcontractkit/confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/confidential-compute/enclave/services/keychain"
@@ -62,8 +61,17 @@ func main() {
 		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier)
 	}
 
+	// Cap concurrent executions at (enclave memory - reserve) / per-exec so a burst
+	// can't exhaust the fixed enclave memory and wedge the VM. Derived from memory
+	// read at startup, so it scales with the enclave's sizing.
+	confApp := app.NewConfidentialWorkflowsApp(
+		sdkpb.TeeType_TEE_TYPE_AWS_NITRO, appLogger, nil,
+		app.WithRemoteDispatcherFactory(dispatcherFactory),
+		app.WithMaxConcurrentExecutions(memlimit.MaxConcurrentExecutions()),
+	)
+
 	err = nitro.StartNitroEnclave(
-		app.NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, appLogger, nil, app.WithRemoteDispatcherFactory(dispatcherFactory)),
+		confApp,
 		att,
 		kc,
 		comb,
@@ -71,10 +79,6 @@ func main() {
 		emitter.NewNoOpEmitter(),
 		vsockPort,
 		*allowReconfig,
-		// Cap concurrent executions at (enclave memory - reserve) / per-exec so a
-		// burst can't exhaust the fixed enclave memory and wedge the VM. Derived
-		// from memory read at startup, so it scales with the enclave's sizing.
-		server.WithMaxConcurrentExecutions(memlimit.MaxConcurrentExecutions()),
 	)
 	if err != nil {
 		logger.Fatalf("Failed to start Nitro enclave: %v", err)

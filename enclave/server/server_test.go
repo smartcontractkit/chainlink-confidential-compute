@@ -106,7 +106,7 @@ func encryptShare(data []byte, publicKeyBytes []byte) ([]byte, error) {
 	return box.SealAnonymous(nil, data, &publicKey, nil)
 }
 
-func setupTestServerWithMockApp(t *testing.T, mockApp types.EnclaveApp, opts ...ServerOption) string {
+func setupTestServerWithMockApp(t *testing.T, mockApp types.EnclaveApp) string {
 	verifier := signatureverifier.NewEd25519SignatureVerifier()
 
 	// Create a test server with TCP listener
@@ -124,7 +124,6 @@ func setupTestServerWithMockApp(t *testing.T, mockApp types.EnclaveApp, opts ...
 		emitter.NewNoOpEmitter(),
 		types.EnclaveConfig{},
 		false,
-		opts...,
 	)
 
 	go func() {
@@ -746,127 +745,6 @@ func TestPublicKey_WithRequestID(t *testing.T) {
 		assert.GreaterOrEqual(t, len(body.PublicKeys), 1,
 			"without requestID should return all available keys")
 	})
-}
-
-func TestHandleExecute_ConcurrencyPushback(t *testing.T) {
-	const limit = 2
-
-	// App that blocks in Execute until released, so each admitted request holds
-	// its concurrency slot for the duration.
-	entered := make(chan struct{}, limit)
-	release := make(chan struct{})
-	mockApp := &mockEnclaveApp{
-		executeFunc: func([32]byte, string, []byte, map[string][]byte, types.Emitter) ([]byte, *types.ExecuteError) {
-			select {
-			case entered <- struct{}{}:
-			default:
-			}
-			<-release
-			return []byte(`[{"statusCode":200,"body":"ok"}]`), nil
-		},
-	}
-	serverURL := setupTestServerWithMockApp(t, mockApp, WithMaxConcurrentExecutions(limit))
-
-	// Configure a signer + fetch the enclave public key so requests pass
-	// validation and reach the app.
-	signerPub, signerPriv, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-	cfg := types.EnclaveConfig{Signers: [][]byte{signerPub}, MasterPublicKey: []byte("master-public-key"), T: 1, F: 0}
-	cfgBytes, err := json.Marshal(cfg)
-	require.NoError(t, err)
-	cfgReq, err := json.Marshal(types.ConfigRequest{Config: cfgBytes})
-	require.NoError(t, err)
-	client := &http.Client{}
-	cfgResp, err := client.Post(serverURL+"/config", "application/json", bytes.NewReader(cfgReq))
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, cfgResp.StatusCode)
-	util.SafeClose(cfgResp)
-
-	pkResp, err := client.Get(serverURL + "/publicKeys")
-	require.NoError(t, err)
-	var pk types.PublicKeyResponse
-	require.NoError(t, json.NewDecoder(pkResp.Body).Decode(&pk))
-	util.SafeClose(pkResp)
-	serverPubKey := pk.PublicKeys[0]
-
-	// mkBody builds a validly-signed request with a unique RequestID (unique hash,
-	// so concurrent requests aren't deduped by the in-progress/replay caches).
-	mkBody := func(id string) []byte {
-		pub, err := proto.Marshal(&enclavetypes.Request{
-			Method: http.MethodPost,
-			Url:    "https://example.com/api",
-			Body:   &enclavetypes.Request_BodyString{BodyString: `{"test": true}`},
-		})
-		require.NoError(t, err)
-		share, err := encryptShare([]byte("share-0"), serverPubKey)
-		require.NoError(t, err)
-		cr := types.ComputeRequest{
-			RequestID:                    sha256.Sum256([]byte(id)),
-			ApplicationRequestID:         id,
-			PublicData:                   pub,
-			Ciphertexts:                  [][]byte{[]byte("encrypted-secret")},
-			CiphertextNames:              []string{"secret1"},
-			MasterPublicKey:              cfg.MasterPublicKey,
-			EnclaveEphemeralPublicKey:    serverPubKey,
-			EncryptedDecryptionKeyShares: [][][]byte{{share}},
-			AppID:                        "test-app",
-			Version:                      "1.0.0",
-		}
-		h := cr.Hash()
-		ph := types.MakePeerIDSignatureDomainSeparatedPayload(util.GetConfidentialComputePayloadPrefix(), h[:])
-		body, err := json.Marshal([]types.SignedComputeRequest{{ComputeRequest: cr, Signature: ed25519.Sign(signerPriv, ph[:])}})
-		require.NoError(t, err)
-		return body
-	}
-	// fireOnce avoids require so it is safe to call from goroutines / Eventually.
-	fireOnce := func(body []byte) (int, string) {
-		resp, err := client.Post(serverURL+"/requests", "application/json", bytes.NewReader(body))
-		if err != nil {
-			return 0, err.Error()
-		}
-		b, _ := io.ReadAll(resp.Body)
-		util.SafeClose(resp)
-		return resp.StatusCode, string(b)
-	}
-
-	// Pre-build bodies on the test goroutine (require must not run in goroutines).
-	holderBodies := make([][]byte, limit)
-	for i := range holderBodies {
-		holderBodies[i] = mkBody(fmt.Sprintf("holder-%d", i))
-	}
-	overflowBody := mkBody("overflow")
-	afterBody := mkBody("after-release")
-
-	// Occupy all slots with requests that block in Execute.
-	var wg sync.WaitGroup
-	for i := 0; i < limit; i++ {
-		wg.Add(1)
-		go func(body []byte) {
-			defer wg.Done()
-			fireOnce(body)
-		}(holderBodies[i])
-	}
-	for i := 0; i < limit; i++ {
-		select {
-		case <-entered:
-		case <-time.After(3 * time.Second):
-			t.Fatal("timed out waiting for executions to occupy the slots")
-		}
-	}
-
-	// All slots held -> the next request is rejected at the gate.
-	status, body := fireOnce(overflowBody)
-	require.Equal(t, http.StatusTooManyRequests, status)
-	require.Contains(t, body, "at capacity")
-
-	// Releasing the holders must free their slots (via the deferred receive), so a
-	// new request is admitted again (fails later validation, but is not 429).
-	close(release)
-	wg.Wait()
-	require.Eventually(t, func() bool {
-		s, _ := fireOnce(afterBody)
-		return s != http.StatusTooManyRequests
-	}, 3*time.Second, 20*time.Millisecond)
 }
 
 func TestHandleExecute_QuorumValidation(t *testing.T) {

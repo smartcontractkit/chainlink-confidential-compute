@@ -46,7 +46,6 @@ func StartNitroEnclave(
 	emitter types.Emitter,
 	vsockPort *uint,
 	allowReconfig bool,
-	opts ...server.ServerOption,
 ) error {
 	if *vsockPort > math.MaxUint32 {
 		logger.Fatalf("Invalid port")
@@ -81,7 +80,6 @@ func StartNitroEnclave(
 		emitter,
 		types.EnclaveConfig{},
 		allowReconfig,
-		opts...,
 	)
 
 	// Start the server.
