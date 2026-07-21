@@ -10,7 +10,7 @@ replace github.com/smartcontractkit/confidential-compute => ../../../..
 
 require (
 	github.com/smartcontractkit/capabilities/libs v0.0.0-20260114123817-a22dd91e9d9d
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260714160921-4033d0253977
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260716194407-93eeb23b3f6b
 	github.com/smartcontractkit/confidential-compute v0.0.0-20260422000908-67af9e15fe65
 	github.com/smartcontractkit/confidential-compute/capabilities/framework v0.0.0-20260422000908-67af9e15fe65
 	github.com/stretchr/testify v1.11.1

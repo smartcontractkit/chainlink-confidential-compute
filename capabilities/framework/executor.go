@@ -1467,6 +1467,9 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 
 	vaultMetadata := metadata
 	e.applyPropagatedOrgIDToVault(ctx, &vaultMetadata)
+	if err := e.applyWorkflowDONBindingToVault(ctx, &vaultMetadata); err != nil {
+		return nil, nil, err
+	}
 
 	vaultDONRequest := capabilities.CapabilityRequest{
 		Payload:  vaultDONInputAny,
@@ -1616,6 +1619,28 @@ func (e *RealExecutor) applyPropagatedOrgIDToVault(ctx context.Context, md *capa
 	if !propagateOrgIDMeta {
 		md.OrgID = ""
 	}
+}
+
+// applyWorkflowDONBindingToVault sets RequestMetadata.WorkflowDonID to this
+// (conf-compute) node's local workflow DON ID when the WorkflowDonID binding
+// gate is enabled, so the remote VaultDON server accepts the request. From
+// VaultDON's perspective the calling DON is this conf-compute DON, not the
+// originating workflow DON carried in the incoming metadata. Any failure must
+// fail the whole call rather than silently sending a zero/mismatched WorkflowDonID.
+func (e *RealExecutor) applyWorkflowDONBindingToVault(ctx context.Context, md *capabilities.RequestMetadata) error {
+	bindingEnabled, err := cresettings.Default.RemoteExecutableWorkflowDONBindingEnabled.GetOrDefault(ctx, e.limitsFactory.Settings)
+	if err != nil {
+		return fmt.Errorf("failed to read RemoteExecutableWorkflowDONBindingEnabled setting: %w", err)
+	}
+	if !bindingEnabled {
+		return nil
+	}
+	localNode, err := e.capabilityRegistry.LocalNode(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get local node for VaultDON request metadata: %w", err)
+	}
+	md.WorkflowDonID = localNode.WorkflowDON.ID
+	return nil
 }
 
 func (e *RealExecutor) validateEnclaveSigners(config types.EnclaveConfig) error {

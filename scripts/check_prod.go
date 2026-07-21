@@ -8,8 +8,40 @@ import (
 	"os"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
+
 	"github.com/smartcontractkit/chainlink-common/pkg/teeattestation/nitro"
 )
+
+// coseSign1 mirrors the COSE_Sign1 array structure wrapping a Nitro attestation.
+type coseSign1 struct {
+	_           struct{} `cbor:",toarray"`
+	Protected   []byte
+	Unprotected cbor.RawMessage
+	Payload     []byte
+	Signature   []byte
+}
+
+// attestationPayload holds the Nitro attestation payload fields used for diagnostics.
+type attestationPayload struct {
+	ModuleID string          `cbor:"module_id"`
+	PCRs     map[uint][]byte `cbor:"pcrs"`
+}
+
+// parseAttestationPCRs decodes the PCR measurements a Nitro attestation reports,
+// without verifying its signature or certificate chain. It lets us surface the
+// measurements the enclave actually reported when no known measurement validates.
+func parseAttestationPCRs(attestation []byte) (map[uint][]byte, error) {
+	var sign1 coseSign1
+	if err := cbor.Unmarshal(attestation, &sign1); err != nil || len(sign1.Payload) == 0 {
+		return nil, fmt.Errorf("not a Nitro COSE document")
+	}
+	var payload attestationPayload
+	if err := cbor.Unmarshal(sign1.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("unparseable attestation payload: %w", err)
+	}
+	return payload.PCRs, nil
+}
 
 // pcrSetJSON renders a PCRSet as the trusted-measurement JSON that
 // nitro.ValidateAndParse consumes (hex-string pcr0/pcr1/pcr2 fields).
@@ -64,6 +96,13 @@ func runCheckProd(args []string) {
 			fmt.Printf("    PCR2: %s\n", hex.EncodeToString(doc.PCRs[2]))
 		} else {
 			fmt.Printf("  Running: UNKNOWN - no listed measurement validates the live attestation\n")
+			if pcrs, err := parseAttestationPCRs(resp.Attestation); err == nil {
+				fmt.Printf("    Attested PCR0: %s\n", hex.EncodeToString(pcrs[0]))
+				fmt.Printf("    Attested PCR1: %s\n", hex.EncodeToString(pcrs[1]))
+				fmt.Printf("    Attested PCR2: %s\n", hex.EncodeToString(pcrs[2]))
+			} else {
+				fmt.Printf("    (could not parse attested PCRs: %v)\n", err)
+			}
 			// Try each measurement anyway to surface why none matched.
 			for i, m := range validMeasurements {
 				_, err := nitro.ValidateAndParse(resp.Attestation, userData[:], pcrSetJSON(m))
