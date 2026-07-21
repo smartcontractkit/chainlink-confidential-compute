@@ -19,6 +19,7 @@ import (
 	"net/textproto"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -823,6 +824,45 @@ func TestHTTPEnclaveApp_Execute_StringBodyWithTemplating(t *testing.T) {
 	err = proto.Unmarshal(output, &response)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(http.StatusOK), response.StatusCode)
+}
+
+func TestHTTPEnclaveApp_Execute_DoesNotReuseConnectionsAcrossExecutions(t *testing.T) {
+	var connectionCount atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connectionCount.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defer transport.CloseIdleConnections()
+	enclaveApp := NewHTTPEnclaveApp(&http.Client{Transport: transport})
+	requestBytes, err := proto.Marshal(&enclavetypes.Request{
+		Method: http.MethodGet,
+		Url:    server.URL,
+	})
+	require.NoError(t, err)
+
+	for i := range 2 {
+		var requestID [32]byte
+		requestID[0] = byte(i + 1)
+		_, execErr := enclaveApp.Execute(
+			requestID,
+			types.AppIDConfidentialHTTP,
+			requestBytes,
+			nil,
+			&testEmitter{},
+		)
+		require.Nil(t, execErr)
+	}
+
+	assert.Equal(t, int32(2), connectionCount.Load())
 }
 
 func TestHandleExecute_WithRealHTTPSOutbound_TrustedCA(t *testing.T) {
