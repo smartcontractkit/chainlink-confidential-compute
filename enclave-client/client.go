@@ -7,7 +7,7 @@ package enclaveclient
 import (
 	"context"
 
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 type EnclaveClient interface {

@@ -15,7 +15,7 @@ import (
 	"github.com/smartcontractkit/cre-sdk-go/cre/wasm"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	"github.com/smartcontractkit/confidential-compute/tests/e2e/workflow/confidentialhttp/config"
+	"github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/workflow/confidentialhttp/config"
 )
 
 func main() {

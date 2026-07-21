@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-option go_package = "github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-http/types";
+option go_package = "github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/types";
 
 import "types/frameworktypes/framework.proto";
 import "google/protobuf/duration.proto";

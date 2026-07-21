@@ -6,15 +6,15 @@ import (
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
-	"github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-workflows/app"
-	"github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-workflows/gateway"
-	"github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-workflows/memlimit"
-	"github.com/smartcontractkit/confidential-compute/enclave/nitro"
-	"github.com/smartcontractkit/confidential-compute/enclave/services/combiner"
-	"github.com/smartcontractkit/confidential-compute/enclave/services/emitter"
-	"github.com/smartcontractkit/confidential-compute/enclave/services/keychain"
-	signatureverifier "github.com/smartcontractkit/confidential-compute/enclave/services/signature-verifier"
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/app"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/memlimit"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
+	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 var (

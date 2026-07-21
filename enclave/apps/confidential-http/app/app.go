@@ -16,9 +16,9 @@ import (
 
 	texttemplate "text/template"
 
-	enclavetypes "github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-http/types"
-	"github.com/smartcontractkit/confidential-compute/types"
-	"github.com/smartcontractkit/confidential-compute/util"
+	enclavetypes "github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"google.golang.org/protobuf/proto"
 )
 

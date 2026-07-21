@@ -17,8 +17,8 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-evm/gethwrappers/workflow/generated/capabilities_registry_wrapper_v2"
-	"github.com/smartcontractkit/confidential-compute/types"
-	"github.com/smartcontractkit/confidential-compute/util"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 )
 
 type CapabilitiesRegistry interface {
