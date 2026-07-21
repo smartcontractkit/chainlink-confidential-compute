@@ -261,9 +261,6 @@ type ExecuteResponse struct {
 	// events (e.g. capability_execution) count correctly. Additive for backward
 	// compatibility with hosts/enclaves that only understand Metrics.
 	MetricEvents []MetricEvent `json:"metricEvents,omitempty"`
-	// AttestationFallbackUsed is set client-side when attestation validated against
-	// previously trusted measurements instead of the current configured measurements.
-	AttestationFallbackUsed bool `json:"-"`
 }
 
 // Error data must not contain sensitive information.
@@ -307,9 +304,6 @@ func (er *ExecuteResponse) UserDataHash(requestVersion string) []byte {
 type EnclavePublicKeyData struct {
 	PublicKeyResponse
 	EnclaveID [32]byte
-	// AttestationFallbackUsed is set client-side when attestation validated against
-	// previously trusted measurements instead of the current configured measurements.
-	AttestationFallbackUsed bool `json:"-"`
 }
 
 type PublicKeyResponse struct {

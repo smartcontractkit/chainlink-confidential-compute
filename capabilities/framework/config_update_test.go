@@ -30,7 +30,7 @@ func (s *stubEnclaveClient) GetPublicKeys(ctx context.Context, requestID [32]byt
 func (s *stubEnclaveClient) ExecuteBatch(context.Context, []types.SignedComputeRequest, [][32]byte) ([]types.ExecuteResponse, error) {
 	return nil, nil
 }
-func (s *stubEnclaveClient) UpdateNodes([]types.Enclave) {}
+func (s *stubEnclaveClient) UpdateNodes(context.Context, []types.Enclave) error { return nil }
 func (s *stubEnclaveClient) UpdateConfig(context.Context, types.UpdateConfigRequest) error {
 	return nil
 }
@@ -38,7 +38,7 @@ func (s *stubEnclaveClient) GetConfigs(context.Context) ([]types.EnclaveConfig, 
 	return nil, nil
 }
 func (s *stubEnclaveClient) GetCacheStats() map[string]interface{} { return nil }
-func (s *stubEnclaveClient) Close() error                        { return nil }
+func (s *stubEnclaveClient) Close() error                          { return nil }
 
 func TestBroadcastConfigUpdate_DropsWhenProposalInFlight(t *testing.T) {
 	stub := &stubEnclaveClient{}

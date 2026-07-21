@@ -60,7 +60,7 @@ type MockEnclaveClient struct {
 
 	GetPublicKeysFunc func(ctx context.Context, requestID [32]byte, checkRequirements enclavetypes.RequirementsChecker) ([]enclavetypes.EnclavePublicKeyData, error)
 	ExecuteBatchFunc  func(ctx context.Context, reqs []enclavetypes.SignedComputeRequest, enclaveIDs [][32]byte) ([]enclavetypes.ExecuteResponse, error)
-	UpdateNodesFunc   func(nodes []enclavetypes.Enclave)
+	UpdateNodesFunc   func(ctx context.Context, nodes []enclavetypes.Enclave) error
 	UpdateConfigFunc  func(ctx context.Context, update enclavetypes.UpdateConfigRequest) error
 	GetConfigsFunc    func(ctx context.Context) ([]enclavetypes.EnclaveConfig, error)
 }
@@ -122,10 +122,11 @@ func (m *MockEnclaveClient) commonExecuteBatchReturn(t *testing.T) ([]enclavetyp
 		}}, nil
 }
 
-func (m *MockEnclaveClient) UpdateNodes(nodes []enclavetypes.Enclave) {
+func (m *MockEnclaveClient) UpdateNodes(ctx context.Context, nodes []enclavetypes.Enclave) error {
 	if m.UpdateNodesFunc != nil {
-		m.UpdateNodesFunc(nodes)
+		return m.UpdateNodesFunc(ctx, nodes)
 	}
+	return nil
 }
 
 func (m *MockEnclaveClient) UpdateConfig(ctx context.Context, update enclavetypes.UpdateConfigRequest) error {
@@ -614,7 +615,7 @@ func TestExecutor_Execute(t *testing.T) {
 		assert.NotEmpty(t, completedCalls[0]["workflow.owner"], "enclave metrics should include workflow.owner")
 		assert.NotEmpty(t, completedCalls[0]["enclave.id"], "enclave metrics should include enclave.id")
 		assert.Equal(t, WORKFLOW_NAME, completedCalls[0]["workflow.name"], "enclave metrics should include workflow.name")
-			assert.Equal(t, "enclave", completedCalls[0]["component"], "enclave metrics should include component tag")
+		assert.Equal(t, "enclave", completedCalls[0]["component"], "enclave metrics should include component tag")
 		assert.Equal(t, WORKFLOW_ORG_ID, completedCalls[0]["org.id"], "enclave metrics should include org.id")
 
 		var testOutput framework.TestOutput
@@ -1121,6 +1122,11 @@ func TestExecutor_Execute_EmitsAttestationFallbackMetric(t *testing.T) {
 	}
 
 	mockEnclaveClient := &MockEnclaveClient{}
+	// UpdateNodes failing means a new node was unreachable or misconfigured;
+	// EnsureFreshEnclaves should keep the old nodes and emit the fallback metric.
+	mockEnclaveClient.UpdateNodesFunc = func(ctx context.Context, nodes []enclavetypes.Enclave) error {
+		return errors.New("public key fetch failed")
+	}
 	mockEnclaveClient.GetPublicKeysFunc = func(ctx context.Context, requestID [32]byte, checkRequirements enclavetypes.RequirementsChecker) ([]enclavetypes.EnclavePublicKeyData, error) {
 		return []enclavetypes.EnclavePublicKeyData{{
 			PublicKeyResponse: enclavetypes.PublicKeyResponse{
@@ -1132,17 +1138,11 @@ func TestExecutor_Execute_EmitsAttestationFallbackMetric(t *testing.T) {
 				},
 				Attestation: []byte("mock_attestation_data"),
 			},
-			EnclaveID:               mockEnclaveID,
-			AttestationFallbackUsed: true,
+			EnclaveID: mockEnclaveID,
 		}}, nil
 	}
 	mockEnclaveClient.ExecuteBatchFunc = func(ctx context.Context, reqs []enclavetypes.SignedComputeRequest, enclaveIDs [][32]byte) ([]enclavetypes.ExecuteResponse, error) {
-		responses, err := mockEnclaveClient.commonExecuteBatchReturn(t)
-		if err != nil {
-			return nil, err
-		}
-		responses[0].AttestationFallbackUsed = true
-		return responses, nil
+		return mockEnclaveClient.commonExecuteBatchReturn(t)
 	}
 
 	mockVaultDON := framework.VaultDON{
@@ -1156,17 +1156,8 @@ func TestExecutor_Execute_EmitsAttestationFallbackMetric(t *testing.T) {
 
 	require.Contains(t, mockMetrics.EmitRecords, "attestation_validation_fallback_used")
 	records := mockMetrics.EmitRecords["attestation_validation_fallback_used"]
-	require.Len(t, records, 2)
-
-	endpoints := map[string]bool{}
-	for _, record := range records {
-		endpoint, ok := record["endpoint"].(string)
-		require.True(t, ok)
-		endpoints[endpoint] = true
-		assert.NotEmpty(t, record["enclave.id"])
-	}
-	assert.True(t, endpoints["publicKeys"])
-	assert.True(t, endpoints["execute"])
+	require.NotEmpty(t, records)
+	assert.Equal(t, "publicKeys", records[0]["endpoint"])
 }
 
 func TestExecutor_ExecuteFailAfterRetry(t *testing.T) {
@@ -1645,9 +1636,10 @@ func TestEnsureFreshEnclaves_ConfigurationChange(t *testing.T) {
 		mockEnclaveClient.ExecuteBatchFunc = func(ctx context.Context, reqs []enclavetypes.SignedComputeRequest, enclaveIDs [][32]byte) ([]enclavetypes.ExecuteResponse, error) {
 			return mockEnclaveClient.commonExecuteBatchReturn(t)
 		}
-		mockEnclaveClient.UpdateNodesFunc = func(nodes []enclavetypes.Enclave) {
+		mockEnclaveClient.UpdateNodesFunc = func(ctx context.Context, nodes []enclavetypes.Enclave) error {
 			updateNodesCallCount++
 			lastUpdatedNodes = nodes
+			return nil
 		}
 
 		mockVaultDONCapability := &MockVaultDONCapability{}
@@ -1750,8 +1742,9 @@ func TestEnsureFreshEnclaves_ConfigurationChange(t *testing.T) {
 		mockEnclaveClient.ExecuteBatchFunc = func(ctx context.Context, reqs []enclavetypes.SignedComputeRequest, enclaveIDs [][32]byte) ([]enclavetypes.ExecuteResponse, error) {
 			return mockEnclaveClient.commonExecuteBatchReturn(t)
 		}
-		mockEnclaveClient.UpdateNodesFunc = func(nodes []enclavetypes.Enclave) {
+		mockEnclaveClient.UpdateNodesFunc = func(ctx context.Context, nodes []enclavetypes.Enclave) error {
 			lastUpdatedNodes = nodes
+			return nil
 		}
 
 		mockVaultDONCapability := &MockVaultDONCapability{}
