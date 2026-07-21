@@ -8,7 +8,9 @@ import (
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-workflows/app"
 	"github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-workflows/gateway"
+	"github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-workflows/memlimit"
 	"github.com/smartcontractkit/confidential-compute/enclave/nitro"
+	"github.com/smartcontractkit/confidential-compute/enclave/server"
 	"github.com/smartcontractkit/confidential-compute/enclave/services/combiner"
 	"github.com/smartcontractkit/confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/confidential-compute/enclave/services/keychain"
@@ -69,6 +71,10 @@ func main() {
 		emitter.NewNoOpEmitter(),
 		vsockPort,
 		*allowReconfig,
+		// Cap concurrent executions at (enclave memory - reserve) / per-exec so a
+		// burst can't exhaust the fixed enclave memory and wedge the VM. Derived
+		// from memory read at startup, so it scales with the enclave's sizing.
+		server.WithMaxConcurrentExecutions(memlimit.MaxConcurrentExecutions()),
 	)
 	if err != nil {
 		logger.Fatalf("Failed to start Nitro enclave: %v", err)

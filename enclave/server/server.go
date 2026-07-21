@@ -54,7 +54,8 @@ type enclaveServer struct {
 	// same content into a single NSM attestation.
 	attestationGroup singleflight.Group
 	// execSlots caps concurrent executions; full -> 429, so a burst cannot
-	// exhaust the fixed enclave memory and wedge it.
+	// exhaust the fixed enclave memory and wedge it. Nil when no app opts in
+	// via WithMaxConcurrentExecutions, in which case executions are unbounded.
 	execSlots               chan struct{}
 	maxConcurrentExecutions int64
 }
@@ -67,16 +68,14 @@ type RequestTemplate struct {
 	ContentType string   `json:"contentType"`
 }
 
-// DefaultMaxConcurrentExecutions caps concurrent executions when unset.
-// Conservative for confidential-workflows (a fresh WASM runtime per execution vs
-// a fixed enclave memory budget); 8 is empirically healthy on staging. Lighter
-// apps raise it via WithMaxConcurrentExecutions.
-const DefaultMaxConcurrentExecutions int64 = 8
-
 // ServerOption configures an enclaveServer.
 type ServerOption func(*enclaveServer)
 
-// WithMaxConcurrentExecutions overrides the concurrent-execution limit.
+// WithMaxConcurrentExecutions caps concurrent executions. Admission control is
+// off by default; an app opts in by passing a positive limit. confidential-
+// workflows derives its limit from enclave memory (a fresh WASM runtime per
+// execution vs a fixed memory budget); lighter apps set a high fixed limit or
+// none at all.
 func WithMaxConcurrentExecutions(n int64) ServerOption {
 	return func(s *enclaveServer) {
 		if n > 0 {
@@ -119,12 +118,15 @@ func NewEnclaveServer(
 		executedReqs:            executedReqs,
 		pendingConfigVotes:      pendingConfigVotes,
 		pubKeyAttestations:      pubKeyAttestations,
-		maxConcurrentExecutions: DefaultMaxConcurrentExecutions,
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
-	s.execSlots = make(chan struct{}, s.maxConcurrentExecutions)
+	// Only allocate the semaphore when an app opted into a limit; otherwise
+	// execSlots stays nil and handleExecute runs executions unbounded.
+	if s.maxConcurrentExecutions > 0 {
+		s.execSlots = make(chan struct{}, s.maxConcurrentExecutions)
+	}
 	return s
 }
 
@@ -545,14 +547,17 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bound concurrent executions so a burst can't exhaust enclave memory.
-	select {
-	case s.execSlots <- struct{}{}:
-		defer func() { <-s.execSlots }()
-	default:
-		responseEmitter.Emit("execution_rejected_at_capacity", map[string]any{"max_concurrent": s.maxConcurrentExecutions})
-		responseEmitter.WriteErrorResponse(w, "enclave at capacity: too many concurrent executions", http.StatusTooManyRequests)
-		return
+	// Bound concurrent executions so a burst can't exhaust enclave memory. Apps
+	// that don't opt in (execSlots == nil) run unbounded.
+	if s.execSlots != nil {
+		select {
+		case s.execSlots <- struct{}{}:
+			defer func() { <-s.execSlots }()
+		default:
+			responseEmitter.Emit("execution_rejected_at_capacity", map[string]any{"max_concurrent": s.maxConcurrentExecutions})
+			responseEmitter.WriteErrorResponse(w, "enclave at capacity: too many concurrent executions", http.StatusTooManyRequests)
+			return
+		}
 	}
 
 	s.configLock.Lock()
