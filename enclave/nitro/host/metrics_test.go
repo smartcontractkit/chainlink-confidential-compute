@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -68,6 +69,19 @@ func gaugeValue(t *testing.T, data metricdata.ResourceMetrics, name string, attr
 	return 0
 }
 
+func assertNoGaugePoint(t *testing.T, data metricdata.ResourceMetrics, name string, attrs map[string]string) {
+	t.Helper()
+	result, found := findMetric(data, name)
+	if !found {
+		return
+	}
+	gauge, ok := result.Data.(metricdata.Gauge[int64])
+	require.True(t, ok, "metric %s was not an int64 gauge", name)
+	for _, point := range gauge.DataPoints {
+		assert.False(t, dataPointHasAttributes(point.Attributes, attrs), "metric %s retained attributes %v", name, attrs)
+	}
+}
+
 func dataPointHasAttributes(set attribute.Set, attrs map[string]string) bool {
 	if set.Len() != len(attrs) {
 		return false
@@ -115,7 +129,7 @@ func TestHostMetricsExecutionLifecycle(t *testing.T) {
 	finish(executionOutcomeSuccess)
 	data = collectHostMetrics(t, reader)
 	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMetric, nil))
-	assert.Equal(t, int64(0), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"}))
+	assertNoGaugePoint(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"})
 	assert.Equal(t, uint64(1), histogramCount(t, durationHistogram(t, data), map[string]string{
 		"app.id":       "confidential-workflows",
 		"outcome":      executionOutcomeSuccess,
@@ -134,7 +148,7 @@ func TestHostMetricsExecutionError(t *testing.T) {
 	finish(executionOutcomeError)
 	data := collectHostMetrics(t, reader)
 	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMetric, nil))
-	assert.Equal(t, int64(0), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"}))
+	assertNoGaugePoint(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"})
 	assert.Equal(t, uint64(1), histogramCount(t, durationHistogram(t, data), map[string]string{
 		"app.id":       "confidential-workflows",
 		"outcome":      executionOutcomeError,
@@ -160,7 +174,7 @@ func TestHostMetricsConcurrentSameWorkflow(t *testing.T) {
 	finishSecond(executionOutcomeSuccess)
 	data = collectHostMetrics(t, reader)
 	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMetric, nil))
-	assert.Equal(t, int64(0), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"}))
+	assertNoGaugePoint(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"})
 	assert.Equal(t, uint64(2), histogramCount(t, durationHistogram(t, data), map[string]string{
 		"app.id":       "confidential-workflows",
 		"outcome":      executionOutcomeSuccess,
@@ -181,13 +195,13 @@ func TestHostMetricsConcurrentDifferentWorkflows(t *testing.T) {
 	finishFirst(executionOutcomeSuccess)
 	data = collectHostMetrics(t, reader)
 	assert.Equal(t, int64(1), gaugeValue(t, data, executionsInflightMetric, nil))
-	assert.Equal(t, int64(0), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"}))
+	assertNoGaugePoint(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"})
 	assert.Equal(t, int64(1), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-b"}))
 
 	finishSecond(executionOutcomeSuccess)
 	data = collectHostMetrics(t, reader)
 	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMetric, nil))
-	assert.Equal(t, int64(0), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-b"}))
+	assertNoGaugePoint(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-b"})
 }
 
 func TestHostMetricsUnknownWorkflow(t *testing.T) {
@@ -214,7 +228,7 @@ func TestHostMetricsFinishIsIdempotent(t *testing.T) {
 
 	data := collectHostMetrics(t, reader)
 	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMetric, nil))
-	assert.Equal(t, int64(0), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"}))
+	assertNoGaugePoint(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"})
 	assert.Equal(t, uint64(1), histogramCount(t, durationHistogram(t, data), map[string]string{
 		"app.id":  "confidential-workflows",
 		"outcome": executionOutcomeSuccess,
@@ -254,10 +268,28 @@ func TestHostMetricsConcurrentUpdates(t *testing.T) {
 
 	data := collectHostMetrics(t, reader)
 	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMetric, nil))
-	assert.Equal(t, int64(0), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"}))
+	assertNoGaugePoint(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"})
 	assert.Equal(t, uint64(executions), histogramCount(t, durationHistogram(t, data), map[string]string{
 		"app.id":  "confidential-workflows",
 		"outcome": executionOutcomeSuccess,
 	}))
+	assert.Empty(t, metrics.workflowRefs)
+}
+
+func TestHostMetricsDoesNotRetainCompletedWorkflows(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+	const workflows = 1_000
+
+	for i := range workflows {
+		finish := metrics.startExecution(executionMetadata{
+			appID:      "confidential-workflows",
+			workflowID: fmt.Sprintf("workflow-%d", i),
+		})
+		finish(executionOutcomeSuccess)
+	}
+
+	data := collectHostMetrics(t, reader)
+	_, found := findMetric(data, workflowActiveMetric)
+	assert.False(t, found)
 	assert.Empty(t, metrics.workflowRefs)
 }

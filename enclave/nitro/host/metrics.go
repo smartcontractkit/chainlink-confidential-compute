@@ -34,7 +34,7 @@ func (noopExecutionMetrics) startExecution(executionMetadata) func(string) {
 type hostMetrics struct {
 	executionDuration  metric.Float64Histogram
 	executionsInflight metric.Int64Gauge
-	workflowActive     metric.Int64Gauge
+	workflowActive     metric.Int64ObservableGauge
 
 	mu           sync.Mutex
 	inflight     int64
@@ -62,23 +62,42 @@ func newHostMetrics(meter metric.Meter) (*hostMetrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create enclave executions in-flight gauge: %w", err)
 	}
-	active, err := meter.Int64Gauge(
+	metrics := &hostMetrics{
+		executionDuration:  duration,
+		executionsInflight: inflight,
+		workflowRefs:       make(map[string]int64),
+	}
+	// Observable state prevents the cumulative SDK from retaining every historical workflow ID.
+	active, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.workflow.active",
 		metric.WithDescription("Whether a workflow has an enclave execution in flight in this host"),
 		metric.WithUnit("1"),
+		metric.WithInt64Callback(metrics.observeActiveWorkflows),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create active workflow gauge: %w", err)
 	}
 
-	metrics := &hostMetrics{
-		executionDuration:  duration,
-		executionsInflight: inflight,
-		workflowActive:     active,
-		workflowRefs:       make(map[string]int64),
-	}
+	metrics.workflowActive = active
 	metrics.executionsInflight.Record(context.Background(), 0)
 	return metrics, nil
+}
+
+func (m *hostMetrics) observeActiveWorkflows(ctx context.Context, observer metric.Int64Observer) error {
+	m.mu.Lock()
+	workflowIDs := make([]string, 0, len(m.workflowRefs))
+	for workflowID := range m.workflowRefs {
+		workflowIDs = append(workflowIDs, workflowID)
+	}
+	m.mu.Unlock()
+
+	for _, workflowID := range workflowIDs {
+		observer.Observe(
+			1,
+			metric.WithAttributes(attribute.String("workflow.id", workflowID)),
+		)
+	}
+	return nil
 }
 
 func (m *hostMetrics) startExecution(metadata executionMetadata) func(string) {
@@ -89,11 +108,6 @@ func (m *hostMetrics) startExecution(metadata executionMetadata) func(string) {
 	m.executionsInflight.Record(ctx, m.inflight)
 	if metadata.workflowID != "" {
 		m.workflowRefs[metadata.workflowID]++
-		m.workflowActive.Record(
-			ctx,
-			1,
-			metric.WithAttributes(attribute.String("workflow.id", metadata.workflowID)),
-		)
 	}
 	m.mu.Unlock()
 
@@ -123,16 +137,9 @@ func (m *hostMetrics) startExecution(metadata executionMetadata) func(string) {
 			m.executionsInflight.Record(ctx, m.inflight)
 			if metadata.workflowID != "" {
 				m.workflowRefs[metadata.workflowID]--
-				active := int64(1)
 				if m.workflowRefs[metadata.workflowID] == 0 {
-					active = 0
 					delete(m.workflowRefs, metadata.workflowID)
 				}
-				m.workflowActive.Record(
-					ctx,
-					active,
-					metric.WithAttributes(attribute.String("workflow.id", metadata.workflowID)),
-				)
 			}
 			m.mu.Unlock()
 		})
