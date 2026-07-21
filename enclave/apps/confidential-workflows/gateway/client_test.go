@@ -14,7 +14,7 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/jsonrpc2"
 
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 // mockAttestor returns the input data as the "attestation document" so tests can

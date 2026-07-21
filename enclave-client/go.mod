@@ -1,13 +1,13 @@
-module github.com/smartcontractkit/confidential-compute/enclave-client
+module github.com/smartcontractkit/chainlink-confidential-compute/enclave-client
 
 go 1.26.4
 
-replace github.com/smartcontractkit/confidential-compute => ../
+replace github.com/smartcontractkit/chainlink-confidential-compute => ../
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260714160921-4033d0253977
-	github.com/smartcontractkit/confidential-compute v0.0.0-00010101000000-000000000000
+	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-00010101000000-000000000000
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel/metric v1.43.0
 	golang.org/x/sync v0.20.0

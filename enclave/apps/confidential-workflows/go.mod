@@ -1,4 +1,4 @@
-module github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-workflows
+module github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows
 
 go 1.26.4
 
@@ -8,7 +8,7 @@ require (
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260622152157-c8e129347b8b
 	github.com/smartcontractkit/chainlink-protos/storage-service v0.3.0
 	github.com/smartcontractkit/chainlink-protos/workflows/go v0.0.0-20260528173149-f5b8336b19d9
-	github.com/smartcontractkit/confidential-compute v0.0.0
+	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
 	github.com/smartcontractkit/cre-sdk-go v1.9.0-capdev.1.0.20260612142557-01f4db8d7d47
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.82.0
@@ -107,4 +107,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/smartcontractkit/confidential-compute => ../../../
+replace github.com/smartcontractkit/chainlink-confidential-compute => ../../../

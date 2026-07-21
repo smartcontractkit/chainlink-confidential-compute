@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 // durationBucketSeconds defines the rounding granularity for timing metrics.

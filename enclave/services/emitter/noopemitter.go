@@ -1,6 +1,6 @@
 package emitter
 
-import "github.com/smartcontractkit/confidential-compute/types"
+import "github.com/smartcontractkit/chainlink-confidential-compute/types"
 
 type noOpEmitter struct{}
 
