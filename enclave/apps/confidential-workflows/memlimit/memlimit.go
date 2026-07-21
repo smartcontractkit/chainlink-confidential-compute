@@ -29,14 +29,29 @@ const (
 	FallbackConcurrency int64 = 8
 )
 
-// MaxConcurrentExecutions derives the cap from the enclave's total memory,
+// Result is the derived concurrent-execution cap plus the inputs used to
+// compute it, so the enclave can log how it arrived at the limit.
+type Result struct {
+	MaxConcurrent int64
+	TotalMB       uint64
+	ReserveMB     uint64
+	PerExecMB     uint64
+	Introspected  bool // false if total memory couldn't be read and we fell back
+}
+
+// Derive computes the concurrent-execution cap from the enclave's total memory,
 // falling back to FallbackConcurrency when it can't be read.
-func MaxConcurrentExecutions() int64 {
+func Derive() Result {
+	r := Result{ReserveMB: ReserveMB, PerExecMB: PerExecMB}
 	totalMB, err := totalMemoryMB()
 	if err != nil || totalMB == 0 {
-		return FallbackConcurrency
+		r.MaxConcurrent = FallbackConcurrency
+		return r
 	}
-	return concurrency(totalMB, ReserveMB, PerExecMB)
+	r.TotalMB = totalMB
+	r.Introspected = true
+	r.MaxConcurrent = concurrency(totalMB, ReserveMB, PerExecMB)
+	return r
 }
 
 // concurrency returns how many perExecMB-sized executions fit in

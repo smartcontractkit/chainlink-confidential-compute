@@ -25,10 +25,15 @@ func TestConcurrency(t *testing.T) {
 	}
 }
 
-// MaxConcurrentExecutions must never hand back a non-positive limit, which would
-// make the semaphore either panic (negative cap) or reject everything (zero).
-func TestMaxConcurrentExecutionsIsPositive(t *testing.T) {
-	if got := MaxConcurrentExecutions(); got < 1 {
-		t.Fatalf("MaxConcurrentExecutions() = %d, want >= 1", got)
+// Derive must never hand back a non-positive limit, which would make the
+// semaphore either panic (negative cap) or reject everything (zero). It must
+// also report the configured reserve/per-exec so the startup log is accurate.
+func TestDerive(t *testing.T) {
+	r := Derive()
+	if r.MaxConcurrent < 1 {
+		t.Fatalf("Derive().MaxConcurrent = %d, want >= 1", r.MaxConcurrent)
+	}
+	if r.ReserveMB != ReserveMB || r.PerExecMB != PerExecMB {
+		t.Fatalf("Derive() = %+v, want ReserveMB=%d PerExecMB=%d", r, ReserveMB, PerExecMB)
 	}
 }

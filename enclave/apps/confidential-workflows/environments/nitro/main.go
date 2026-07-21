@@ -64,10 +64,18 @@ func main() {
 	// Cap concurrent executions at (enclave memory - reserve) / per-exec so a burst
 	// can't exhaust the fixed enclave memory and wedge the VM. Derived from memory
 	// read at startup, so it scales with the enclave's sizing.
+	limit := memlimit.Derive()
+	appLogger.Infow("Confidential workflows concurrency limit",
+		"maxConcurrentExecutions", limit.MaxConcurrent,
+		"totalMemMB", limit.TotalMB,
+		"reserveMB", limit.ReserveMB,
+		"perExecMB", limit.PerExecMB,
+		"memoryIntrospected", limit.Introspected,
+	)
 	confApp := app.NewConfidentialWorkflowsApp(
 		sdkpb.TeeType_TEE_TYPE_AWS_NITRO, appLogger, nil,
 		app.WithRemoteDispatcherFactory(dispatcherFactory),
-		app.WithMaxConcurrentExecutions(memlimit.MaxConcurrentExecutions()),
+		app.WithMaxConcurrentExecutions(limit.MaxConcurrent),
 	)
 
 	err = nitro.StartNitroEnclave(
