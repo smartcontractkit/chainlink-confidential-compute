@@ -3,15 +3,16 @@ package main
 import (
 	"context"
 	"errors"
-	"strings"
+	"sync"
 	"testing"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
-
-const testTelemetryPublicKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func envGetter(values map[string]string) func(string) string {
 	return func(key string) string {
@@ -19,197 +20,202 @@ func envGetter(values map[string]string) func(string) string {
 	}
 }
 
-func validTelemetryEnv() map[string]string {
-	return map[string]string{
-		envTelemetryEnabled:            "true",
-		envTelemetryEndpoint:           "localhost:4317",
-		envTelemetryInsecureConnection: "true",
-		envTelemetryAuthHeader:         "1:public-key:signature",
-		envTelemetryAuthPublicKeyHex:   testTelemetryPublicKey,
-		envPodName:                     "enclave-host-0",
-		envPodUID:                      "7d9cf36e-b747-4013-b680-061133be0e29",
-	}
+func TestLoadHostTelemetryConfigDisabledByDefault(t *testing.T) {
+	cfg := loadHostTelemetryConfig(envGetter(nil))
+
+	assert.False(t, cfg.enabled())
+	assert.Equal(t, defaultHostServiceName, cfg.ServiceName)
 }
 
-func TestLoadHostTelemetryConfigDisabled(t *testing.T) {
-	cfg, err := loadHostTelemetryConfig(envGetter(map[string]string{
-		envTelemetryInsecureConnection: "not-a-bool",
+func TestLoadHostTelemetryConfigEndpoint(t *testing.T) {
+	cfg := loadHostTelemetryConfig(envGetter(map[string]string{
+		envOTLPEndpoint:    " http://daemon-collector.open-telemetry.svc.cluster.local:4317 ",
+		envOTELServiceName: " enclave-host ",
+		envPodName:         " enclave-host-0 ",
+		envPodUID:          " 7d9cf36e-b747-4013-b680-061133be0e29 ",
 	}))
 
-	require.NoError(t, err)
-	assert.False(t, cfg.Enabled)
-}
-
-func TestLoadHostTelemetryConfigEnabled(t *testing.T) {
-	cfg, err := loadHostTelemetryConfig(envGetter(validTelemetryEnv()))
-
-	require.NoError(t, err)
 	assert.Equal(t, hostTelemetryConfig{
-		Enabled:            true,
-		Endpoint:           "localhost:4317",
-		InsecureConnection: true,
-		AuthHeader:         "1:public-key:signature",
-		AuthPublicKeyHex:   testTelemetryPublicKey,
-		PodName:            "enclave-host-0",
-		PodUID:             "7d9cf36e-b747-4013-b680-061133be0e29",
+		Endpoint:    "http://daemon-collector.open-telemetry.svc.cluster.local:4317",
+		ServiceName: "enclave-host",
+		PodName:     "enclave-host-0",
+		PodUID:      "7d9cf36e-b747-4013-b680-061133be0e29",
 	}, cfg)
-}
-
-func TestLoadHostTelemetryConfigSecure(t *testing.T) {
-	values := validTelemetryEnv()
-	values[envTelemetryInsecureConnection] = "false"
-	values[envTelemetryCACertFile] = "/etc/telemetry/ca.crt"
-
-	cfg, err := loadHostTelemetryConfig(envGetter(values))
-
-	require.NoError(t, err)
-	assert.False(t, cfg.InsecureConnection)
-	assert.Equal(t, "/etc/telemetry/ca.crt", cfg.CACertFile)
-}
-
-func TestLoadHostTelemetryConfigInvalidBool(t *testing.T) {
-	tests := []struct {
-		name     string
-		variable string
-	}{
-		{name: "enabled", variable: envTelemetryEnabled},
-		{name: "insecure connection", variable: envTelemetryInsecureConnection},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			values := validTelemetryEnv()
-			values[test.variable] = "not-a-bool"
-
-			_, err := loadHostTelemetryConfig(envGetter(values))
-
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), test.variable)
-		})
-	}
-}
-
-func TestLoadHostTelemetryConfigRequiredValues(t *testing.T) {
-	tests := []struct {
-		name     string
-		variable string
-	}{
-		{name: "endpoint", variable: envTelemetryEndpoint},
-		{name: "auth header", variable: envTelemetryAuthHeader},
-		{name: "public key", variable: envTelemetryAuthPublicKeyHex},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			values := validTelemetryEnv()
-			delete(values, test.variable)
-
-			_, err := loadHostTelemetryConfig(envGetter(values))
-
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), test.variable)
-		})
-	}
-}
-
-func TestLoadHostTelemetryConfigInvalidPublicKey(t *testing.T) {
-	tests := []struct {
-		name      string
-		publicKey string
-	}{
-		{name: "not hex", publicKey: "zz"},
-		{name: "wrong length", publicKey: "0123"},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			values := validTelemetryEnv()
-			values[envTelemetryAuthPublicKeyHex] = test.publicKey
-
-			_, err := loadHostTelemetryConfig(envGetter(values))
-
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), envTelemetryAuthPublicKeyHex)
-		})
-	}
-}
-
-func TestLoadHostTelemetryConfigSecureWithoutCA(t *testing.T) {
-	values := validTelemetryEnv()
-	values[envTelemetryInsecureConnection] = "false"
-
-	_, err := loadHostTelemetryConfig(envGetter(values))
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), envTelemetryCACertFile)
-}
-
-func TestLoadHostTelemetryConfigDoesNotExposeAuthHeader(t *testing.T) {
-	values := validTelemetryEnv()
-	secret := "sensitive-auth-header"
-	values[envTelemetryAuthHeader] = secret
-	delete(values, envTelemetryEndpoint)
-
-	_, err := loadHostTelemetryConfig(envGetter(values))
-
-	require.Error(t, err)
-	assert.False(t, strings.Contains(err.Error(), secret))
+	assert.True(t, cfg.enabled())
 }
 
 func TestNewHostTelemetryDisabled(t *testing.T) {
-	telemetry, err := newHostTelemetry(
+	exporterCreated := false
+	telemetry, err := newHostTelemetryWithExporter(
 		context.Background(),
-		hostTelemetryConfig{},
+		hostTelemetryConfig{ServiceName: defaultHostServiceName},
 		cllogger.Sugared(cllogger.Nop()),
+		func(context.Context, string) (sdkmetric.Exporter, error) {
+			exporterCreated = true
+			return nil, nil
+		},
 	)
 
 	require.NoError(t, err)
+	assert.False(t, exporterCreated)
 	assert.NotNil(t, telemetry.meter)
 	require.NotNil(t, telemetry.close)
 	require.NoError(t, telemetry.close(context.Background()))
 	require.NoError(t, telemetry.close(context.Background()))
 }
 
-func TestCloseWithContextReturnsCloseError(t *testing.T) {
-	closeErr := errors.New("close failed")
+func TestNewHostTelemetryExportsMetricsWithHostResource(t *testing.T) {
+	t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
+	exporter := newRecordingMetricExporter()
+	var gotEndpoint string
+	telemetry, err := newHostTelemetryWithExporter(
+		context.Background(),
+		hostTelemetryConfig{
+			Endpoint:    "http://collector:4317",
+			ServiceName: "enclave-host",
+			PodName:     "enclave-host-0",
+			PodUID:      "7d9cf36e-b747-4013-b680-061133be0e29",
+		},
+		cllogger.Sugared(cllogger.Nop()),
+		func(_ context.Context, endpoint string) (sdkmetric.Exporter, error) {
+			gotEndpoint = endpoint
+			return exporter, nil
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "http://collector:4317", gotEndpoint)
 
-	err := closeWithContext(context.Background(), func() error {
-		return closeErr
-	})
+	counter, err := telemetry.meter.Int64Counter("test.counter")
+	require.NoError(t, err)
+	counter.Add(context.Background(), 1)
 
-	require.ErrorIs(t, err, closeErr)
+	require.NoError(t, telemetry.close(context.Background()))
+	require.NoError(t, telemetry.close(context.Background()))
+	assert.Equal(t, 1, exporter.shutdownCount())
+
+	exported := exporter.lastExport()
+	require.NotNil(t, exported)
+	attrs := exported.Resource.Set()
+	assertResourceAttribute(t, attrs, "service.name", "enclave-host")
+	assertResourceAttribute(t, attrs, "service.instance.id", "7d9cf36e-b747-4013-b680-061133be0e29")
+	assertResourceAttribute(t, attrs, "enclave.type", "aws-nitro")
+	assertResourceAttribute(t, attrs, "k8s.pod.name", "enclave-host-0")
+	assertResourceAttribute(t, attrs, "k8s.pod.uid", "7d9cf36e-b747-4013-b680-061133be0e29")
 }
 
-func TestCloseWithContextStopsWaitingWhenCanceled(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	started := make(chan struct{})
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
+func TestNewHostTelemetryReturnsExporterError(t *testing.T) {
+	expected := errors.New("bad endpoint")
+	_, err := newHostTelemetryWithExporter(
+		context.Background(),
+		hostTelemetryConfig{Endpoint: "://invalid", ServiceName: defaultHostServiceName, PodUID: "pod-uid"},
+		cllogger.Sugared(cllogger.Nop()),
+		func(context.Context, string) (sdkmetric.Exporter, error) {
+			return nil, expected
+		},
+	)
 
-	done := make(chan error, 1)
-	go func() {
-		done <- closeWithContext(ctx, func() error {
-			close(started)
-			<-release
-			return nil
+	require.ErrorIs(t, err, expected)
+	assert.Contains(t, err.Error(), "create OTLP metric exporter")
+}
+
+func TestNewOTLPMetricExporterRejectsInvalidEndpoint(t *testing.T) {
+	for _, endpoint := range []string{
+		"://invalid",
+		"collector:4317",
+		"grpc://collector:4317",
+		"http://collector:4317?query=value",
+		"http://collector:4317#fragment",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			_, err := newOTLPMetricExporter(context.Background(), endpoint)
+			require.Error(t, err)
 		})
-	}()
-
-	<-started
-	cancel()
-	require.ErrorIs(t, <-done, context.Canceled)
+	}
 }
 
-func TestCloseWithContextDoesNotStartAfterDeadline(t *testing.T) {
+func TestHostTelemetryShutdownHonorsContext(t *testing.T) {
+	exporter := newRecordingMetricExporter()
+	exporter.shutdown = func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	telemetry, err := newHostTelemetryWithExporter(
+		context.Background(),
+		hostTelemetryConfig{
+			Endpoint:    "http://collector:4317",
+			ServiceName: defaultHostServiceName,
+			PodUID:      "pod-uid",
+		},
+		cllogger.Sugared(cllogger.Nop()),
+		func(context.Context, string) (sdkmetric.Exporter, error) {
+			return exporter, nil
+		},
+	)
+	require.NoError(t, err)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	called := false
-
-	err := closeWithContext(ctx, func() error {
-		called = true
-		return nil
-	})
+	err = telemetry.close(ctx)
 
 	require.ErrorIs(t, err, context.Canceled)
-	assert.False(t, called)
+}
+
+func assertResourceAttribute(t *testing.T, attrs *attribute.Set, key, expected string) {
+	t.Helper()
+	value, ok := attrs.Value(attribute.Key(key))
+	require.True(t, ok, "resource attribute %s was missing", key)
+	assert.Equal(t, expected, value.AsString())
+}
+
+type recordingMetricExporter struct {
+	mu             sync.Mutex
+	exported       *metricdata.ResourceMetrics
+	shutdown       func(context.Context) error
+	shutdownCalled int
+}
+
+func newRecordingMetricExporter() *recordingMetricExporter {
+	return &recordingMetricExporter{
+		shutdown: func(context.Context) error { return nil },
+	}
+}
+
+func (*recordingMetricExporter) Temporality(sdkmetric.InstrumentKind) metricdata.Temporality {
+	return metricdata.CumulativeTemporality
+}
+
+func (*recordingMetricExporter) Aggregation(kind sdkmetric.InstrumentKind) sdkmetric.Aggregation {
+	return sdkmetric.DefaultAggregationSelector(kind)
+}
+
+func (e *recordingMetricExporter) Export(_ context.Context, data *metricdata.ResourceMetrics) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	snapshot := *data
+	e.exported = &snapshot
+	return nil
+}
+
+func (*recordingMetricExporter) ForceFlush(ctx context.Context) error {
+	return ctx.Err()
+}
+
+func (e *recordingMetricExporter) Shutdown(ctx context.Context) error {
+	e.mu.Lock()
+	e.shutdownCalled++
+	shutdown := e.shutdown
+	e.mu.Unlock()
+	return shutdown(ctx)
+}
+
+func (e *recordingMetricExporter) lastExport() *metricdata.ResourceMetrics {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.exported
+}
+
+func (e *recordingMetricExporter) shutdownCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.shutdownCalled
 }

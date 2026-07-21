@@ -1029,10 +1029,7 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
-	telemetryCfg, err := loadHostTelemetryConfig(os.Getenv)
-	if err != nil {
-		log.Fatalf("invalid telemetry configuration: %v", err)
-	}
+	telemetryCfg := loadHostTelemetryConfig(os.Getenv)
 	telemetry, err := newHostTelemetry(ctx, telemetryCfg, lggr)
 	if err != nil {
 		log.Fatalf("failed to initialize telemetry: %v", err)
