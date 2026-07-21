@@ -49,7 +49,7 @@
   override_mode = "all"
   http_port_range_start = 10100
 
-  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":false}}", CL_CRE_SETTINGS_DEFAULT = "{\"PerWorkflow\":{\"ConfidentialWorkflows\":{\"Enabled\":\"true\"}}}" }
+  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":false}}", CL_CRE_SETTINGS_DEFAULT = "{\"RemoteExecutableWorkflowDONBindingEnabled\":\"true\",\"PerWorkflow\":{\"ConfidentialWorkflows\":{\"Enabled\":\"true\"}}}" }
   supported_evm_chains = [1337, 2337]
   capabilities = ["consensus", "confidential-workflows", "confidential-relay", "cron", "http-action", "http-trigger", "don-time"]
   exposes_remote_capabilities = true
@@ -98,7 +98,7 @@
   override_mode = "each"
   http_port_range_start = 10400
 
-  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":false}}" }
+  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":false}}", CL_CRE_SETTINGS_DEFAULT = "{\"RemoteExecutableWorkflowDONBindingEnabled\":\"true\"}" }
   supported_evm_chains = [1337, 2337]
   capabilities = ["vault"]
   exposes_remote_capabilities = true

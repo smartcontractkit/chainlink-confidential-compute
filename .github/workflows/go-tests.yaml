@@ -22,8 +22,14 @@ on:
     - cron: '0 7 * * *'
 env:
   CHAINLINK_COMMIT_SHA: a1ea8cd880345a3a6c80bf70f079c7dc783d5493
-  LEGACY_COMMIT_SHA: 24ffd2435ed7d6bca45525c2189d720b7a4ef6bc # v0.0.14, the commit pointing to whatever is capability gitref is deployed in Chainlink's plugins.private.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.private.yaml#L50.
+  LEGACY_COMMIT_SHA: 7d70fcf65d8b5af102d8267b54d31ea163dea203 # initial commit, the commit pointing to whatever is capability gitref is deployed in Chainlink's plugins.private.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.private.yaml#L50.
   LEGACY_ENCLAVE_RELEASE: v1.3.0 # The release version whose enclaves are currently deployed in production. Update this when deploying new enclaves.
+  # Optional PCR override: when all three are set, the legacy-enclaves leg uses
+  # these measurements directly instead of fetching them from the release build
+  # logs. Leave blank to fetch from LEGACY_ENCLAVE_RELEASE.
+  LEGACY_ENCLAVE_PCR0: 7cf9af0301ac6aff79c3f0c3d069c72ceb75cd6aebf118754de8368023bed3ad51d97c7e370fee0bf83719772be709f8
+  LEGACY_ENCLAVE_PCR1: 4b4d5b3661b3efc12920900c80e126e4ce783c522de6c02a2a5bf7af3a2b9327b86776f188e4be1c1c404a129dbda493
+  LEGACY_ENCLAVE_PCR2: e651899c697e2aced754cba2b0cd49c3ae73b0d0fbac104adf93a6e0869bc5237452fcfac5aacbd84dea199121812416
   # Pinned refs for the supporting CRE Docker images, used as GHCR cache keys.
   JD_VERSION: 0.22.1 # job-distributor release (checked out as v${JD_VERSION})
   ATLAS_SHA: da84cb72d3a160e02896247d46ab4b9806ebee2f # chip-ingress + chip-config
@@ -33,11 +39,11 @@ jobs:
   # run the real-enclave e2e + integration suite plus the backwards-compat and
   # legacy-enclaves variants; the nightly schedule runs only the real-enclave
   # e2e + integration suite. Pull requests exercise fake enclaves for the
-  # standard and remote-legacy variants. Backwards-compatibility runs a prior-release
-  # capability plugin, which predates fake enclaves and cannot validate their
-  # attestation, so for now it runs against real enclaves on the self-hosted
-  # Nitro runner. TODO(PRIV-506): once a prior release with fake-enclave support
-  # exists, switch this variant back to fake enclaves on the hosted runners.
+  # standard and backwards-compat variants, plus the remote legacy-enclaves
+  # variant. Backwards-compatibility runs a prior-release capability plugin
+  # against fake enclaves via the confidential-HTTP e2e portion (the prior
+  # release now supports fake enclaves, so it no longer needs the self-hosted
+  # Nitro runner).
   #
   # Applying the "e2e-real-enclaves" label to a PR additionally runs the e2e +
   # integration suites against real Nitro enclaves on the self-hosted runner.
@@ -67,14 +73,14 @@ jobs:
           E2E_HTTP='{"name":"E2E confidential HTTP (fake enclaves)","real":false,"legacy":false,"legacy-enclaves":false,"portion":"e2e-http"}'
           E2E_WORKFLOWS='{"name":"E2E workflow engine (fake enclaves)","real":false,"legacy":false,"legacy-enclaves":false,"portion":"e2e-workflows"}'
           REAL_E2E='{"name":"e2e + integration (real enclaves)","real":true,"legacy":false,"legacy-enclaves":false}'
-          BACKWARDS_COMPAT='{"name":"Test backwards compatibility (real enclaves)","real":true,"legacy":true,"legacy-enclaves":false}'
+          BACKWARDS_COMPAT='{"name":"Test backwards compatibility (fake enclaves)","real":false,"legacy":true,"legacy-enclaves":false,"portion":"e2e-http"}'
           LEGACY_ENCLAVES='{"name":"Test against legacy enclaves","real":false,"legacy":false,"legacy-enclaves":true}'
 
           # ---- Select variants for the triggering event ----
           case "${{ github.event_name }}" in
             pull_request)
-              # Fake-enclave suites for fast feedback, plus the real-enclave
-              # backwards-compat and remote-legacy variants.
+              # Fake-enclave suites for fast feedback (including backwards-compat),
+              # plus the remote legacy-enclaves variant.
               VARIANTS=("$UNIT" "$E2E_HTTP" "$E2E_WORKFLOWS" "$BACKWARDS_COMPAT" "$LEGACY_ENCLAVES")
               # Opt-in: the "e2e-real-enclaves" label adds a real Nitro e2e +
               # integration run on the self-hosted runner.
@@ -83,9 +89,11 @@ jobs:
               fi
               ;;
             push)
-              # Release-branch pushes: the same real/legacy set a PR runs, minus
-              # the fake-enclave suites. Pushes to main are gated out by
-              # run-suite, so this only runs on release/** pushes.
+              # Release-branch pushes: the real e2e + integration suite plus the
+              # backwards-compat and remote legacy-enclaves variants (dropping the
+              # plain fake-enclave unit/e2e suites a PR runs for fast feedback).
+              # Pushes to main are gated out by run-suite, so this only runs on
+              # release/** pushes.
               VARIANTS=("$REAL_E2E" "$BACKWARDS_COMPAT" "$LEGACY_ENCLAVES")
               ;;
             *)
@@ -480,9 +488,9 @@ jobs:
 
   test:
     name: ${{ matrix.name }}
-    # Real-enclave variants (the nightly run and the backwards-compatibility
-    # variant) require the self-hosted Nitro instance; fake-enclave variants run
-    # on regular GitHub-hosted runners.
+    # Real-enclave variants (the nightly run and the label-triggered e2e +
+    # integration suite) require the self-hosted Nitro instance; fake-enclave
+    # variants run on regular GitHub-hosted runners.
     runs-on: ${{ matrix.real && fromJSON('["self-hosted", "Linux", "X64"]') || fromJSON(format('["runs-on={0}", "cpu=16+32", "ram=8+64", "family=c7i+c7a+c6i", "volume=200gb"]', github.run_id)) }}
     if: ${{ needs.setup.outputs.run-suite == 'true' }}
     needs: [setup, build, prebuild-images]
@@ -714,44 +722,51 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "Fetching PCR measurements for legacy enclave release ${{ env.LEGACY_ENCLAVE_RELEASE }}..."
+          if [ -n "${{ env.LEGACY_ENCLAVE_PCR0 }}" ] && [ -n "${{ env.LEGACY_ENCLAVE_PCR1 }}" ] && [ -n "${{ env.LEGACY_ENCLAVE_PCR2 }}" ]; then
+            echo "Using PCR measurement override (skipping release fetch)..."
+            PCR0="${{ env.LEGACY_ENCLAVE_PCR0 }}"
+            PCR1="${{ env.LEGACY_ENCLAVE_PCR1 }}"
+            PCR2="${{ env.LEGACY_ENCLAVE_PCR2 }}"
+          else
+            echo "Fetching PCR measurements for legacy enclave release ${{ env.LEGACY_ENCLAVE_RELEASE }}..."
 
-          # Get the release notes to find the workflow run URL
-          RELEASE_BODY=$(gh release view "${{ env.LEGACY_ENCLAVE_RELEASE }}" --repo "${{ github.repository }}" --json body --jq '.body')
-          echo "Release body: $RELEASE_BODY"
+            # Get the release notes to find the workflow run URL
+            RELEASE_BODY=$(gh release view "${{ env.LEGACY_ENCLAVE_RELEASE }}" --repo "${{ github.repository }}" --json body --jq '.body')
+            echo "Release body: $RELEASE_BODY"
 
-          # Extract the workflow run ID from the release notes URL
-          RUN_ID=$(echo "$RELEASE_BODY" | grep -oP 'actions/runs/\K[0-9]+' || true)
-          if [ -z "$RUN_ID" ]; then
-            echo "::error::Could not find workflow run ID in release notes for ${{ env.LEGACY_ENCLAVE_RELEASE }}"
-            exit 1
-          fi
-          echo "Found workflow run ID: $RUN_ID"
+            # Extract the workflow run ID from the release notes URL
+            RUN_ID=$(echo "$RELEASE_BODY" | grep -oP 'actions/runs/\K[0-9]+' || true)
+            if [ -z "$RUN_ID" ]; then
+              echo "::error::Could not find workflow run ID in release notes for ${{ env.LEGACY_ENCLAVE_RELEASE }}"
+              exit 1
+            fi
+            echo "Found workflow run ID: $RUN_ID"
 
-          # Get the build-enclave-and-plugin job ID. The build is now a matrix
-          # across enclave apps, so match the confidential-http job (which builds
-          # the enclave the CI test connects to). Fall back to the pre-matrix
-          # single-job name for older releases.
-          JOB_ID=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}/jobs" \
-            --jq '.jobs[] | select(.name == "build-enclave-and-plugin" or (.name | startswith("build-enclave-and-plugin (confidential-http"))) | .id' | head -1)
-          echo "Found job ID: $JOB_ID"
+            # Get the build-enclave-and-plugin job ID. The build is now a matrix
+            # across enclave apps, so match the confidential-http job (which builds
+            # the enclave the CI test connects to). Fall back to the pre-matrix
+            # single-job name for older releases.
+            JOB_ID=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}/jobs" \
+              --jq '.jobs[] | select(.name == "build-enclave-and-plugin" or (.name | startswith("build-enclave-and-plugin (confidential-http"))) | .id' | head -1)
+            echo "Found job ID: $JOB_ID"
 
-          # Download job logs and parse PCR measurements
-          JOB_LOG=$(gh api "repos/${{ github.repository }}/actions/jobs/${JOB_ID}/logs" 2>/dev/null || true)
+            # Download job logs and parse PCR measurements
+            JOB_LOG=$(gh api "repos/${{ github.repository }}/actions/jobs/${JOB_ID}/logs" 2>/dev/null || true)
 
-          # The build logs two measurement blocks: the secure image (printed
-          # first) and the insecure (ALLOW_RECONFIG) image whose PCRs differ.
-          # The deployed CI enclaves run the insecure EIF, so parse the block
-          # logged after the insecure image build, not the secure one.
-          INSECURE_LOG=$(echo "$JOB_LOG" | sed -n '/nitro-enclave-insecure:latest/,$p')
+            # The build logs two measurement blocks: the secure image (printed
+            # first) and the insecure (ALLOW_RECONFIG) image whose PCRs differ.
+            # The deployed CI enclaves run the insecure EIF, so parse the block
+            # logged after the insecure image build, not the secure one.
+            INSECURE_LOG=$(echo "$JOB_LOG" | sed -n '/nitro-enclave-insecure:latest/,$p')
 
-          PCR0=$(echo "$INSECURE_LOG" | grep -oP '"PCR0"\s*:\s*"\K[0-9a-f]+' | head -1 || true)
-          PCR1=$(echo "$INSECURE_LOG" | grep -oP '"PCR1"\s*:\s*"\K[0-9a-f]+' | head -1 || true)
-          PCR2=$(echo "$INSECURE_LOG" | grep -oP '"PCR2"\s*:\s*"\K[0-9a-f]+' | head -1 || true)
+            PCR0=$(echo "$INSECURE_LOG" | grep -oP '"PCR0"\s*:\s*"\K[0-9a-f]+' | head -1 || true)
+            PCR1=$(echo "$INSECURE_LOG" | grep -oP '"PCR1"\s*:\s*"\K[0-9a-f]+' | head -1 || true)
+            PCR2=$(echo "$INSECURE_LOG" | grep -oP '"PCR2"\s*:\s*"\K[0-9a-f]+' | head -1 || true)
 
-          if [ -z "$PCR0" ] || [ -z "$PCR1" ] || [ -z "$PCR2" ]; then
-            echo "::error::Could not parse PCR measurements from job $JOB_ID logs"
-            exit 1
+            if [ -z "$PCR0" ] || [ -z "$PCR1" ] || [ -z "$PCR2" ]; then
+              echo "::error::Could not parse PCR measurements from job $JOB_ID logs"
+              exit 1
+            fi
           fi
 
           # Write pcr_measurements.json matching the format produced by nitro-cli
@@ -912,8 +927,9 @@ jobs:
           # Clean up JD database volume if it exists
           docker volume rm job-distributor-db-volume || true
 
-          # Scheduled/release runs (and the backwards-compat variant) exercise REAL
-          # enclaves and only run the ./tests module (integration + tests/e2e).
+          # Real-enclave runs (the nightly schedule, release pushes, and the
+          # label-triggered variant) only run the ./tests module (integration +
+          # tests/e2e).
           if [ "${{ matrix.real }}" = "true" ]; then
             echo "Real-enclave run: testing the ./tests module against Nitro enclaves"
             # Leave ENCLAVE_TYPE unset so the harness provisions real Nitro enclaves.
