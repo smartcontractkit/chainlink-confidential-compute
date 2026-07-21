@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/rs/zerolog"
-	cctypes "github.com/smartcontractkit/confidential-compute/types"
-	"github.com/smartcontractkit/confidential-compute/util"
+	cctypes "github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 )
 
 // aesKeyForEncryptionTest is a hex-encoded 32-byte AES-256 key used in e2e tests.

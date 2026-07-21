@@ -11,14 +11,14 @@ import (
 	"math"
 	"net"
 
-	"github.com/smartcontractkit/confidential-compute/enclave/fake"
-	"github.com/smartcontractkit/confidential-compute/enclave/server"
-	"github.com/smartcontractkit/confidential-compute/enclave/services/attestor"
-	"github.com/smartcontractkit/confidential-compute/enclave/services/combiner"
-	"github.com/smartcontractkit/confidential-compute/enclave/services/keychain"
-	signatureverifier "github.com/smartcontractkit/confidential-compute/enclave/services/signature-verifier"
-	"github.com/smartcontractkit/confidential-compute/enclave/vsock"
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/fake"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/server"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/attestor"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
+	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/vsock"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 // OpenFakeAttestor returns a FakeAttestor and a dummy cleanup function.

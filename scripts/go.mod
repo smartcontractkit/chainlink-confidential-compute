@@ -1,14 +1,14 @@
-module github.com/smartcontractkit/confidential-compute/scripts
+module github.com/smartcontractkit/chainlink-confidential-compute/scripts
 
 go 1.26.4
 
-replace github.com/smartcontractkit/confidential-compute => ../
+replace github.com/smartcontractkit/chainlink-confidential-compute => ../
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260714160921-4033d0253977
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260622152157-c8e129347b8b
-	github.com/smartcontractkit/confidential-compute v0.0.0-20251014091702-53f02d33c6b4
+	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20251014091702-53f02d33c6b4
 	golang.org/x/crypto v0.52.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1

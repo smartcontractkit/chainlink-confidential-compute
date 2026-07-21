@@ -37,10 +37,10 @@ import (
 	creworkflow "github.com/smartcontractkit/chainlink/system-tests/lib/cre/workflow"
 	ttypes "github.com/smartcontractkit/chainlink/system-tests/tests/test-helpers/configuration"
 
-	"github.com/smartcontractkit/confidential-compute/tests"
-	creJob "github.com/smartcontractkit/confidential-compute/tests/e2e/job"
-	"github.com/smartcontractkit/confidential-compute/types"
-	"github.com/smartcontractkit/confidential-compute/util"
+	"github.com/smartcontractkit/chainlink-confidential-compute/tests"
+	creJob "github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/job"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 
 	"github.com/stretchr/testify/require"
 )

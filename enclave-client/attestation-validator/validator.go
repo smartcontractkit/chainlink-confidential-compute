@@ -13,8 +13,8 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/beholder"
 	"github.com/smartcontractkit/chainlink-common/pkg/teeattestation/nitro"
 
-	"github.com/smartcontractkit/confidential-compute/enclave/fake"
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/fake"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 // AttestationValidator validates TEE attestation documents, with or without a

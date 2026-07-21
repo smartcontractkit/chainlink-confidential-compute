@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-option go_package = "github.com/smartcontractkit/confidential-compute/capabilities/framework";
+option go_package = "github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework";
 
 package framework;
 

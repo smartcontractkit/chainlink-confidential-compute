@@ -9,8 +9,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/smartcontractkit/confidential-compute/types"
-	"github.com/smartcontractkit/confidential-compute/util"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"golang.org/x/crypto/nacl/box"
 )
 

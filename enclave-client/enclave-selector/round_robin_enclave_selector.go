@@ -5,7 +5,7 @@ import (
 	"math/big"
 	"sync"
 
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 var _ EnclaveSelector = (*roundRobinEnclaveSelector)(nil)
