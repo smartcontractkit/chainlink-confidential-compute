@@ -11,7 +11,7 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
 
-	frameworktypes "github.com/smartcontractkit/confidential-compute/types/frameworktypes"
+	frameworktypes "github.com/smartcontractkit/chainlink-confidential-compute/types/frameworktypes"
 )
 
 type testExecutorInput struct{}

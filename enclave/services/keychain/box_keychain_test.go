@@ -11,8 +11,8 @@ import (
 
 	"golang.org/x/crypto/nacl/box"
 
-	"github.com/smartcontractkit/confidential-compute/enclave/services/keychain"
-	"github.com/smartcontractkit/confidential-compute/util"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -7,7 +7,7 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
 
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 // newRequestTimeoutResolver returns a pool callback that resolves enclave and

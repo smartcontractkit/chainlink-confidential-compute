@@ -15,10 +15,10 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	attestationvalidator "github.com/smartcontractkit/confidential-compute/enclave-client/attestation-validator"
-	enclaveselector "github.com/smartcontractkit/confidential-compute/enclave-client/enclave-selector"
-	"github.com/smartcontractkit/confidential-compute/types"
-	"github.com/smartcontractkit/confidential-compute/util"
+	attestationvalidator "github.com/smartcontractkit/chainlink-confidential-compute/enclave-client/attestation-validator"
+	enclaveselector "github.com/smartcontractkit/chainlink-confidential-compute/enclave-client/enclave-selector"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 )
 
 // nopLogger discards all log output. Used when no logger is provided.

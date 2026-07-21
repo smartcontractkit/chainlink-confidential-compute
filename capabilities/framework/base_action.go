@@ -7,15 +7,15 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
-	"github.com/smartcontractkit/confidential-compute/types"
-	framework "github.com/smartcontractkit/confidential-compute/types/frameworktypes"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	framework "github.com/smartcontractkit/chainlink-confidential-compute/types/frameworktypes"
 	"google.golang.org/protobuf/proto"
 )
 
 // ExecutorInput must be satisfied by all capabilities running on the Confidential Compute Framework.
 // The `GetInput` function is satisfied by any proto struct with an `Input` field.
 // The GetVaultDonSecrets method may be satisfied by adding the `SecretIdentifier` struct
-// available in the `github.com/smartcontractkit/confidential-compute/types/frameworktypes` package.
+// available in the `github.com/smartcontractkit/chainlink-confidential-compute/types/frameworktypes` package.
 type ExecutorInput interface {
 	GetInput() proto.Message
 	GetVaultDonSecrets() []*framework.SecretIdentifier

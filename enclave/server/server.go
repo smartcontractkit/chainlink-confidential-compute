@@ -17,12 +17,12 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	"github.com/smartcontractkit/confidential-compute/enclave/services/attestor"
-	"github.com/smartcontractkit/confidential-compute/enclave/services/combiner"
-	"github.com/smartcontractkit/confidential-compute/enclave/services/keychain"
-	signatureverifier "github.com/smartcontractkit/confidential-compute/enclave/services/signature-verifier"
-	"github.com/smartcontractkit/confidential-compute/types"
-	"github.com/smartcontractkit/confidential-compute/util"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/attestor"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
+	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 )
 
 // `enclaveServer` is a cloud provider-agnostic server that handles incoming requests to the enclave.

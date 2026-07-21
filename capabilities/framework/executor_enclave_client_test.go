@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/smartcontractkit/confidential-compute/capabilities/framework"
+	"github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework"
 )
 
 type fakeTimeoutGetter struct {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smartcontractkit/confidential-compute/util"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"github.com/stretchr/testify/assert"
 )
 

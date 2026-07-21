@@ -32,10 +32,10 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/host"
 	"github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 
-	enclaveclient "github.com/smartcontractkit/confidential-compute/enclave-client"
-	"github.com/smartcontractkit/confidential-compute/types"
-	framework "github.com/smartcontractkit/confidential-compute/types/frameworktypes"
-	"github.com/smartcontractkit/confidential-compute/util"
+	enclaveclient "github.com/smartcontractkit/chainlink-confidential-compute/enclave-client"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	framework "github.com/smartcontractkit/chainlink-confidential-compute/types/frameworktypes"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/actions/vault"
 	caperrors "github.com/smartcontractkit/chainlink-common/pkg/capabilities/errors"

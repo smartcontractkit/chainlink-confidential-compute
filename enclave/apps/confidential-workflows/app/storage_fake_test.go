@@ -12,7 +12,7 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	storage_service "github.com/smartcontractkit/chainlink-protos/storage-service/go"
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 )
