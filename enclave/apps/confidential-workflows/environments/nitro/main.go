@@ -8,6 +8,7 @@ import (
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/app"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/memlimit"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
@@ -60,8 +61,25 @@ func main() {
 		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier)
 	}
 
+	// Cap concurrent executions at (enclave memory - reserve) / per-exec so a burst
+	// can't exhaust the fixed enclave memory and wedge the VM. Derived from memory
+	// read at startup, so it scales with the enclave's sizing.
+	limit := memlimit.Derive()
+	appLogger.Infow("Confidential workflows concurrency limit",
+		"maxConcurrentExecutions", limit.MaxConcurrent,
+		"totalMemMB", limit.TotalMB,
+		"reserveMB", limit.ReserveMB,
+		"perExecMB", limit.PerExecMB,
+		"memoryIntrospected", limit.Introspected,
+	)
+	confApp := app.NewConfidentialWorkflowsApp(
+		sdkpb.TeeType_TEE_TYPE_AWS_NITRO, appLogger, nil,
+		app.WithRemoteDispatcherFactory(dispatcherFactory),
+		app.WithMaxConcurrentExecutions(limit.MaxConcurrent),
+	)
+
 	err = nitro.StartNitroEnclave(
-		app.NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, appLogger, nil, app.WithRemoteDispatcherFactory(dispatcherFactory)),
+		confApp,
 		att,
 		kc,
 		comb,
