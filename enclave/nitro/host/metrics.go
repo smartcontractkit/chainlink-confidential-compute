@@ -15,12 +15,6 @@ const (
 	executionOutcomeError   = "error"
 )
 
-type executionMetadata struct {
-	appID       string
-	workflowID  string
-	requestKind string
-}
-
 type executionMetrics interface {
 	startExecution(executionMetadata) func(outcome string)
 }

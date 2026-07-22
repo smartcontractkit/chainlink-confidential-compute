@@ -21,16 +21,12 @@ import (
 	"syscall"
 	"time"
 
-	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
-	confhttptypes "github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/types"
 	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/vsock"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
-	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"go.uber.org/zap/zapcore"
-	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -134,113 +130,6 @@ func (br *batchRequest) signers() []string {
 type batchResponse struct {
 	response *types.ExecuteResponse
 	err      error
-}
-
-func logPublicData(reqLog cllogger.SugaredLogger, appID string, publicData []byte) (metadata executionMetadata) {
-	metadata.appID = appID
-
-	switch appID {
-	case types.AppIDConfidentialHTTP:
-		var req confhttptypes.Request
-		if err := proto.Unmarshal(publicData, &req); err != nil {
-			reqLog.Warnw("failed to decode publicData",
-				"event", "PUBLIC_DATA_DECODE_ERR",
-				"appID", appID,
-				"publicDataLen", len(publicData),
-				"error", err)
-			return metadata
-		}
-
-		bodyKind := "none"
-		bodyLen := 0
-		switch body := req.GetBody().(type) {
-		case *confhttptypes.Request_BodyString:
-			bodyKind = "string"
-			bodyLen = len(body.BodyString)
-		case *confhttptypes.Request_BodyBytes:
-			bodyKind = "bytes"
-			bodyLen = len(body.BodyBytes)
-		}
-
-		timeout := ""
-		if req.GetTimeout() != nil {
-			timeout = req.GetTimeout().AsDuration().String()
-		}
-
-		reqLog.Infow("decoded publicData",
-			"event", "PUBLIC_DATA",
-			"appID", appID,
-			"publicDataLen", len(publicData),
-			"publicDataType", "confidential_http_request",
-			"url", req.GetUrl(),
-			"method", req.GetMethod(),
-			"bodyKind", bodyKind,
-			"bodyLen", bodyLen,
-			"headerNames", slices.Sorted(maps.Keys(req.GetMultiHeaders())),
-			"templatePublicValueKeys", slices.Sorted(maps.Keys(req.GetTemplatePublicValues())),
-			"customRootCACertPEMLen", len(req.GetCustomRootCaCertPem()),
-			"timeout", timeout,
-			"encryptOutput", req.GetEncryptOutput())
-
-	case types.AppIDConfidentialWorkflows:
-		var execution confworkflowtypes.WorkflowExecution
-		if err := proto.Unmarshal(publicData, &execution); err != nil {
-			reqLog.Warnw("failed to decode publicData",
-				"event", "PUBLIC_DATA_DECODE_ERR",
-				"appID", appID,
-				"publicDataLen", len(publicData),
-				"error", err)
-			return metadata
-		}
-
-		metadata.workflowID = execution.GetWorkflowId()
-		metadata.requestKind = "unset"
-		executeRequestConfigLen := 0
-		var maxResponseSize uint64
-		fields := []any{
-			"event", "PUBLIC_DATA",
-			"appID", appID,
-			"publicDataLen", len(publicData),
-			"publicDataType", "workflow_execution",
-			"workflowID", execution.GetWorkflowId(),
-			"executionID", execution.GetExecutionId(),
-			"owner", execution.GetOwner(),
-			"orgID", execution.GetOrgId(),
-			"binaryURL", execution.GetBinaryUrl(),
-			"binaryHash", hex.EncodeToString(execution.GetBinaryHash()),
-			"requirementsPresent", execution.GetRequirements() != nil,
-			"restrictionsPresent", execution.GetRestrictions() != nil,
-		}
-
-		if execReq := execution.GetSdkExecuteRequest(); execReq != nil {
-			executeRequestConfigLen = len(execReq.GetConfig())
-			maxResponseSize = execReq.GetMaxResponseSize()
-			switch req := execReq.GetRequest().(type) {
-			case *sdkpb.ExecuteRequest_Subscribe:
-				metadata.requestKind = "subscribe"
-			case *sdkpb.ExecuteRequest_Trigger:
-				metadata.requestKind = "trigger"
-				fields = append(fields, "triggerID", req.Trigger.GetId())
-			case *sdkpb.ExecuteRequest_PreHook:
-				metadata.requestKind = "pre_hook"
-				fields = append(fields, "triggerID", req.PreHook.GetId())
-			}
-		}
-
-		fields = append(fields,
-			"executeRequestKind", metadata.requestKind,
-			"executeRequestConfigLen", executeRequestConfigLen,
-			"maxResponseSize", maxResponseSize)
-		reqLog.Infow("decoded publicData", fields...)
-
-	default:
-		reqLog.Debugw("publicData decoder unavailable",
-			"event", "PUBLIC_DATA_UNSUPPORTED",
-			"appID", appID,
-			"publicDataLen", len(publicData))
-	}
-
-	return metadata
 }
 
 func NewHostServer(ctx context.Context, clientOverride *http.Client) *hostServer {
@@ -617,7 +506,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		"ephemeralPK", ephemeralPKHex,
 		"bodyLen", len(body),
 		"arrivalTime", arrivalTime.Format(time.RFC3339Nano))
-	metadata := logPublicData(reqLog, execReq.AppID, execReq.PublicData)
+	metadata := inspectPublicData(reqLog, execReq.AppID, execReq.PublicData)
 
 	// Log hash input components for debugging hash divergence
 	reqLog.Debugw("hash inputs",

@@ -17,10 +17,10 @@ import (
 
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
-	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	confhttptypes "github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
+	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zapcore"
@@ -157,7 +157,7 @@ func observedFieldsByEvent(t *testing.T, logs *observer.ObservedLogs, event stri
 	return nil
 }
 
-func TestLogPublicDataConfidentialHTTP(t *testing.T) {
+func TestInspectPublicDataConfidentialHTTP(t *testing.T) {
 	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 	req := &confhttptypes.Request{
 		Url:    "https://example.test/path?visible=1",
@@ -177,7 +177,7 @@ func TestLogPublicDataConfidentialHTTP(t *testing.T) {
 	publicData, err := proto.Marshal(req)
 	require.NoError(t, err)
 
-	metadata := logPublicData(lggr, types.AppIDConfidentialHTTP, publicData)
+	metadata := inspectPublicData(lggr, types.AppIDConfidentialHTTP, publicData)
 
 	assert.Equal(t, executionMetadata{appID: types.AppIDConfidentialHTTP}, metadata)
 	fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA")
@@ -194,7 +194,7 @@ func TestLogPublicDataConfidentialHTTP(t *testing.T) {
 	assert.Equal(t, true, fields["encryptOutput"])
 }
 
-func TestLogPublicDataConfidentialWorkflows(t *testing.T) {
+func TestInspectPublicDataConfidentialWorkflows(t *testing.T) {
 	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 	execution := &confworkflowtypes.WorkflowExecution{
 		WorkflowId:   "workflow-id",
@@ -216,7 +216,7 @@ func TestLogPublicDataConfidentialWorkflows(t *testing.T) {
 	publicData, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
-	metadata := logPublicData(lggr, types.AppIDConfidentialWorkflows, publicData)
+	metadata := inspectPublicData(lggr, types.AppIDConfidentialWorkflows, publicData)
 
 	assert.Equal(t, executionMetadata{
 		appID:       types.AppIDConfidentialWorkflows,
@@ -240,22 +240,26 @@ func TestLogPublicDataConfidentialWorkflows(t *testing.T) {
 	assert.Equal(t, uint64(123), fields["maxResponseSize"])
 }
 
-func TestLogPublicDataInvalidProto(t *testing.T) {
-	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
+func TestInspectPublicDataInvalidProto(t *testing.T) {
+	for _, appID := range []string{types.AppIDConfidentialHTTP, types.AppIDConfidentialWorkflows} {
+		t.Run(appID, func(t *testing.T) {
+			lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 
-	metadata := logPublicData(lggr, types.AppIDConfidentialHTTP, []byte{0xff})
+			metadata := inspectPublicData(lggr, appID, []byte{0xff})
 
-	assert.Equal(t, executionMetadata{appID: types.AppIDConfidentialHTTP}, metadata)
-	fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA_DECODE_ERR")
-	assert.Equal(t, types.AppIDConfidentialHTTP, fields["appID"])
-	assert.Equal(t, int64(1), fields["publicDataLen"])
-	assert.NotNil(t, fields["error"])
+			assert.Equal(t, executionMetadata{appID: appID}, metadata)
+			fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA_DECODE_ERR")
+			assert.Equal(t, appID, fields["appID"])
+			assert.Equal(t, int64(1), fields["publicDataLen"])
+			assert.NotNil(t, fields["error"])
+		})
+	}
 }
 
-func TestLogPublicDataUnknownApp(t *testing.T) {
+func TestInspectPublicDataUnknownApp(t *testing.T) {
 	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 
-	metadata := logPublicData(lggr, "unknown-app", []byte("opaque"))
+	metadata := inspectPublicData(lggr, "unknown-app", []byte("opaque"))
 
 	assert.Equal(t, executionMetadata{appID: "unknown-app"}, metadata)
 	fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA_UNSUPPORTED")
