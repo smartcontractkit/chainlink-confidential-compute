@@ -410,6 +410,33 @@ func (e *RealExecutor) applyLimitSettings(ctx context.Context, parsed *ParsedCon
 	}
 }
 
+// getCapConfig returns the current parsed config snapshot. The pointer is
+// swapped wholesale on refresh, so callers read a consistent, immutable snapshot.
+func (e *RealExecutor) getCapConfig() *ParsedConfig {
+	e.capConfigMu.RLock()
+	defer e.capConfigMu.RUnlock()
+	return e.capConfig
+}
+
+// setCapConfig atomically swaps in a new parsed config snapshot.
+func (e *RealExecutor) setCapConfig(parsed *ParsedConfig) {
+	e.capConfigMu.Lock()
+	defer e.capConfigMu.Unlock()
+	e.capConfig = parsed
+}
+
+// refreshLimitSettings re-resolves the CRE limits framework values and swaps in
+// a fresh config snapshot.
+func (e *RealExecutor) refreshLimitSettings(ctx context.Context) {
+	cur := e.getCapConfig()
+	if cur == nil {
+		return
+	}
+	next := *cur
+	e.applyLimitSettings(ctx, &next)
+	e.setCapConfig(&next)
+}
+
 // RealExecutor is the concrete implementation of the Executor interface.
 type RealExecutor struct {
 	lggr                       logger.Logger
@@ -424,10 +451,16 @@ type RealExecutor struct {
 	apiKey                     string
 	limitsFactory              limits.Factory
 
+	// quorumTimeoutIsUserError classifies an enclave quorum timeout as a public
+	// user error when true, or as an internal/node error (retried) when false.
+	// Set per-capability at construction.
+	quorumTimeoutIsUserError bool
+
 	// Lazy initialization fields for the executor itself
 	initializedMutex   sync.Mutex
 	initialized        bool
 	capConfigRaw       string
+	capConfigMu        sync.RWMutex
 	capConfig          *ParsedConfig
 	capabilityRegistry core.CapabilitiesRegistry
 	nodeID             string
@@ -453,6 +486,7 @@ func NewRealExecutor(
 	capabilityID string,
 	confidentialComputeVersion string,
 	limitsFactory limits.Factory,
+	quorumTimeoutIsUserError bool,
 ) *RealExecutor {
 	return &RealExecutor{
 		lggr:                       lggr,
@@ -463,6 +497,7 @@ func NewRealExecutor(
 		confidentialComputeVersion: confidentialComputeVersion,
 		secretsCache:               util.NewCache[*cachedEDKS](nil, nil),
 		limitsFactory:              limitsFactory,
+		quorumTimeoutIsUserError:   quorumTimeoutIsUserError,
 	}
 }
 
@@ -517,13 +552,14 @@ func NewTestExecutorWithGate(
 			RetryBackoffSeconds: retryBackoffSeconds,
 			EnableSecretsCache:  enableSecretsCache,
 		},
-		initialized:   true,
-		capabilityID:  capabilityID,
-		secretsCache:  util.NewCache[*cachedEDKS](nil, nil),
-		nodeID:        nodeID,
-		donMembers:    peerIDsToSortedBytes(localNode.WorkflowDON.Members),
-		donF:          uint32(localNode.WorkflowDON.F),
-		limitsFactory: limits.Factory{},
+		initialized:              true,
+		capabilityID:             capabilityID,
+		secretsCache:             util.NewCache[*cachedEDKS](nil, nil),
+		nodeID:                   nodeID,
+		donMembers:               peerIDsToSortedBytes(localNode.WorkflowDON.Members),
+		donF:                     uint32(localNode.WorkflowDON.F),
+		limitsFactory:            limits.Factory{},
+		quorumTimeoutIsUserError: true,
 	}
 }
 
@@ -537,7 +573,7 @@ func (e *RealExecutor) SetLimitsFactoryForTesting(f limits.Factory) {
 // SetParsedConfigForTesting sets capConfig for unit tests that exercise timeout
 // resolution without full executor initialization.
 func (e *RealExecutor) SetParsedConfigForTesting(parsed *ParsedConfig) {
-	e.capConfig = parsed
+	e.setCapConfig(parsed)
 }
 
 // ApplyLimitSettingsForTesting exposes applyLimitSettings for unit tests.
@@ -573,6 +609,10 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 	if err := e.initLazily(ctx); err != nil {
 		return nil, err
 	}
+
+	// Re-resolve the CRE limits on every run so config changes take effect
+	// without re-initializing the executor.
+	e.refreshLimitSettings(ctx)
 
 	runLggr := logger.With(e.lggr,
 		"workflowID", sanitizeLogString(metadata.WorkflowID),
@@ -741,7 +781,12 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 					"workflow.id":      metadata.WorkflowID,
 					"duration_seconds": enclaveExecuteErrDuration.Seconds(),
 				})
-				return caperrors.NewPublicUserError(fmt.Errorf("enclave quorum timeout: %w", err), caperrors.DeadlineExceeded)
+				// When quorumTimeoutIsUserError is disabled, surface the timeout as an
+				// internal/node error so it is retried and does not count against the user.
+				if e.quorumTimeoutIsUserError {
+					return caperrors.NewPublicUserError(fmt.Errorf("enclave quorum timeout: %w", err), caperrors.DeadlineExceeded)
+				}
+				return fmt.Errorf("enclave quorum timeout: %w", err)
 			}
 			if strings.Contains(err.Error(), types.ErrEncryptionRequestedNoKey) ||
 				strings.Contains(err.Error(), types.ErrKeyPresentNoEncryption) ||
@@ -977,7 +1022,7 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 	e.enclaveClient = pool
 	e.enclaves = nodes
 	e.rateLimiter = rateLimiter
-	e.capConfig = parsedConfig
+	e.setCapConfig(parsedConfig)
 	e.vaultDON = VaultDON{
 		CryptographyThreshold: getVaultDONThreshold(vaultDONPossibleFaultyNodes),
 		Capability:            vaultDONCapability,
@@ -989,9 +1034,9 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 	e.lggr.Infow("executor initialized",
 		"capabilityID", e.capabilityID,
 		"nodeID", e.nodeID,
-		"maxRetries", e.capConfig.MaxRetries,
-		"retryBackoffSeconds", e.capConfig.RetryBackoffSeconds,
-		"enableSecretsCache", e.capConfig.EnableSecretsCache,
+		"maxRetries", parsedConfig.MaxRetries,
+		"retryBackoffSeconds", parsedConfig.RetryBackoffSeconds,
+		"enableSecretsCache", parsedConfig.EnableSecretsCache,
 		"vaultDONThreshold", e.vaultDON.CryptographyThreshold,
 		"insecureSkipTLS", parsedConfig.InsecureSkipTLSVerify)
 	return nil
@@ -1001,7 +1046,7 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 // enclaves and re-checks DON membership, so config-update proposals fire on a timer
 // rather than only while handling a request. Called once from initLazily.
 func (e *RealExecutor) startEnclaveRefreshLoop() {
-	interval := e.capConfig.EnclaveRefreshInterval
+	interval := e.getCapConfig().EnclaveRefreshInterval
 	ctx, cancel := context.WithCancel(context.Background())
 	e.refreshCancel = cancel
 	e.refreshDone = make(chan struct{})
@@ -1044,7 +1089,7 @@ func (e *RealExecutor) EnsureFreshEnclaves(ctx context.Context) error {
 		return err
 	}
 
-	nodes, err := GetEnclaveNodes(ctx, ownCapabilityConfig, e.capConfig.Config, e.apiKey)
+	nodes, err := GetEnclaveNodes(ctx, ownCapabilityConfig, e.getCapConfig().Config, e.apiKey)
 	if err != nil {
 		return fmt.Errorf("failed to create enclave pool: %w", err)
 	}
@@ -1228,9 +1273,10 @@ func getVaultDONPossibleFaultyNodes(ctx context.Context, vaultDONCapability capa
 }
 
 func (e *RealExecutor) retryWithBackoff(ctx context.Context, fn func() error) error {
+	cfg := e.getCapConfig()
 	var errs error
-	backoff := time.Duration(e.capConfig.RetryBackoffSeconds) * time.Second
-	for i := 0; i < e.capConfig.MaxRetries; i++ {
+	backoff := time.Duration(cfg.RetryBackoffSeconds) * time.Second
+	for i := 0; i < cfg.MaxRetries; i++ {
 		err := fn()
 		if err == nil {
 			if i > 0 {
@@ -1257,7 +1303,7 @@ func (e *RealExecutor) retryWithBackoff(ctx context.Context, fn func() error) er
 		errs = errors.Join(errs, err)
 		e.lggr.Warnw("attempt failed",
 			"attempt", i+1,
-			"maxRetries", e.capConfig.MaxRetries,
+			"maxRetries", cfg.MaxRetries,
 			"nextBackoff", backoff.String(),
 			"error", err)
 
@@ -1282,11 +1328,11 @@ func (e *RealExecutor) retryWithBackoff(ctx context.Context, fn func() error) er
 		errorCode = finalCapErr.Code().String()
 	}
 	e.lggr.Errorw("all retries exhausted",
-		"maxRetries", e.capConfig.MaxRetries,
+		"maxRetries", cfg.MaxRetries,
 		"error_origin", errorOrigin,
 		"error_code", errorCode,
 		"error", errs)
-	return fmt.Errorf("failed after %d retries: %w", e.capConfig.MaxRetries, errs)
+	return fmt.Errorf("failed after %d retries: %w", cfg.MaxRetries, errs)
 }
 
 // signWithCapabilityAccount signs an already-prefixed payload with the node's
@@ -1417,10 +1463,11 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 		return nil, nil, errors.New("VaultDON capability is not initialized")
 	}
 	enclaveEphemeralPublicKeyHex := hex.EncodeToString(enclaveEphemeralPublicKey)
+	enableSecretsCache := e.getCapConfig().EnableSecretsCache
 
 	// It's technically suboptimal to require all secrets be cached to not send a request,
 	// but this is simpler logic and practically just as effective for real users.
-	if e.capConfig.EnableSecretsCache {
+	if enableSecretsCache {
 		var allSecretsAreCached = true
 		for i := range vaultDONSecrets {
 			if _, ok := e.secretsCache.Get(generateSecretCacheKey(enclaveEphemeralPublicKey, vaultDONSecrets[i], metadata.WorkflowOwner)); !ok {
@@ -1573,7 +1620,7 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 	}
 
 	// Cache the retrieved secrets for next time.
-	if e.capConfig.EnableSecretsCache {
+	if enableSecretsCache {
 		for i, secret := range vaultDONSecrets {
 			cacheKey := generateSecretCacheKey(enclaveEphemeralPublicKey, secret, metadata.WorkflowOwner)
 			e.secretsCache.Set(cacheKey, &cachedEDKS{

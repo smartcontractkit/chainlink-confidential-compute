@@ -124,6 +124,7 @@ func NewService(lggr logger.Logger, limitsFactory limits.Factory) *ConfidentialW
 			cctypes.AppIDConfidentialWorkflows,
 			cctypes.ServiceConfidentialComputeVersion,
 			limitsFactory,
+			false, // quorumTimeoutIsUserError: retry quorum timeouts as system errors
 			func() *confworkflowtypes.ConfidentialWorkflowResponse {
 				return &confworkflowtypes.ConfidentialWorkflowResponse{}
 			},

@@ -22,14 +22,15 @@ func (e *RealExecutor) newRequestTimeoutResolver() func(ctx context.Context, pub
 // job-spec override still wins when set.
 func (e *RealExecutor) resolveRequestTimeout(ctx context.Context, publicKey bool) (time.Duration, error) {
 	g := e.limitsFactory.Settings
+	cfg := e.getCapConfig()
 
 	if publicKey {
 		timeout, err := cresettings.Default.ConfidentialCompute.PublicKeyRequestTimeout.GetOrDefault(ctx, g)
 		if err != nil {
 			return 0, fmt.Errorf("resolve public key request timeout from limits: %w", err)
 		}
-		if e.capConfig != nil && e.capConfig.Config.PublicKeyRequestTimeoutSeconds != nil {
-			return time.Duration(*e.capConfig.Config.PublicKeyRequestTimeoutSeconds) * time.Second, nil
+		if cfg != nil && cfg.Config.PublicKeyRequestTimeoutSeconds != nil {
+			return time.Duration(*cfg.Config.PublicKeyRequestTimeoutSeconds) * time.Second, nil
 		}
 		if timeout > 0 {
 			return timeout, nil
@@ -41,8 +42,8 @@ func (e *RealExecutor) resolveRequestTimeout(ctx context.Context, publicKey bool
 	if err != nil {
 		return 0, fmt.Errorf("resolve enclave request timeout from limits: %w", err)
 	}
-	if e.capConfig != nil && e.capConfig.Config.EnclaveRequestTimeoutSeconds != nil {
-		return time.Duration(*e.capConfig.Config.EnclaveRequestTimeoutSeconds) * time.Second, nil
+	if cfg != nil && cfg.Config.EnclaveRequestTimeoutSeconds != nil {
+		return time.Duration(*cfg.Config.EnclaveRequestTimeoutSeconds) * time.Second, nil
 	}
 	if timeout > 0 {
 		return timeout, nil

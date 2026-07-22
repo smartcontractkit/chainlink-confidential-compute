@@ -36,6 +36,7 @@ type configTracker struct {
 	refreshInterval        time.Duration
 	initialT               uint32
 	initialMasterPublicKey []byte
+	requireBFTQuorum       bool
 }
 
 func NewConfigTracker(
@@ -46,6 +47,7 @@ func NewConfigTracker(
 	refreshInterval time.Duration,
 	initialT uint32,
 	initialMasterPublicKey []byte,
+	requireBFTQuorum bool,
 ) *configTracker {
 	return &configTracker{
 		capabilitiesRegistry:   capabilitiesRegistry,
@@ -56,6 +58,7 @@ func NewConfigTracker(
 		refreshInterval:        refreshInterval,
 		initialT:               initialT,
 		initialMasterPublicKey: initialMasterPublicKey,
+		requireBFTQuorum:       requireBFTQuorum,
 	}
 }
 
@@ -171,6 +174,20 @@ func (ct *configTracker) checkUpdates(lggr logger.Logger, reg CapabilitiesRegist
 	})
 	requiredF := uint32(don.F)
 	fMatch := out.Config.F == requiredF
+
+	// Validate the DON membership can reach the configured quorum. The host
+	// enforces the threshold; here we surface a misconfiguration early. With
+	// --require-bft-quorum the batch quorum is 2f+1, otherwise f+1.
+	requiredSignatures := requiredF + 1
+	if ct.requireBFTQuorum {
+		requiredSignatures = 2*requiredF + 1
+	}
+	lggr.Infof("Quorum mode: requireBFTQuorum=%t, F=%d, requiredSignatures=%d, signers=%d",
+		ct.requireBFTQuorum, requiredF, requiredSignatures, len(donNodeIds))
+	if uint32(len(donNodeIds)) < requiredSignatures {
+		lggr.Errorf("DON has %d signers but the configured quorum needs %d; requests will time out until membership grows",
+			len(donNodeIds), requiredSignatures)
+	}
 
 	if !signersMatch || !fMatch {
 		t := out.Config.T

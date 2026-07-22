@@ -787,8 +787,6 @@ func (c *enclavePool) getSingleEnclavePublicKey(ctx context.Context, enclave typ
 		return nil, fmt.Errorf("enclave %x returned unconfigured public keys (t=%d f=%d)", enclave.EnclaveID, out.Config.T, out.Config.F)
 	}
 
-	c.updateSession(out.PublicKeys, resp)
-
 	publicKeyHash := out.PublicKeyHash()
 	fallbackUsed, err := c.validateAttestationAgainstMultipleMeasurements(enclave, publicKeyHash[:], out.Attestation)
 	if err != nil {
@@ -810,6 +808,8 @@ func (c *enclavePool) getSingleEnclavePublicKey(ctx context.Context, enclave typ
 		"enclaveID", enclaveIDHex,
 		"pubKeyCount", len(out.PublicKeys),
 		"ttlCount", len(out.TTLs))
+
+	c.updateSession(out.PublicKeys, resp)
 
 	publicKeyData := types.EnclavePublicKeyData{
 		PublicKeyResponse:       out,
