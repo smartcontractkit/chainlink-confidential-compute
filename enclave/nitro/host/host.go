@@ -23,12 +23,12 @@ import (
 
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
-	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	confhttptypes "github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/types"
 	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/vsock"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
+	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/protobuf/proto"
 )
@@ -39,15 +39,13 @@ var (
 	cacheGCInterval = 10 * time.Minute
 )
 
-// Leave process-teardown headroom within Kubernetes' default 30-second grace period.
-const gracefulShutdownTimeout = 25 * time.Second
-
 var (
-	httpPort       = flag.Int("port", 8080, "HTTP port to listen on")
-	configHttpPort = flag.Int("config-port", 8081, "HTTP port for config endpoint (localhost only)")
-	enclavePort    = flag.Int("enclave-port", 5000, "VSOCK port the enclave is listening on")
-	enclaveCID     = flag.Int("enclave-cid", 16, "VSOCK CID of the enclave")
-	quorumTimeout  = flag.Duration("quorum-timeout", types.QuorumTimeout, "Timeout for waiting for quorum to be reached")
+	httpPort        = flag.Int("port", 8080, "HTTP port to listen on")
+	configHttpPort  = flag.Int("config-port", 8081, "HTTP port for config endpoint (localhost only)")
+	enclavePort     = flag.Int("enclave-port", 5000, "VSOCK port the enclave is listening on")
+	enclaveCID      = flag.Int("enclave-cid", 16, "VSOCK CID of the enclave")
+	quorumTimeout   = flag.Duration("quorum-timeout", types.QuorumTimeout, "Timeout for waiting for quorum to be reached")
+	shutdownTimeout = flag.Duration("shutdown-timeout", 25*time.Second, "Maximum time to drain servers and flush telemetry during shutdown; keep below the process termination grace period")
 	// requireBFTQuorum raises the batch quorum threshold from f+1 (one honest
 	// node) to 2f+1 (a BFT supermajority). Reads REQUIRE_BFT_QUORUM.
 	requireBFTQuorum = flag.Bool("require-bft-quorum", os.Getenv("REQUIRE_BFT_QUORUM") == "true", "require a 2f+1 BFT quorum instead of f+1. Reads REQUIRE_BFT_QUORUM.")
@@ -1015,6 +1013,9 @@ func main() {
 	if *writeTimeout <= *quorumTimeout {
 		log.Fatalf("write-timeout (%v) must be greater than quorum-timeout (%v)", *writeTimeout, *quorumTimeout)
 	}
+	if *shutdownTimeout <= 0 {
+		log.Fatalf("shutdown-timeout (%v) must be greater than zero", *shutdownTimeout)
+	}
 
 	if *requireBFTQuorum {
 		lggr.Infow("BFT quorum required: batch threshold is 2f+1", "requireBFTQuorum", true)
@@ -1036,7 +1037,7 @@ func main() {
 	}
 	metrics, err := newHostMetrics(telemetry.meter)
 	if err != nil {
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), *shutdownTimeout)
 		_ = telemetry.close(closeCtx)
 		closeCancel()
 		log.Fatalf("failed to initialize host metrics: %v", err)
@@ -1140,7 +1141,7 @@ func main() {
 	cancel()
 
 	// Give pending requests time to complete
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), *shutdownTimeout)
 	defer shutdownCancel()
 
 	// Shutdown servers gracefully
