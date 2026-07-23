@@ -2,12 +2,6 @@ module github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/c
 
 go 1.26.4
 
-replace github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework => ../../../../capabilities/framework
-
-replace github.com/smartcontractkit/chainlink-confidential-compute/enclave-client => ../../../../enclave-client
-
-replace github.com/smartcontractkit/chainlink-confidential-compute => ../../../..
-
 require (
 	github.com/smartcontractkit/capabilities/libs v0.0.0-20260114123817-a22dd91e9d9d
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260716194407-93eeb23b3f6b
