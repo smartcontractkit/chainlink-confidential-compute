@@ -756,8 +756,7 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		responseEmitter.WriteErrorResponse(w, fmt.Sprintf("error creating attestation: %v", err), http.StatusInternalServerError)
 		return
 	}
-	resp.Metrics = responseEmitter.GetMetrics()
-	resp.MetricEvents = responseEmitter.GetMetricEvents()
+	resp.Metrics, resp.MetricEvents = responseEmitter.Snapshot()
 	resp.Attestation = att
 
 	respBytes, err := json.Marshal(resp)
