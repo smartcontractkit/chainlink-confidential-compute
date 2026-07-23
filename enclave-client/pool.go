@@ -114,14 +114,12 @@ type cachedPublicKeyData struct {
 // It uses an injected EnclaveSelector to choose enclaves for a given request
 // and validates attestation reports from enclaves.
 type enclavePool struct {
-	nodes                []types.Enclave
-	nodesLock            sync.RWMutex
-	priorTrustedValues   map[[32]byte][][]byte
-	priorTrustedValuesMu sync.RWMutex
-	httpClient           *http.Client
-	enclaveSelector      enclaveselector.EnclaveSelector
-	publicKeyCache       *util.Cache[cachedPublicKeyData]
-	cacheConfig          CacheConfig
+	nodes           []types.Enclave
+	nodesLock       sync.RWMutex
+	httpClient      *http.Client
+	enclaveSelector enclaveselector.EnclaveSelector
+	publicKeyCache  *util.Cache[cachedPublicKeyData]
+	cacheConfig     CacheConfig
 	// Proactive refresh fields
 	refreshStopCh chan struct{}
 	refreshWg     sync.WaitGroup
@@ -177,7 +175,6 @@ func NewPoolWithConfig(
 	pool := &enclavePool{
 		nodes:                    nodes,
 		httpClient:               httpClient,
-		priorTrustedValues:       make(map[[32]byte][][]byte),
 		enclaveSelector:          selector,
 		cacheConfig:              config.Cache,
 		sessionConfig:            config.Session,
@@ -390,8 +387,7 @@ func (c *enclavePool) ExecuteBatch(ctx context.Context, reqs []types.SignedCompu
 			if err := json.Unmarshal(respBody, &out); err != nil {
 				return err
 			}
-			fallbackUsed, err := c.validateAttestationAgainstMultipleMeasurements(enclave, out.UserDataHash(req.Version), out.Attestation)
-			if err != nil {
+			if err := c.validateAttestation(enclave, out.UserDataHash(req.Version), out.Attestation); err != nil {
 				c.lggr.Errorw("attestation validation failed",
 					"enclaveID", enclaveIDHex,
 					"endpoint", "execute",
@@ -405,7 +401,6 @@ func (c *enclavePool) ExecuteBatch(ctx context.Context, reqs []types.SignedCompu
 				}
 				return fmt.Errorf("attestation validation failed for ExecuteBatch: %w", err)
 			}
-			out.AttestationFallbackUsed = fallbackUsed
 			if out.RequestHash != req.Hash() {
 				return fmt.Errorf("mismatched request hash in response from enclave %x: got %x, want %x", enclave.EnclaveID, out.RequestHash, req.Hash())
 			}
@@ -561,7 +556,7 @@ func (c *enclavePool) updateSingleEnclaveConfig(ctx context.Context, enclave typ
 
 	// Quorum reached: validate the attestation over the applied config.
 	setConfigResp := types.SetConfigResponse{Config: out.Config}
-	if _, err := c.validateAttestationAgainstMultipleMeasurements(enclave, setConfigResp.UserDataHash(), out.Attestation); err != nil {
+	if err := c.validateAttestation(enclave, setConfigResp.UserDataHash(), out.Attestation); err != nil {
 		c.lggr.Errorw("config update attestation validation failed", "enclaveID", enclaveIDHex, "error", err)
 		return fmt.Errorf("config update attestation validation failed for enclave %x: %w", enclave.EnclaveID, err)
 	}
@@ -570,14 +565,25 @@ func (c *enclavePool) updateSingleEnclaveConfig(ctx context.Context, enclave typ
 	return nil
 }
 
-func (c *enclavePool) UpdateNodes(nodes []types.Enclave) {
-	c.nodesLock.Lock()
-	defer c.nodesLock.Unlock()
-	if (&types.EnclavesList{Enclaves: nodes}).Hash() == (&types.EnclavesList{Enclaves: c.nodes}).Hash() {
-		return
+// UpdateNodes validates each new node by fetching and attestation-checking its
+// public keys before committing them to the pool. A failure means the node is
+// unreachable or its attestation measurements are misconfigured; in that case
+// the existing nodes are retained and the error is returned so the caller can
+// alert and fall back.
+func (c *enclavePool) UpdateNodes(ctx context.Context, nodes []types.Enclave) error {
+	c.nodesLock.RLock()
+	unchanged := (&types.EnclavesList{Enclaves: nodes}).Hash() == (&types.EnclavesList{Enclaves: c.nodes}).Hash()
+	c.nodesLock.RUnlock()
+	if unchanged {
+		return nil
 	}
 
-	c.capturePriorTrustedValuesLocked(nodes)
+	if err := c.validateNodes(ctx, nodes); err != nil {
+		return err
+	}
+
+	c.nodesLock.Lock()
+	defer c.nodesLock.Unlock()
 
 	c.lggr.Infow("updating enclave nodes", "oldCount", len(c.nodes), "newCount", len(nodes))
 	c.nodes = nodes
@@ -600,6 +606,31 @@ func (c *enclavePool) UpdateNodes(nodes []types.Enclave) {
 			}()
 		}
 	}
+	return nil
+}
+
+// validateNodes fetches public keys from every node concurrently, attestation-
+// validating each response. It returns the first error encountered, leaving the
+// pool's node list untouched.
+func (c *enclavePool) validateNodes(ctx context.Context, nodes []types.Enclave) error {
+	timeout, err := c.resolveRequestTimeout(ctx, true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	g, gCtx := errgroup.WithContext(ctx)
+	for _, enclave := range nodes {
+		enclave := enclave
+		g.Go(func() error {
+			if _, err := c.getSingleEnclavePublicKey(gCtx, enclave, [32]byte{}); err != nil {
+				return fmt.Errorf("public key fetch failed for enclave %x: %w", enclave.EnclaveID, err)
+			}
+			return nil
+		})
+	}
+	return g.Wait()
 }
 
 func (c *enclavePool) getCachedPublicKey(enclaveID [32]byte) *types.EnclavePublicKeyData {
@@ -790,8 +821,7 @@ func (c *enclavePool) getSingleEnclavePublicKey(ctx context.Context, enclave typ
 	c.updateSession(out.PublicKeys, resp)
 
 	publicKeyHash := out.PublicKeyHash()
-	fallbackUsed, err := c.validateAttestationAgainstMultipleMeasurements(enclave, publicKeyHash[:], out.Attestation)
-	if err != nil {
+	if err := c.validateAttestation(enclave, publicKeyHash[:], out.Attestation); err != nil {
 		c.lggr.Errorw("attestation validation failed",
 			"enclaveID", enclaveIDHex,
 			"endpoint", "publicKeys",
@@ -812,9 +842,8 @@ func (c *enclavePool) getSingleEnclavePublicKey(ctx context.Context, enclave typ
 		"ttlCount", len(out.TTLs))
 
 	publicKeyData := types.EnclavePublicKeyData{
-		PublicKeyResponse:       out,
-		EnclaveID:               enclave.EnclaveID,
-		AttestationFallbackUsed: fallbackUsed,
+		PublicKeyResponse: out,
+		EnclaveID:         enclave.EnclaveID,
 	}
 	return &publicKeyData, nil
 }
@@ -934,37 +963,16 @@ func (c *enclavePool) applySession(key []byte, req *http.Request) bool {
 	return true
 }
 
-func (c *enclavePool) validateAttestationAgainstMultipleMeasurements(enclave types.Enclave, userData []byte, attestation []byte) (bool, error) {
+func (c *enclavePool) validateAttestation(enclave types.Enclave, userData []byte, attestation []byte) error {
 	if validated, validationErr := validateAttestationAgainstEnclaves([]types.Enclave{enclave}, attestation, userData, c.lggr); validated {
-		return false, nil
+		return nil
 	} else {
-		if validated, priorErr := c.validateAttestationAgainstBackupMeasurements(enclave, attestation, userData); validated {
-			return true, nil
-		} else {
-			combinedErr := errors.Join(validationErr, priorErr)
-			if combinedErr == nil {
-				combinedErr = errors.New("no trusted measurements configured")
-			}
-			return false, fmt.Errorf("attestation validation failed for enclave %x (received %s): %w",
-				enclave.EnclaveID, attestationvalidator.DescribeMeasurements(attestation), combinedErr)
+		if validationErr == nil {
+			validationErr = errors.New("no trusted measurements configured")
 		}
+		return fmt.Errorf("attestation validation failed for enclave %x (received %s): %w",
+			enclave.EnclaveID, attestationvalidator.DescribeMeasurements(attestation), validationErr)
 	}
-}
-
-func (c *enclavePool) validateAttestationAgainstBackupMeasurements(enclave types.Enclave, attestation []byte, userData []byte) (bool, error) {
-	c.priorTrustedValuesMu.RLock()
-	backupMeasurements := append([][]byte(nil), c.priorTrustedValues[enclave.EnclaveID]...)
-	c.priorTrustedValuesMu.RUnlock()
-
-	if len(backupMeasurements) == 0 {
-		return false, errors.New("no backup trusted measurements configured")
-	}
-
-	// The prior trusted values are bare measurements; wrap them in an enclave of
-	// the same type so the type-aware validator selection applies to them too.
-	backupEnclave := enclave
-	backupEnclave.TrustedValues = backupMeasurements
-	return validateAttestationAgainstEnclaves([]types.Enclave{backupEnclave}, attestation, userData, c.lggr)
 }
 
 // validateAttestationAgainstEnclaves tries to validate the attestation against
@@ -984,33 +992,4 @@ func validateAttestationAgainstEnclaves(enclaves []types.Enclave, attestation []
 		}
 	}
 	return false, validationErr
-}
-
-func (c *enclavePool) capturePriorTrustedValuesLocked(newNodes []types.Enclave) {
-	if len(c.nodes) == 0 {
-		return
-	}
-
-	newNodesByID := make(map[[32]byte]types.Enclave, len(newNodes))
-	for _, node := range newNodes {
-		newNodesByID[node.EnclaveID] = node
-	}
-
-	c.priorTrustedValuesMu.Lock()
-	defer c.priorTrustedValuesMu.Unlock()
-
-	for _, oldNode := range c.nodes {
-		if _, exists := newNodesByID[oldNode.EnclaveID]; !exists {
-			continue
-		}
-
-		existing := append([][]byte(nil), c.priorTrustedValues[oldNode.EnclaveID]...)
-		for _, measurement := range oldNode.TrustedValues {
-			existing = append(existing, append([]byte(nil), measurement...))
-			if len(existing) > types.MaxRedundantMeasurements { // simple check to prevent a memory leak.
-				existing = existing[1:]
-			}
-		}
-		c.priorTrustedValues[oldNode.EnclaveID] = existing
-	}
 }

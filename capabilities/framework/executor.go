@@ -653,7 +653,7 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 
 		runLggr.Debugw("fetching enclave params")
 		enclaveParamsStart := time.Now()
-		enclaveParams, err := e.getEnclaveParams(ctx, reqID, metrics)
+		enclaveParams, err := e.getEnclaveParams(ctx, reqID)
 		enclaveParamsDuration = time.Since(enclaveParamsStart)
 
 		if err != nil {
@@ -760,15 +760,6 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 		enclaveExecuteDuration = time.Since(enclaveExecuteStart)
 		innerLggr.Debugw("enclave execution succeeded",
 			"duration_ms", enclaveExecuteDuration.Milliseconds())
-
-		if executeResponses[0].AttestationFallbackUsed {
-			innerLggr.Warnw("attestation validation used fallback measurements",
-				"endpoint", "execute")
-			metrics.Emit("attestation_validation_fallback_used", map[string]any{
-				"endpoint":   "execute",
-				"enclave.id": enclaveIDStr,
-			})
-		}
 
 		if err := e.validateEnclaveSigners(executeResponses[0].Config); err != nil {
 			return fmt.Errorf("execute response config validation failed for request %x: %w", reqID, err)
@@ -1050,8 +1041,16 @@ func (e *RealExecutor) EnsureFreshEnclaves(ctx context.Context) error {
 	}
 
 	sortEnclaveNodes(nodes)
-	e.enclaveClient.UpdateNodes(nodes)
-	e.enclaves = nodes
+	if err := e.enclaveClient.UpdateNodes(ctx, nodes); err != nil {
+		e.lggr.Warnw("node update failed, continuing to use old nodes & measurements",
+			"endpoint", "publicKeys",
+			"error", err)
+		e.metrics.Emit("attestation_validation_fallback_used", map[string]any{
+			"endpoint": "publicKeys",
+		})
+	} else {
+		e.enclaves = nodes
+	}
 
 	vaultDONPossibleFaultyNodes, err := getVaultDONPossibleFaultyNodes(ctx, e.vaultDON.Capability, int(localNode.WorkflowDON.F))
 	if err != nil {
@@ -1342,7 +1341,7 @@ func checkRequirements(req *sdk.Requirements) types.RequirementsChecker {
 	}
 }
 
-func (e *RealExecutor) getEnclaveParams(ctx context.Context, reqID [32]byte, metrics types.Emitter) (*EnclaveParams, error) {
+func (e *RealExecutor) getEnclaveParams(ctx context.Context, reqID [32]byte) (*EnclaveParams, error) {
 	reqIDHex := hex.EncodeToString(reqID[:])
 	ephemeralPubKeyResponse, err := e.enclaveClient.GetPublicKeys(ctx, reqID, checkRequirements(nil))
 	if err != nil {
@@ -1371,15 +1370,6 @@ func (e *RealExecutor) getEnclaveParams(ctx context.Context, reqID [32]byte, met
 	}
 	selectedEphemeralPublicKey := selectedEnclaveResponse.PublicKeys[mostRecentPubKeyIndex]
 	selectedEnclaveID := selectedEnclaveResponse.EnclaveID
-	if selectedEnclaveResponse.AttestationFallbackUsed {
-		e.lggr.Warnw("attestation validation used fallback measurements",
-			"endpoint", "publicKeys",
-			"enclave.id", hex.EncodeToString(selectedEnclaveID[:]))
-		metrics.Emit("attestation_validation_fallback_used", map[string]any{
-			"endpoint":   "publicKeys",
-			"enclave.id": hex.EncodeToString(selectedEnclaveID[:]),
-		})
-	}
 	e.lggr.Infow("selected enclave public key",
 		"reqID", reqIDHex,
 		"enclaveID", hex.EncodeToString(selectedEnclaveID[:]),
