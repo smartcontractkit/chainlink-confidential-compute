@@ -27,7 +27,7 @@ func TestNewConfigTracker(t *testing.T) {
 	masterPublicKey := []byte("test-public-key")
 
 	registryWrapper := &capabilities_registry_wrapper_v2.CapabilitiesRegistry{}
-	tracker := NewConfigTracker(registryWrapper, lggr, donID, hostPort, configPort, refreshInterval, tval, masterPublicKey)
+	tracker := NewConfigTracker(registryWrapper, lggr, donID, hostPort, configPort, refreshInterval, tval, masterPublicKey, false)
 
 	assert.NotNil(t, tracker)
 	assert.Equal(t, donID, tracker.donID)
@@ -500,7 +500,7 @@ func TestConfigTracker_StartStop(t *testing.T) {
 	tval := uint32(1)
 	masterPublicKey := []byte("test-public-key")
 
-	tracker := NewConfigTracker(mockRegistry, lggr, 123, hostPort, "8999", 500*time.Millisecond, tval, masterPublicKey)
+	tracker := NewConfigTracker(mockRegistry, lggr, 123, hostPort, "8999", 500*time.Millisecond, tval, masterPublicKey, false)
 
 	// Test that we can create the tracker and it can perform initial checks
 	assert.NotNil(t, tracker)
@@ -588,7 +588,7 @@ func TestConfigTracker_StopsPollingAfterConfigSet(t *testing.T) {
 	tval := uint32(1)
 	masterPublicKey := []byte("test-public-key")
 
-	tracker := NewConfigTracker(mockRegistry, lggr, 123, hostPort, configPort, refreshInterval, tval, masterPublicKey)
+	tracker := NewConfigTracker(mockRegistry, lggr, 123, hostPort, configPort, refreshInterval, tval, masterPublicKey, false)
 
 	// Start the tracker in a goroutine
 	done := make(chan bool, 1)

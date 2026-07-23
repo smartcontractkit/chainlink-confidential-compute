@@ -52,6 +52,7 @@ type baseConfidentialAction[TInput ExecutorInput, TOutput proto.Message] struct 
 	capabilityID               string
 	confidentialComputeVersion string
 	limitsFactory              limits.Factory
+	quorumTimeoutIsUserError   bool
 	emptyOutputCreator         func() TOutput
 }
 
@@ -64,6 +65,7 @@ func NewConfidentialAction[TInput ExecutorInput, TOutput proto.Message](
 	capabilityID string,
 	confidentialComputeVersion string,
 	limitsFactory limits.Factory,
+	quorumTimeoutIsUserError bool,
 	outputCreator func() TOutput,
 ) ConfidentialAction[TInput, TOutput] {
 	return &baseConfidentialAction[TInput, TOutput]{
@@ -73,6 +75,7 @@ func NewConfidentialAction[TInput ExecutorInput, TOutput proto.Message](
 		capabilityID:               capabilityID,
 		confidentialComputeVersion: confidentialComputeVersion,
 		limitsFactory:              limitsFactory,
+		quorumTimeoutIsUserError:   quorumTimeoutIsUserError,
 		emptyOutputCreator:         outputCreator,
 	}
 }
@@ -83,7 +86,7 @@ func (a *baseConfidentialAction[TInput, TOutput]) Initialise(
 	a.lggr.Debugf("Initialising %s", a.name)
 	a.lggr.Debugf("Config: %s", dependencies.Config)
 
-	a.executor = NewRealExecutor(a.lggr, dependencies, a.capabilityID, a.confidentialComputeVersion, a.limitsFactory)
+	a.executor = NewRealExecutor(a.lggr, dependencies, a.capabilityID, a.confidentialComputeVersion, a.limitsFactory, a.quorumTimeoutIsUserError)
 
 	return a.Start(ctx)
 }

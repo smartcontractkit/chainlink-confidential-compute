@@ -1540,6 +1540,9 @@ func TestExecutor_ExecuteWithSecretsCache(t *testing.T) {
 			TEST_NODE_ID,
 			getMockCapabilitiesRegistry(t, mockVaultDON),
 		)
+		// Limits are re-resolved on every Execute, so enable the secrets cache via
+		// the limits framework (the production source of truth).
+		executor.SetLimitsFactoryForTesting(limits.Factory{Settings: staticSettings{value: "true"}})
 
 		// Call 1 (Cache Miss)
 		_, err := executor.Execute(context.Background(), protoBytes, actionInput.GetVaultDonSecrets(), baseMetadata)
@@ -1575,6 +1578,9 @@ func TestExecutor_ExecuteWithSecretsCache(t *testing.T) {
 			TEST_NODE_ID,
 			getMockCapabilitiesRegistry(t, mockVaultDON),
 		)
+		// Limits are re-resolved on every Execute, so enable the secrets cache via
+		// the limits framework (the production source of truth).
+		executor.SetLimitsFactoryForTesting(limits.Factory{Settings: staticSettings{value: "true"}})
 
 		// Call 1 (Miss - owner1, key1)
 		_, err := executor.Execute(context.Background(), protoBytes, actionInput.GetVaultDonSecrets(), baseMetadata)
@@ -1609,6 +1615,9 @@ func TestExecutor_ExecuteWithSecretsCache(t *testing.T) {
 			TEST_NODE_ID,
 			getMockCapabilitiesRegistry(t, mockVaultDON),
 		)
+		// Limits are re-resolved on every Execute, so enable the secrets cache via
+		// the limits framework (the production source of truth).
+		executorKey2.SetLimitsFactoryForTesting(limits.Factory{Settings: staticSettings{value: "true"}})
 
 		// Call 5 (Miss - owner1, key2)
 		_, err = executorKey2.Execute(context.Background(), protoBytes, actionInput.GetVaultDonSecrets(), baseMetadata)

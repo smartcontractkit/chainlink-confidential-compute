@@ -45,10 +45,13 @@ var (
 	enclavePort    = flag.Int("enclave-port", 5000, "VSOCK port the enclave is listening on")
 	enclaveCID     = flag.Int("enclave-cid", 16, "VSOCK CID of the enclave")
 	quorumTimeout  = flag.Duration("quorum-timeout", types.QuorumTimeout, "Timeout for waiting for quorum to be reached")
-	storageKey     = flag.String("storage-key", os.Getenv("STORAGE_KEY"), "hex ed25519 CRE storage-service key to inject into the enclave over vsock (from a K8s secret). Reads STORAGE_KEY.")
-	storageSvcURL  = flag.String("storage-service-url", os.Getenv("STORAGE_SERVICE_URL"), "CRE storage-service gRPC address (host:port) to inject into the enclave. Reads STORAGE_SERVICE_URL.")
-	storageSvcTLS  = flag.Bool("storage-service-tls", os.Getenv("STORAGE_SERVICE_TLS") != "false", "whether the enclave should use TLS for the storage-service connection. Reads STORAGE_SERVICE_TLS (default true).")
-	gatewayURL     = flag.String("gateway-url", os.Getenv("GATEWAY_URL"), "Gateway URL(s) for remote dispatch to inject into the enclave. Comma-separated for round-robin failover across multiple gateways. Empty leaves the enclave local-only. Reads GATEWAY_URL.")
+	// requireBFTQuorum raises the batch quorum threshold from f+1 (one honest
+	// node) to 2f+1 (a BFT supermajority). Reads REQUIRE_BFT_QUORUM.
+	requireBFTQuorum = flag.Bool("require-bft-quorum", os.Getenv("REQUIRE_BFT_QUORUM") == "true", "require a 2f+1 BFT quorum instead of f+1. Reads REQUIRE_BFT_QUORUM.")
+	storageKey       = flag.String("storage-key", os.Getenv("STORAGE_KEY"), "hex ed25519 CRE storage-service key to inject into the enclave over vsock (from a K8s secret). Reads STORAGE_KEY.")
+	storageSvcURL    = flag.String("storage-service-url", os.Getenv("STORAGE_SERVICE_URL"), "CRE storage-service gRPC address (host:port) to inject into the enclave. Reads STORAGE_SERVICE_URL.")
+	storageSvcTLS    = flag.Bool("storage-service-tls", os.Getenv("STORAGE_SERVICE_TLS") != "false", "whether the enclave should use TLS for the storage-service connection. Reads STORAGE_SERVICE_TLS (default true).")
+	gatewayURL       = flag.String("gateway-url", os.Getenv("GATEWAY_URL"), "Gateway URL(s) for remote dispatch to inject into the enclave. Comma-separated for round-robin failover across multiple gateways. Empty leaves the enclave local-only. Reads GATEWAY_URL.")
 
 	maxBinarySize      = flag.Int64("max-binary-size", envInt64("MAX_BINARY_SIZE"), "max workflow-binary size in bytes the enclave accepts from storage. 0 uses the enclave default. Reads MAX_BINARY_SIZE.")
 	binaryFetchTimeout = flag.Duration("binary-fetch-timeout", envDuration("BINARY_FETCH_TIMEOUT"), "per-fetch timeout for downloading a workflow binary (e.g. 90s). 0 uses the enclave default. Reads BINARY_FETCH_TIMEOUT.")
@@ -552,6 +555,16 @@ func (h *hostServer) proxyConfig(w http.ResponseWriter, r *http.Request, method 
 	}
 }
 
+// quorumThreshold returns the number of identical signed requests required to
+// dispatch a batch to the enclave. By default this is f+1 (at least one honest
+// node); with --require-bft-quorum it is 2f+1 (a BFT supermajority).
+func quorumThreshold(f uint32) int {
+	if *requireBFTQuorum {
+		return int(2*f + 1)
+	}
+	return int(f + 1)
+}
+
 // handleExecute handles the /requests endpoint, which executes a confidential HTTPS request through the enclave.
 func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	arrivalTime := time.Now()
@@ -688,7 +701,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 			"event", "BATCH_NEW",
 			"T", t,
 			"F", f,
-			"threshold", f+1)
+			"threshold", quorumThreshold(f))
 		br = &batchRequest{
 			requests:    make([]types.SignedComputeRequest, 0, len(h.config.Signers)),
 			responseCh:  make([]chan *batchResponse, 0, len(h.config.Signers)),
@@ -704,7 +717,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 			"event", "BATCH_JOIN",
 			"batchAge", time.Since(br.createdAt).String(),
 			"currentBatchSize", len(br.requests),
-			"threshold", f+1)
+			"threshold", quorumThreshold(f))
 	}
 
 	// If this signer already contributed to the batch, don't add a new signature
@@ -726,7 +739,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		// to prevent race with timeout handler. The equality check ensures that
 		// only the request that reaches exactly the threshold triggers processing;
 		// subsequent requests will not re-trigger since len > threshold.
-		threshold := int(f + 1)
+		threshold := quorumThreshold(f)
 		shouldProcess := len(br.requests) == threshold
 		if shouldProcess {
 			br.processingRequest = true
@@ -909,7 +922,7 @@ func (h *hostServer) failBatchIfNotProcessed(requestHash [32]byte, f uint32, isS
 		return false
 	}
 
-	threshold := int(f + 1)
+	threshold := quorumThreshold(f)
 	received := len(br.requests)
 
 	// Log which signers we did receive
@@ -984,6 +997,12 @@ func main() {
 	// not sever a connection while handleExecute is still waiting for quorum.
 	if *writeTimeout <= *quorumTimeout {
 		log.Fatalf("write-timeout (%v) must be greater than quorum-timeout (%v)", *writeTimeout, *quorumTimeout)
+	}
+
+	if *requireBFTQuorum {
+		lggr.Infow("BFT quorum required: batch threshold is 2f+1", "requireBFTQuorum", true)
+	} else {
+		lggr.Infow("standard quorum: batch threshold is f+1", "requireBFTQuorum", false)
 	}
 
 	// Set up context with signal handling for graceful shutdown
