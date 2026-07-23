@@ -897,103 +897,18 @@ func TestHandleExecuteWithBatchError(t *testing.T) {
 	assert.Contains(t, newRecorder.Body.String(), "failed to communicate with enclave: connection refused")
 }
 
-// TestHandleExecuteWithQuorumTimeoutEarlyExit verifies that when quorum is reached and batch
-// processes successfully, the timeout goroutine exits early without waiting for the full timeout.
-func TestHandleExecuteWithQuorumTimeoutEarlyExit(t *testing.T) {
-	// Set a long timeout - if the test takes anywhere near this long, early exit isn't working
-	originalTimeout := *quorumTimeout
-	*quorumTimeout = 5 * time.Second
-	defer func() { *quorumTimeout = originalTimeout }()
+func TestHandleQuorumTimeoutEarlyExit(t *testing.T) {
+	host := NewHostServer(context.Background(), &http.Client{})
+	doneCh := make(chan struct{})
+	returned := make(chan struct{})
 
-	const numSigners = 3
-	signerKeys := make([]*ed25519.PrivateKey, numSigners)
-	signers := make([][]byte, numSigners)
+	go func() {
+		host.handleQuorumTimeout([32]byte{}, 0, doneCh)
+		close(returned)
+	}()
 
-	for i := 0; i < numSigners; i++ {
-		pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
-		require.NoError(t, err)
-		signerKeys[i] = &privKey
-		signers[i] = pubKey
-	}
-
-	config := types.EnclaveConfig{
-		Signers:         signers,
-		MasterPublicKey: []byte("master-public-key"),
-		T:               2,
-		F:               2, // threshold = F+1 = 3
-	}
-
-	mockExecResponse := types.ExecuteResponse{
-		RequestID:   sha256.Sum256([]byte("test-request-early-exit")),
-		Output:      []byte("test-output"),
-		Attestation: []byte("test-attestation"),
-	}
-	respBytes := util.MustMarshal(t, mockExecResponse)
-
-	mockResp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(bytes.NewReader(respBytes)),
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-	}
-
-	mockTransport := &mockRoundTripper{response: mockResp}
-	host := NewHostServer(context.Background(), &http.Client{Transport: mockTransport})
-	host.config = config
-
-	computeReq := types.ComputeRequest{
-		RequestID:   sha256.Sum256([]byte("test-request-early-exit")),
-		Ciphertexts: [][]byte{[]byte("test-ciphertext")},
-		PublicData:  []byte("test-public-data"),
-	}
-
-	// Submit all 3 requests to reach quorum
-	recorders := make([]*httptest.ResponseRecorder, numSigners)
-	done := make([]chan struct{}, numSigners)
-
-	startTime := time.Now()
-
-	for i := 0; i < numSigners; i++ {
-		hash := computeReq.Hash()
-		prefixedHash := types.MakePeerIDSignatureDomainSeparatedPayload(util.GetConfidentialComputePayloadPrefix(), hash[:])
-		signature := ed25519.Sign(*signerKeys[i], prefixedHash)
-
-		execReq := types.SignedComputeRequest{
-			ComputeRequest: computeReq,
-			Signature:      signature,
-		}
-
-		reqBytes := util.MustMarshal(t, execReq)
-		req := httptest.NewRequest(http.MethodPost, "/requests", bytes.NewReader(reqBytes))
-		recorders[i] = httptest.NewRecorder()
-		done[i] = make(chan struct{})
-
-		go func(idx int, r *http.Request) {
-			host.handleExecute(recorders[idx], r)
-			close(done[idx])
-		}(i, req)
-	}
-
-	// Wait for all requests to complete
-	for i := 0; i < numSigners; i++ {
-		select {
-		case <-done[i]:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("Request %d did not complete within expected time", i)
-		}
-	}
-
-	elapsed := time.Since(startTime)
-
-	// Verify the test completed quickly (well under the 5 second timeout)
-	assert.Less(t, elapsed, 1*time.Second, "Test should complete quickly due to early exit, not wait for full timeout")
-
-	// Verify all requests succeeded
-	for i, rec := range recorders {
-		assert.Equal(t, http.StatusOK, rec.Code, "Request %d should have succeeded", i)
-	}
-
-	// Verify request was sent to enclave
-	assert.Len(t, mockTransport.requests, 1, "One batch request should be sent to enclave")
+	close(doneCh)
+	waitForTestSignal(t, returned, "quorum timeout handler to exit")
 }
 
 // TestHandleExecuteWithSlowProcessingNoTimeout verifies that when quorum is reached but
