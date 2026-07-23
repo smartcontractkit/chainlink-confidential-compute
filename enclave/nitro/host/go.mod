@@ -4,8 +4,8 @@ go 1.26.4
 
 require (
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260714160921-4033d0253977
+	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20260723152523-f8319c05c128
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260622152157-c8e129347b8b
-	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/zap v1.27.1
 	google.golang.org/protobuf v1.36.11

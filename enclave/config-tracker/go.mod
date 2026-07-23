@@ -7,9 +7,9 @@ replace github.com/smartcontractkit/chainlink-confidential-compute => ../..
 require (
 	github.com/ethereum/go-ethereum v1.16.1
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260714160921-4033d0253977
+	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20260723152523-f8319c05c128
 	github.com/smartcontractkit/chainlink-evm v0.3.2
 	github.com/smartcontractkit/chainlink-evm/gethwrappers v0.0.0-20250808121824-2c3544aab8f3
-	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20250708191655-e9033561ddd9
 	github.com/stretchr/testify v1.11.1
 )
 

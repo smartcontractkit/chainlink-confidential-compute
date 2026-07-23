@@ -9,10 +9,10 @@ replace github.com/smartcontractkit/chainlink-confidential-compute/enclave-clien
 require (
 	github.com/smartcontractkit/capabilities/libs v0.0.0-20260114123817-a22dd91e9d9d
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260716194407-93eeb23b3f6b
+	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20260723152523-f8319c05c128
+	github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-20260723152523-f8319c05c128
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260622152157-c8e129347b8b
 	github.com/smartcontractkit/chainlink-protos/workflows/go v0.0.0-20260528173149-f5b8336b19d9
-	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20260415113950-0671a5b829b6
-	github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-00010101000000-000000000000
 	github.com/smartcontractkit/libocr v0.0.0-20250912173940-f3ab0246e23d
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel/metric v1.43.0

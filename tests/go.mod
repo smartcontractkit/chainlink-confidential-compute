@@ -15,6 +15,8 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/rs/zerolog v1.35.1
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260714160921-4033d0253977
+	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20260723152523-f8319c05c128
+	github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-20260723152523-f8319c05c128
 	github.com/smartcontractkit/chainlink-evm/gethwrappers v0.0.0-20260713161920-de075095648b
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260623200841-e0322b819f62
 	github.com/smartcontractkit/chainlink-protos/job-distributor v0.20.1-0.20260701185448-696c075849ea
@@ -25,8 +27,6 @@ require (
 	github.com/smartcontractkit/chainlink/system-tests/lib v0.0.0-20260714171716-a1ea8cd88034
 	github.com/smartcontractkit/chainlink/system-tests/tests v0.0.0-20260714171716-a1ea8cd88034
 	github.com/smartcontractkit/chainlink/v2 v2.32.0
-	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
-	github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-00010101000000-000000000000
 	github.com/smartcontractkit/tdh2/go/tdh2 v0.0.0-20251120172354-e8ec0386b06c
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.54.0
