@@ -990,28 +990,31 @@ func TestCacheNodeUpdate(t *testing.T) {
 	stats := pool.GetCacheStats()
 	assert.Equal(t, 1, stats["item_count"].(int))
 
-	// Update with different nodes (2 instead of 1) to trigger cache flush
-	pool.UpdateNodes(fixture.createNodes(mockServer.URL, 2))
+	// Update with different nodes (2 instead of 1) to trigger cache flush.
+	// UpdateNodes validates each of the 2 new nodes with a publicKeys fetch.
+	require.NoError(t, pool.UpdateNodes(context.Background(), fixture.createNodes(mockServer.URL, 2)))
+	assert.Equal(t, int32(3), atomic.LoadInt32(&requestCount))
 
 	stats = pool.GetCacheStats()
 	assert.Equal(t, 0, stats["item_count"].(int))
 
 	_, err = pool.GetPublicKeys(context.Background(), fixture.RequestID, nil)
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), atomic.LoadInt32(&requestCount))
+	assert.Equal(t, int32(4), atomic.LoadInt32(&requestCount))
 
 	stats = pool.GetCacheStats()
 	assert.Equal(t, 1, stats["item_count"].(int))
 
-	// Idempotent update with same nodes should NOT flush cache
-	pool.UpdateNodes(fixture.createNodes(mockServer.URL, 2))
+	// Idempotent update with same nodes should NOT flush cache or re-validate
+	require.NoError(t, pool.UpdateNodes(context.Background(), fixture.createNodes(mockServer.URL, 2)))
+	assert.Equal(t, int32(4), atomic.LoadInt32(&requestCount), "idempotent update must not fetch")
 
 	stats = pool.GetCacheStats()
 	assert.Equal(t, 1, stats["item_count"].(int), "cache should not be flushed on idempotent update")
 
 	_, err = pool.GetPublicKeys(context.Background(), fixture.RequestID, nil)
 	require.NoError(t, err)
-	assert.Equal(t, int32(3), atomic.LoadInt32(&requestCount), "network-first: should always fetch from server")
+	assert.Equal(t, int32(5), atomic.LoadInt32(&requestCount), "network-first: should always fetch from server")
 }
 
 func TestCacheMultipleTTLs(t *testing.T) {
@@ -1433,7 +1436,7 @@ func TestProactiveCacheUpdateNodesTriggersRefresh(t *testing.T) {
 	countAfterWarmup := atomic.LoadInt32(&requestCount)
 	assert.GreaterOrEqual(t, countAfterWarmup, int32(1))
 
-	pool.UpdateNodes(fixture.createNodes(mockServer.URL, 2))
+	require.NoError(t, pool.UpdateNodes(context.Background(), fixture.createNodes(mockServer.URL, 2)))
 	time.Sleep(200 * time.Millisecond)
 
 	countAfterUpdate := atomic.LoadInt32(&requestCount)

@@ -357,25 +357,22 @@ func (s *enclaveServer) handleInjectSettings(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var req types.SettingsRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, fmt.Sprintf("failed to parse settings request: %v", err), http.StatusBadRequest)
-		return
-	}
-	if req == (types.SettingsRequest{}) {
+	if len(body) == 0 {
 		http.Error(w, "settings request is empty", http.StatusBadRequest)
 		return
 	}
 
+	// Settings are opaque at this layer: the raw JSON is handed to the app,
+	// which owns its own schema and unmarshals only the fields it uses.
 	type settingsReceiver interface {
-		InjectSettings(types.SettingsRequest) error
+		InjectSettings(json.RawMessage) error
 	}
 	c, ok := s.app.(settingsReceiver)
 	if !ok {
 		http.Error(w, "app does not accept settings", http.StatusNotImplemented)
 		return
 	}
-	if err := c.InjectSettings(req); err != nil {
+	if err := c.InjectSettings(json.RawMessage(body)); err != nil {
 		http.Error(w, fmt.Sprintf("injecting settings: %v", err), http.StatusInternalServerError)
 		return
 	}

@@ -28,6 +28,7 @@ func TestBaseConfidentialAction_Initialise_CreatesExecutor(t *testing.T) {
 		"test-capability-id",
 		"test-version",
 		limits.Factory{},
+		true, // quorumTimeoutIsUserError
 		func() *TestOutput { return &TestOutput{} },
 	)
 

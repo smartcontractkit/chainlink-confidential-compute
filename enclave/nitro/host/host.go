@@ -45,14 +45,23 @@ var (
 	enclavePort    = flag.Int("enclave-port", 5000, "VSOCK port the enclave is listening on")
 	enclaveCID     = flag.Int("enclave-cid", 16, "VSOCK CID of the enclave")
 	quorumTimeout  = flag.Duration("quorum-timeout", types.QuorumTimeout, "Timeout for waiting for quorum to be reached")
-	storageKey     = flag.String("storage-key", os.Getenv("STORAGE_KEY"), "hex ed25519 CRE storage-service key to inject into the enclave over vsock (from a K8s secret). Reads STORAGE_KEY.")
-	storageSvcURL  = flag.String("storage-service-url", os.Getenv("STORAGE_SERVICE_URL"), "CRE storage-service gRPC address (host:port) to inject into the enclave. Reads STORAGE_SERVICE_URL.")
-	storageSvcTLS  = flag.Bool("storage-service-tls", os.Getenv("STORAGE_SERVICE_TLS") != "false", "whether the enclave should use TLS for the storage-service connection. Reads STORAGE_SERVICE_TLS (default true).")
-	gatewayURL     = flag.String("gateway-url", os.Getenv("GATEWAY_URL"), "Gateway URL(s) for remote dispatch to inject into the enclave. Comma-separated for round-robin failover across multiple gateways. Empty leaves the enclave local-only. Reads GATEWAY_URL.")
+	// requireBFTQuorum raises the batch quorum threshold from f+1 (one honest
+	// node) to 2f+1 (a BFT supermajority). Reads REQUIRE_BFT_QUORUM.
+	requireBFTQuorum = flag.Bool("require-bft-quorum", os.Getenv("REQUIRE_BFT_QUORUM") == "true", "require a 2f+1 BFT quorum instead of f+1. Reads REQUIRE_BFT_QUORUM.")
+	storageKey       = flag.String("storage-key", os.Getenv("STORAGE_KEY"), "hex ed25519 CRE storage-service key to inject into the enclave over vsock (from a K8s secret). Reads STORAGE_KEY.")
+	storageSvcURL    = flag.String("storage-service-url", os.Getenv("STORAGE_SERVICE_URL"), "CRE storage-service gRPC address (host:port) to inject into the enclave. Reads STORAGE_SERVICE_URL.")
+	storageSvcTLS    = flag.Bool("storage-service-tls", os.Getenv("STORAGE_SERVICE_TLS") != "false", "whether the enclave should use TLS for the storage-service connection. Reads STORAGE_SERVICE_TLS (default true).")
+	gatewayURL       = flag.String("gateway-url", os.Getenv("GATEWAY_URL"), "Gateway URL(s) for remote dispatch to inject into the enclave. Comma-separated for round-robin failover across multiple gateways. Empty leaves the enclave local-only. Reads GATEWAY_URL.")
 
 	maxBinarySize      = flag.Int64("max-binary-size", envInt64("MAX_BINARY_SIZE"), "max workflow-binary size in bytes the enclave accepts from storage. 0 uses the enclave default. Reads MAX_BINARY_SIZE.")
 	binaryFetchTimeout = flag.Duration("binary-fetch-timeout", envDuration("BINARY_FETCH_TIMEOUT"), "per-fetch timeout for downloading a workflow binary (e.g. 90s). 0 uses the enclave default. Reads BINARY_FETCH_TIMEOUT.")
 	maxCacheBytes      = flag.Int64("max-cache-bytes", envInt64("MAX_CACHE_BYTES"), "size bound in bytes of the enclave's verified-binary LRU cache. 0 uses the enclave default. Reads MAX_CACHE_BYTES.")
+
+	// settingsJSON, when set, overrides all the individual settings flags above:
+	// the host forwards this raw JSON to the enclave verbatim instead of building
+	// the payload from the typed flags. The enclave app owns the schema. Empty
+	// falls back to the individual flags. Reads ENCLAVE_SETTINGS (a JSON object).
+	settingsJSON = flag.String("settings", os.Getenv("ENCLAVE_SETTINGS"), "raw JSON settings to inject into the enclave over vsock, forwarded verbatim. Overrides the individual settings flags when set. Reads ENCLAVE_SETTINGS.")
 
 	// readHeaderTimeout bounds how long a client may take to send request headers.
 	readHeaderTimeout = flag.Duration("read-header-timeout", 30*time.Second, "Max duration allowed to read request headers")
@@ -442,19 +451,14 @@ func (h *hostServer) handleInjectSettings(w http.ResponseWriter, r *http.Request
 	_, _ = io.Copy(w, resp.Body)
 }
 
-// injectSettings is the host-side "settings service": it reads runtime config +
-// secrets from the host (K8s env vars) and POSTs them to the enclave's /settings
-// endpoint over vsock. That endpoint is deliberately NOT exposed on the host's
-// external HTTP ports, so the values only ever travel host->enclave over vsock,
-// never the network. A Nitro EIF is measured, so environment endpoints (storage
-// URL, gateway URL) can't be baked in and are injected here alongside the
-// storage key. Retries while the enclave is still booting.
-func (h *hostServer) injectSettings(ctx context.Context, settings types.SettingsRequest) error {
-	payload, err := json.Marshal(settings)
-	if err != nil {
-		return fmt.Errorf("marshaling settings: %w", err)
-	}
-
+// injectSettings is the host-side "settings service": it POSTs the opaque
+// settings JSON to the enclave's /settings endpoint over vsock. That endpoint is
+// deliberately NOT exposed on the host's external HTTP ports, so the values only
+// ever travel host->enclave over vsock, never the network. A Nitro EIF is
+// measured, so environment endpoints (storage URL, gateway URL) can't be baked
+// in and are injected here at runtime. The host forwards the payload verbatim;
+// the enclave app owns the schema. Retries while the enclave is still booting.
+func (h *hostServer) injectSettings(ctx context.Context, payload []byte) error {
 	const (
 		maxAttempts = 60
 		retryDelay  = 2 * time.Second
@@ -549,6 +553,16 @@ func (h *hostServer) proxyConfig(w http.ResponseWriter, r *http.Request, method 
 		logger.Errorw("error writing response", "error", err)
 		return
 	}
+}
+
+// quorumThreshold returns the number of identical signed requests required to
+// dispatch a batch to the enclave. By default this is f+1 (at least one honest
+// node); with --require-bft-quorum it is 2f+1 (a BFT supermajority).
+func quorumThreshold(f uint32) int {
+	if *requireBFTQuorum {
+		return int(2*f + 1)
+	}
+	return int(f + 1)
 }
 
 // handleExecute handles the /requests endpoint, which executes a confidential HTTPS request through the enclave.
@@ -687,7 +701,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 			"event", "BATCH_NEW",
 			"T", t,
 			"F", f,
-			"threshold", f+1)
+			"threshold", quorumThreshold(f))
 		br = &batchRequest{
 			requests:    make([]types.SignedComputeRequest, 0, len(h.config.Signers)),
 			responseCh:  make([]chan *batchResponse, 0, len(h.config.Signers)),
@@ -703,7 +717,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 			"event", "BATCH_JOIN",
 			"batchAge", time.Since(br.createdAt).String(),
 			"currentBatchSize", len(br.requests),
-			"threshold", f+1)
+			"threshold", quorumThreshold(f))
 	}
 
 	// If this signer already contributed to the batch, don't add a new signature
@@ -725,7 +739,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		// to prevent race with timeout handler. The equality check ensures that
 		// only the request that reaches exactly the threshold triggers processing;
 		// subsequent requests will not re-trigger since len > threshold.
-		threshold := int(f + 1)
+		threshold := quorumThreshold(f)
 		shouldProcess := len(br.requests) == threshold
 		if shouldProcess {
 			br.processingRequest = true
@@ -908,7 +922,7 @@ func (h *hostServer) failBatchIfNotProcessed(requestHash [32]byte, f uint32, isS
 		return false
 	}
 
-	threshold := int(f + 1)
+	threshold := quorumThreshold(f)
 	received := len(br.requests)
 
 	// Log which signers we did receive
@@ -985,6 +999,12 @@ func main() {
 		log.Fatalf("write-timeout (%v) must be greater than quorum-timeout (%v)", *writeTimeout, *quorumTimeout)
 	}
 
+	if *requireBFTQuorum {
+		lggr.Infow("BFT quorum required: batch threshold is 2f+1", "requireBFTQuorum", true)
+	} else {
+		lggr.Infow("standard quorum: batch threshold is f+1", "requireBFTQuorum", false)
+	}
+
 	// Set up context with signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1048,21 +1068,34 @@ func main() {
 	// Inject runtime config + settings into the enclave over vsock: the storage
 	// endpoint + key (workflow-binary fetch) and the gateway URL (remote
 	// dispatch). These can't be baked into the measured EIF, so the host supplies
-	// them from its K8s env. Skipped only if nothing is configured.
+	// them at runtime. The raw --settings JSON, when set, is forwarded verbatim
+	// and overrides the individual flags; otherwise the payload is built from
+	// them. Skipped only if nothing is configured.
 	// TODO: re-inject on enclave restart.
-	settings := types.SettingsRequest{
-		StorageKey:         *storageKey,
-		StorageServiceURL:  *storageSvcURL,
-		StorageServiceTLS:  *storageSvcTLS,
-		GatewayURL:         *gatewayURL,
-		MaxBinarySize:      *maxBinarySize,
-		BinaryFetchTimeout: *binaryFetchTimeout,
-		MaxCacheBytes:      *maxCacheBytes,
+	var payload []byte
+	if *settingsJSON != "" {
+		payload = []byte(*settingsJSON)
+	} else {
+		settings := types.WorkflowSettings{
+			StorageKey:         *storageKey,
+			StorageServiceURL:  *storageSvcURL,
+			StorageServiceTLS:  *storageSvcTLS,
+			GatewayURL:         *gatewayURL,
+			MaxBinarySize:      *maxBinarySize,
+			BinaryFetchTimeout: *binaryFetchTimeout,
+			MaxCacheBytes:      *maxCacheBytes,
+		}
+		if settings.StorageKey != "" || settings.StorageServiceURL != "" || settings.GatewayURL != "" ||
+			settings.MaxBinarySize != 0 || settings.BinaryFetchTimeout != 0 || settings.MaxCacheBytes != 0 {
+			var err error
+			if payload, err = json.Marshal(settings); err != nil {
+				slog.Error("failed to marshal enclave settings", "error", err)
+			}
+		}
 	}
-	if settings.StorageKey != "" || settings.StorageServiceURL != "" || settings.GatewayURL != "" ||
-		settings.MaxBinarySize != 0 || settings.BinaryFetchTimeout != 0 || settings.MaxCacheBytes != 0 {
+	if len(payload) > 0 {
 		go func() {
-			if err := host.injectSettings(ctx, settings); err != nil {
+			if err := host.injectSettings(ctx, payload); err != nil {
 				slog.Error("failed to inject settings into enclave", "error", err)
 			}
 		}()

@@ -113,6 +113,7 @@ func NewService(lggr logger.Logger, limitsFactory limits.Factory) *ConfidentialH
 			cctypes.AppIDConfidentialHTTP,
 			cctypes.ServiceConfidentialComputeVersion,
 			limitsFactory,
+			true, // quorumTimeoutIsUserError: surface quorum timeouts as user errors (no retry)
 			func() *confhttptypes.HTTPResponse {
 				return &confhttptypes.HTTPResponse{}
 			},

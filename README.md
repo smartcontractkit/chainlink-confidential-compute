@@ -237,7 +237,7 @@ make clean-e2e-nitro
 
 ## Verifying Enclave Images
 
-The enclave build process is publicly verifiable so users can trust what runs inside the enclave. Cutting a release branch produces a GitHub Actions-generated Docker image ([example](https://github.com/smartcontractkit/confidential-compute/releases/tag/v1.3.0)). Because the image is built by GitHub from transparent source, it can be used to create reproducible [Enclave Image Files](https://docs.aws.amazon.com/enclaves/latest/user/building-eif.html).
+The enclave build process is publicly verifiable so users can trust what runs inside the enclave. Cutting a release branch produces a GitHub Actions-generated Docker image ([example](https://github.com/smartcontractkit/chainlink-confidential-compute/releases/tag/v1.3.0)). Because the image is built by GitHub from transparent source, it can be used to create reproducible [Enclave Image Files](https://docs.aws.amazon.com/enclaves/latest/user/building-eif.html).
 
 ```bash
 # Create measurements — produces [ENCLAVE_NAME].eif.measurements.json
