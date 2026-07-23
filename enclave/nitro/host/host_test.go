@@ -11,15 +11,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
-	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	confhttptypes "github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
+	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zapcore"
@@ -43,6 +44,107 @@ func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return m.response, m.err
 }
 
+type controlledRoundTripper struct {
+	started      chan struct{}
+	release      chan struct{}
+	responseBody []byte
+	err          error
+
+	startOnce sync.Once
+	mu        sync.Mutex
+	calls     int
+}
+
+func newControlledRoundTripper(responseBody []byte, err error) *controlledRoundTripper {
+	return &controlledRoundTripper{
+		started:      make(chan struct{}),
+		release:      make(chan struct{}),
+		responseBody: responseBody,
+		err:          err,
+	}
+}
+
+func (t *controlledRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+	t.startOnce.Do(func() { close(t.started) })
+	<-t.release
+	if t.err != nil {
+		return nil, t.err
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader(t.responseBody)),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+	}, nil
+}
+
+func (t *controlledRoundTripper) callCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
+}
+
+type recordedExecution struct {
+	metadata executionMetadata
+	outcome  string
+}
+
+type recordingExecutionMetrics struct {
+	mu              sync.Mutex
+	started         []executionMetadata
+	completed       []recordedExecution
+	startedSignal   chan struct{}
+	completedSignal chan struct{}
+}
+
+func newRecordingExecutionMetrics() *recordingExecutionMetrics {
+	return &recordingExecutionMetrics{
+		startedSignal:   make(chan struct{}, 4),
+		completedSignal: make(chan struct{}, 4),
+	}
+}
+
+func (r *recordingExecutionMetrics) startExecution(metadata executionMetadata) func(string) {
+	r.mu.Lock()
+	r.started = append(r.started, metadata)
+	r.mu.Unlock()
+	r.startedSignal <- struct{}{}
+	return func(outcome string) {
+		r.mu.Lock()
+		r.completed = append(r.completed, recordedExecution{metadata: metadata, outcome: outcome})
+		r.mu.Unlock()
+		r.completedSignal <- struct{}{}
+	}
+}
+
+func (r *recordingExecutionMetrics) snapshot() ([]executionMetadata, []recordedExecution) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]executionMetadata(nil), r.started...), append([]recordedExecution(nil), r.completed...)
+}
+
+func signedExecuteRequest(t *testing.T, request types.ComputeRequest, privateKey ed25519.PrivateKey) *http.Request {
+	t.Helper()
+	hash := request.Hash()
+	prefixedHash := types.MakePeerIDSignatureDomainSeparatedPayload(util.GetConfidentialComputePayloadPrefix(), hash[:])
+	signedRequest := types.SignedComputeRequest{
+		ComputeRequest: request,
+		Signature:      ed25519.Sign(privateKey, prefixedHash),
+	}
+	return httptest.NewRequest(http.MethodPost, types.ExecutePath, bytes.NewReader(util.MustMarshal(t, signedRequest)))
+}
+
+func waitForTestSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
 func observedFieldsByEvent(t *testing.T, logs *observer.ObservedLogs, event string) map[string]any {
 	t.Helper()
 	for _, entry := range logs.All() {
@@ -55,7 +157,7 @@ func observedFieldsByEvent(t *testing.T, logs *observer.ObservedLogs, event stri
 	return nil
 }
 
-func TestLogPublicDataConfidentialHTTP(t *testing.T) {
+func TestInspectPublicDataConfidentialHTTP(t *testing.T) {
 	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 	req := &confhttptypes.Request{
 		Url:    "https://example.test/path?visible=1",
@@ -75,8 +177,9 @@ func TestLogPublicDataConfidentialHTTP(t *testing.T) {
 	publicData, err := proto.Marshal(req)
 	require.NoError(t, err)
 
-	logPublicData(lggr, types.AppIDConfidentialHTTP, publicData)
+	metadata := inspectPublicData(lggr, types.AppIDConfidentialHTTP, publicData)
 
+	assert.Equal(t, executionMetadata{appID: types.AppIDConfidentialHTTP}, metadata)
 	fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA")
 	assert.Equal(t, types.AppIDConfidentialHTTP, fields["appID"])
 	assert.Equal(t, "confidential_http_request", fields["publicDataType"])
@@ -91,7 +194,7 @@ func TestLogPublicDataConfidentialHTTP(t *testing.T) {
 	assert.Equal(t, true, fields["encryptOutput"])
 }
 
-func TestLogPublicDataConfidentialWorkflows(t *testing.T) {
+func TestInspectPublicDataConfidentialWorkflows(t *testing.T) {
 	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 	execution := &confworkflowtypes.WorkflowExecution{
 		WorkflowId:   "workflow-id",
@@ -113,8 +216,13 @@ func TestLogPublicDataConfidentialWorkflows(t *testing.T) {
 	publicData, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
-	logPublicData(lggr, types.AppIDConfidentialWorkflows, publicData)
+	metadata := inspectPublicData(lggr, types.AppIDConfidentialWorkflows, publicData)
 
+	assert.Equal(t, executionMetadata{
+		appID:       types.AppIDConfidentialWorkflows,
+		workflowID:  "workflow-id",
+		requestKind: "trigger",
+	}, metadata)
 	fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA")
 	assert.Equal(t, types.AppIDConfidentialWorkflows, fields["appID"])
 	assert.Equal(t, "workflow_execution", fields["publicDataType"])
@@ -132,25 +240,158 @@ func TestLogPublicDataConfidentialWorkflows(t *testing.T) {
 	assert.Equal(t, uint64(123), fields["maxResponseSize"])
 }
 
-func TestLogPublicDataInvalidProto(t *testing.T) {
-	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
+func TestInspectPublicDataInvalidProto(t *testing.T) {
+	for _, appID := range []string{types.AppIDConfidentialHTTP, types.AppIDConfidentialWorkflows} {
+		t.Run(appID, func(t *testing.T) {
+			lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 
-	logPublicData(lggr, types.AppIDConfidentialHTTP, []byte{0xff})
+			metadata := inspectPublicData(lggr, appID, []byte{0xff})
 
-	fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA_DECODE_ERR")
-	assert.Equal(t, types.AppIDConfidentialHTTP, fields["appID"])
-	assert.Equal(t, int64(1), fields["publicDataLen"])
-	assert.NotNil(t, fields["error"])
+			assert.Equal(t, executionMetadata{appID: appID}, metadata)
+			fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA_DECODE_ERR")
+			assert.Equal(t, appID, fields["appID"])
+			assert.Equal(t, int64(1), fields["publicDataLen"])
+			assert.NotNil(t, fields["error"])
+		})
+	}
 }
 
-func TestLogPublicDataUnknownApp(t *testing.T) {
+func TestInspectPublicDataUnknownApp(t *testing.T) {
 	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 
-	logPublicData(lggr, "unknown-app", []byte("opaque"))
+	metadata := inspectPublicData(lggr, "unknown-app", []byte("opaque"))
 
+	assert.Equal(t, executionMetadata{appID: "unknown-app"}, metadata)
 	fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA_UNSUPPORTED")
 	assert.Equal(t, "unknown-app", fields["appID"])
 	assert.Equal(t, int64(6), fields["publicDataLen"])
+}
+
+func TestHandleExecuteRecordsOneExecutionAfterQuorum(t *testing.T) {
+	const numSigners = 3
+	signerKeys := make([]ed25519.PrivateKey, numSigners)
+	signers := make([][]byte, numSigners)
+	for i := range numSigners {
+		publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		signerKeys[i] = privateKey
+		signers[i] = publicKey
+	}
+
+	execution := &confworkflowtypes.WorkflowExecution{
+		WorkflowId: "workflow-id",
+		SdkExecuteRequest: &sdkpb.ExecuteRequest{
+			Request: &sdkpb.ExecuteRequest_Trigger{Trigger: &sdkpb.Trigger{Id: 7}},
+		},
+	}
+	publicData, err := proto.Marshal(execution)
+	require.NoError(t, err)
+	requestID := sha256.Sum256([]byte("execution-metrics-success"))
+	request := types.ComputeRequest{
+		RequestID:  requestID,
+		PublicData: publicData,
+		AppID:      types.AppIDConfidentialWorkflows,
+	}
+	responseBody := util.MustMarshal(t, types.ExecuteResponse{RequestID: requestID})
+	transport := newControlledRoundTripper(responseBody, nil)
+	recordedMetrics := newRecordingExecutionMetrics()
+	host := NewHostServer(context.Background(), &http.Client{Transport: transport})
+	host.config = types.EnclaveConfig{Signers: signers, T: 1, F: 1}
+	host.metrics = recordedMetrics
+
+	recorders := make([]*httptest.ResponseRecorder, 2)
+	done := make([]chan struct{}, 2)
+	for i := range 2 {
+		recorders[i] = httptest.NewRecorder()
+		done[i] = make(chan struct{})
+		httpRequest := signedExecuteRequest(t, request, signerKeys[i])
+		go func(index int) {
+			host.handleExecute(recorders[index], httpRequest)
+			close(done[index])
+		}(i)
+	}
+
+	waitForTestSignal(t, recordedMetrics.startedSignal, "execution metric start")
+	waitForTestSignal(t, transport.started, "enclave request")
+	started, completed := recordedMetrics.snapshot()
+	require.Equal(t, []executionMetadata{{
+		appID:       types.AppIDConfidentialWorkflows,
+		workflowID:  "workflow-id",
+		requestKind: "trigger",
+	}}, started)
+	assert.Empty(t, completed)
+	assert.Equal(t, 1, transport.callCount())
+
+	close(transport.release)
+	for i := range 2 {
+		waitForTestSignal(t, done[i], "host response")
+		assert.Equal(t, http.StatusOK, recorders[i].Code)
+	}
+	waitForTestSignal(t, recordedMetrics.completedSignal, "execution metric completion")
+	started, completed = recordedMetrics.snapshot()
+	require.Len(t, started, 1)
+	require.Equal(t, []recordedExecution{{
+		metadata: started[0],
+		outcome:  executionOutcomeSuccess,
+	}}, completed)
+
+	laggardRecorder := httptest.NewRecorder()
+	host.handleExecute(laggardRecorder, signedExecuteRequest(t, request, signerKeys[2]))
+	assert.Equal(t, http.StatusOK, laggardRecorder.Code)
+	assert.Equal(t, 1, transport.callCount())
+	started, completed = recordedMetrics.snapshot()
+	assert.Len(t, started, 1)
+	assert.Len(t, completed, 1)
+}
+
+func TestHandleExecuteRecordsEnclaveError(t *testing.T) {
+	const numSigners = 2
+	signerKeys := make([]ed25519.PrivateKey, numSigners)
+	signers := make([][]byte, numSigners)
+	for i := range numSigners {
+		publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		signerKeys[i] = privateKey
+		signers[i] = publicKey
+	}
+
+	transport := newControlledRoundTripper(nil, errors.New("vsock unavailable"))
+	recordedMetrics := newRecordingExecutionMetrics()
+	host := NewHostServer(context.Background(), &http.Client{Transport: transport})
+	host.config = types.EnclaveConfig{Signers: signers, T: 1, F: 1}
+	host.metrics = recordedMetrics
+	request := types.ComputeRequest{
+		RequestID: sha256.Sum256([]byte("execution-metrics-error")),
+		AppID:     types.AppIDConfidentialWorkflows,
+	}
+
+	recorders := make([]*httptest.ResponseRecorder, numSigners)
+	done := make([]chan struct{}, numSigners)
+	for i := range numSigners {
+		recorders[i] = httptest.NewRecorder()
+		done[i] = make(chan struct{})
+		httpRequest := signedExecuteRequest(t, request, signerKeys[i])
+		go func(index int) {
+			host.handleExecute(recorders[index], httpRequest)
+			close(done[index])
+		}(i)
+	}
+
+	waitForTestSignal(t, recordedMetrics.startedSignal, "execution metric start")
+	waitForTestSignal(t, transport.started, "enclave request")
+	close(transport.release)
+	for i := range numSigners {
+		waitForTestSignal(t, done[i], "host error response")
+		assert.Equal(t, http.StatusInternalServerError, recorders[i].Code)
+	}
+	waitForTestSignal(t, recordedMetrics.completedSignal, "execution metric completion")
+	started, completed := recordedMetrics.snapshot()
+	require.Len(t, started, 1)
+	require.Equal(t, []recordedExecution{{
+		metadata: started[0],
+		outcome:  executionOutcomeError,
+	}}, completed)
+	assert.Equal(t, 1, transport.callCount())
 }
 
 func TestHandleGetPublicKeys(t *testing.T) {
@@ -362,6 +603,7 @@ func TestHandleExecuteWithBatchingAndCaching(t *testing.T) {
 
 	executeRequests := make([]*http.Request, numRequests)
 	recorders := make([]*httptest.ResponseRecorder, numRequests)
+	done := make([]chan struct{}, numRequests-1)
 
 	for i := 0; i < numRequests; i++ {
 		computeReq := types.ComputeRequest{
@@ -385,8 +627,10 @@ func TestHandleExecuteWithBatchingAndCaching(t *testing.T) {
 
 	// Handle first two requests which should be queued
 	for i := 0; i < numRequests-1; i++ {
+		done[i] = make(chan struct{})
 		go func(idx int) {
 			host.handleExecute(recorders[idx], executeRequests[idx])
+			close(done[idx])
 		}(i)
 	}
 
@@ -398,24 +642,10 @@ func TestHandleExecuteWithBatchingAndCaching(t *testing.T) {
 
 	// Submit the third request which should trigger processing
 	host.handleExecute(recorders[numRequests-1], executeRequests[numRequests-1])
-
-	// Assert that the batch was processed.
-	success := false
-	for i := 0; i < 100; i++ {
-		if len(mockTransport.requests) == 1 {
-			success = true
-			for _, rec := range recorders {
-				if rec.Body.Len() == 0 {
-					success = false
-				}
-			}
-			if success {
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
+	for i := range done {
+		waitForTestSignal(t, done[i], "batched host response")
 	}
-	assert.True(t, success, "batch request was not sent within timeout")
+	require.Len(t, mockTransport.requests, 1)
 
 	// Verify that the batch request contains all three original requests
 	var enclaveReqs []types.SignedComputeRequest
@@ -539,6 +769,7 @@ func TestHandleExecuteWithBatchError(t *testing.T) {
 
 	executeRequests := make([]*http.Request, numRequests)
 	recorders := make([]*httptest.ResponseRecorder, numRequests)
+	done := make([]chan struct{}, numRequests-1)
 
 	for i := 0; i < numRequests; i++ {
 		computeReq := types.ComputeRequest{
@@ -562,8 +793,10 @@ func TestHandleExecuteWithBatchError(t *testing.T) {
 	}
 
 	for i := 0; i < numRequests-1; i++ {
+		done[i] = make(chan struct{})
 		go func(idx int) {
 			host.handleExecute(recorders[idx], executeRequests[idx])
+			close(done[idx])
 		}(i)
 	}
 
@@ -575,24 +808,10 @@ func TestHandleExecuteWithBatchError(t *testing.T) {
 
 	// Submit the third request which should trigger processing
 	host.handleExecute(recorders[numRequests-1], executeRequests[numRequests-1])
-
-	// Assert that the batch was processed.
-	success := false
-	for range 100 {
-		if len(mockTransport.requests) == 1 {
-			success = true
-			for _, rec := range recorders {
-				if rec.Code != http.StatusInternalServerError || len(rec.Body.String()) == 0 {
-					success = false
-				}
-			}
-			if success {
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
+	for i := range done {
+		waitForTestSignal(t, done[i], "batched host error response")
 	}
-	assert.True(t, success, "batch request was not sent within timeout")
+	require.Len(t, mockTransport.requests, 1)
 
 	// Check that all client requests received the specific error
 	for i, rec := range recorders {
@@ -643,7 +862,8 @@ func TestHandleExecuteWithBatchError(t *testing.T) {
 	newRecorder := httptest.NewRecorder()
 	newReq := httptest.NewRequest(http.MethodPost, "/requests", bytes.NewReader(newReqBytes))
 
-	for i := 1; i < 3; i++ {
+	newDone := make([]chan struct{}, numRequests-1)
+	for i := 1; i < numRequests; i++ {
 		hash := newComputeReq.Hash()
 		prefixedHash := types.MakePeerIDSignatureDomainSeparatedPayload(util.GetConfidentialComputePayloadPrefix(), hash[:])
 		signature := ed25519.Sign(*newSignerKeys[i], prefixedHash)
@@ -656,127 +876,39 @@ func TestHandleExecuteWithBatchError(t *testing.T) {
 		reqBytes := util.MustMarshal(t, execReq)
 		r := httptest.NewRequest(http.MethodPost, "/requests", bytes.NewReader(reqBytes))
 		w := httptest.NewRecorder()
-		go newHost.handleExecute(w, r)
+		newDone[i-1] = make(chan struct{})
+		go func(done chan struct{}) {
+			newHost.handleExecute(w, r)
+			close(done)
+		}(newDone[i-1])
 	}
 
 	time.Sleep(100 * time.Millisecond)
 
 	// This should trigger batch processing.
 	newHost.handleExecute(newRecorder, newReq)
-
-	// Assert that the batch was processed.
-	success = false
-	for range 100 {
-		if len(mockTransport.requests) == 1 {
-			success = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	for i := range newDone {
+		waitForTestSignal(t, newDone[i], "second batched host error response")
 	}
-	assert.True(t, success, "batch request was not sent within timeout")
+	require.Len(t, mockTransport.requests, 1)
 
 	// Verify that the new error is also properly propagated
 	assert.Equal(t, http.StatusInternalServerError, newRecorder.Code)
 	assert.Contains(t, newRecorder.Body.String(), "failed to communicate with enclave: connection refused")
 }
 
-// TestHandleExecuteWithQuorumTimeoutEarlyExit verifies that when quorum is reached and batch
-// processes successfully, the timeout goroutine exits early without waiting for the full timeout.
-func TestHandleExecuteWithQuorumTimeoutEarlyExit(t *testing.T) {
-	// Set a long timeout - if the test takes anywhere near this long, early exit isn't working
-	originalTimeout := *quorumTimeout
-	*quorumTimeout = 5 * time.Second
-	defer func() { *quorumTimeout = originalTimeout }()
+func TestHandleQuorumTimeoutEarlyExit(t *testing.T) {
+	host := NewHostServer(context.Background(), &http.Client{})
+	doneCh := make(chan struct{})
+	returned := make(chan struct{})
 
-	const numSigners = 3
-	signerKeys := make([]*ed25519.PrivateKey, numSigners)
-	signers := make([][]byte, numSigners)
+	go func() {
+		host.handleQuorumTimeout([32]byte{}, 0, doneCh)
+		close(returned)
+	}()
 
-	for i := 0; i < numSigners; i++ {
-		pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
-		require.NoError(t, err)
-		signerKeys[i] = &privKey
-		signers[i] = pubKey
-	}
-
-	config := types.EnclaveConfig{
-		Signers:         signers,
-		MasterPublicKey: []byte("master-public-key"),
-		T:               2,
-		F:               2, // threshold = F+1 = 3
-	}
-
-	mockExecResponse := types.ExecuteResponse{
-		RequestID:   sha256.Sum256([]byte("test-request-early-exit")),
-		Output:      []byte("test-output"),
-		Attestation: []byte("test-attestation"),
-	}
-	respBytes := util.MustMarshal(t, mockExecResponse)
-
-	mockResp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(bytes.NewReader(respBytes)),
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-	}
-
-	mockTransport := &mockRoundTripper{response: mockResp}
-	host := NewHostServer(context.Background(), &http.Client{Transport: mockTransport})
-	host.config = config
-
-	computeReq := types.ComputeRequest{
-		RequestID:   sha256.Sum256([]byte("test-request-early-exit")),
-		Ciphertexts: [][]byte{[]byte("test-ciphertext")},
-		PublicData:  []byte("test-public-data"),
-	}
-
-	// Submit all 3 requests to reach quorum
-	recorders := make([]*httptest.ResponseRecorder, numSigners)
-	done := make([]chan struct{}, numSigners)
-
-	startTime := time.Now()
-
-	for i := 0; i < numSigners; i++ {
-		hash := computeReq.Hash()
-		prefixedHash := types.MakePeerIDSignatureDomainSeparatedPayload(util.GetConfidentialComputePayloadPrefix(), hash[:])
-		signature := ed25519.Sign(*signerKeys[i], prefixedHash)
-
-		execReq := types.SignedComputeRequest{
-			ComputeRequest: computeReq,
-			Signature:      signature,
-		}
-
-		reqBytes := util.MustMarshal(t, execReq)
-		req := httptest.NewRequest(http.MethodPost, "/requests", bytes.NewReader(reqBytes))
-		recorders[i] = httptest.NewRecorder()
-		done[i] = make(chan struct{})
-
-		go func(idx int, r *http.Request) {
-			host.handleExecute(recorders[idx], r)
-			close(done[idx])
-		}(i, req)
-	}
-
-	// Wait for all requests to complete
-	for i := 0; i < numSigners; i++ {
-		select {
-		case <-done[i]:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("Request %d did not complete within expected time", i)
-		}
-	}
-
-	elapsed := time.Since(startTime)
-
-	// Verify the test completed quickly (well under the 5 second timeout)
-	assert.Less(t, elapsed, 1*time.Second, "Test should complete quickly due to early exit, not wait for full timeout")
-
-	// Verify all requests succeeded
-	for i, rec := range recorders {
-		assert.Equal(t, http.StatusOK, rec.Code, "Request %d should have succeeded", i)
-	}
-
-	// Verify request was sent to enclave
-	assert.Len(t, mockTransport.requests, 1, "One batch request should be sent to enclave")
+	close(doneCh)
+	waitForTestSignal(t, returned, "quorum timeout handler to exit")
 }
 
 // TestHandleExecuteWithSlowProcessingNoTimeout verifies that when quorum is reached but
