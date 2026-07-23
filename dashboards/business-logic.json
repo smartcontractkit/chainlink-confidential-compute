@@ -480,7 +480,7 @@
             "type": "prometheus",
             "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
           },
-          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_execute_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_enclave_params_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_vault_don_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_compute_request_signature_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_attestation_validation_failed{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_enclave_attestation_creation_failed{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h])))) or vector(0)",
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_execute_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_enclave_params_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_vault_don_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_compute_request_signature_error{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_attestation_validation_failed{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_attestation_creation_failed{component=\"enclave\", platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h])))) or vector(0)",
           "legendFormat": "Total Errors",
           "refId": "A"
         }
@@ -548,7 +548,7 @@
             "type": "prometheus",
             "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
           },
-          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_attestation_validation_failed{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_enclave_attestation_creation_failed{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h])))) or vector(0)",
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_attestation_validation_failed{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h]))) + avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_attestation_creation_failed{component=\"enclave\", platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[1h])))) or vector(0)",
           "legendFormat": "Attestation Failures",
           "refId": "A"
         }
@@ -661,7 +661,7 @@
             "type": "prometheus",
             "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
           },
-          "expr": "sum(rate(confidential_http_1_0_0_alpha_enclave_signature_verification_completed_duration_sum{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])) / sum(rate(confidential_http_1_0_0_alpha_enclave_signature_verification_completed_duration_count{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m]))",
+          "expr": "sum(rate(confidential_http_1_0_0_alpha_signature_verification_completed_duration_sum{component=\"enclave\", platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])) / sum(rate(confidential_http_1_0_0_alpha_signature_verification_completed_duration_count{component=\"enclave\", platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m]))",
           "legendFormat": "Signature Verification",
           "refId": "A"
         },
@@ -670,7 +670,7 @@
             "type": "prometheus",
             "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
           },
-          "expr": "sum(rate(confidential_http_1_0_0_alpha_enclave_shares_combining_completed_duration_sum{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])) / sum(rate(confidential_http_1_0_0_alpha_enclave_shares_combining_completed_duration_count{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m]))",
+          "expr": "sum(rate(confidential_http_1_0_0_alpha_shares_combining_completed_duration_sum{component=\"enclave\", platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])) / sum(rate(confidential_http_1_0_0_alpha_shares_combining_completed_duration_count{component=\"enclave\", platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m]))",
           "legendFormat": "Shares Combining",
           "refId": "B"
         },
@@ -679,7 +679,7 @@
             "type": "prometheus",
             "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
           },
-          "expr": "sum(rate(confidential_http_1_0_0_alpha_enclave_app_execution_completed_duration_sum{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])) / sum(rate(confidential_http_1_0_0_alpha_enclave_app_execution_completed_duration_count{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m]))",
+          "expr": "sum(rate(confidential_http_1_0_0_alpha_app_execution_completed_duration_sum{component=\"enclave\", platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])) / sum(rate(confidential_http_1_0_0_alpha_app_execution_completed_duration_count{component=\"enclave\", platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m]))",
           "legendFormat": "App Execution (HTTP calls)",
           "refId": "C"
         }
@@ -803,7 +803,7 @@
             "type": "prometheus",
             "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
           },
-          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_enclave_attestation_creation_failed{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h])))) or vector(0)",
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_attestation_creation_failed{component=\"enclave\", platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h])))) or vector(0)",
           "legendFormat": "Attest Creation",
           "refId": "F"
         }
@@ -1109,7 +1109,7 @@
             "type": "prometheus",
             "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
           },
-          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_enclave_request_completed_duration_sum{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h]))))",
+          "expr": "round(avg by () (sum by (node_id) (increase(confidential_http_1_0_0_alpha_request_completed_duration_sum{component=\"enclave\", platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[24h]))))",
           "legendFormat": "Chargeable Seconds",
           "refId": "A"
         }
@@ -1367,7 +1367,7 @@
             "type": "prometheus",
             "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(confidential_http_1_0_0_alpha_enclave_request_completed_duration_bucket{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(confidential_http_1_0_0_alpha_request_completed_duration_bucket{component=\"enclave\", platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])))",
           "legendFormat": "P95",
           "refId": "A"
         },
@@ -1376,7 +1376,7 @@
             "type": "prometheus",
             "uid": "c6b3d5a9-da28-4c5a-b227-5fb08c486a6f"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(confidential_http_1_0_0_alpha_enclave_request_completed_duration_bucket{platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(confidential_http_1_0_0_alpha_request_completed_duration_bucket{component=\"enclave\", platformEnv=~\"$platformEnv\", donID=~\"$donID\", zone=~\"$zone\"}[5m])))",
           "legendFormat": "P99",
           "refId": "B"
         }
