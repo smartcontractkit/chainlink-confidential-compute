@@ -256,6 +256,75 @@ func TestInspectPublicDataInvalidProto(t *testing.T) {
 	}
 }
 
+func TestInspectResponseOutputConfidentialHTTP(t *testing.T) {
+	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
+	resp := &confhttptypes.Response{
+		StatusCode: http.StatusOK,
+		Body:       []byte("response-body"),
+		MultiHeaders: map[string]*confhttptypes.HeaderValues{
+			"Content-Type": &confhttptypes.HeaderValues{Values: []string{"application/json"}},
+			"X-Trace":      &confhttptypes.HeaderValues{Values: []string{"trace-id"}},
+		},
+	}
+	output, err := proto.Marshal(resp)
+	require.NoError(t, err)
+
+	inspectResponseOutput(lggr, types.AppIDConfidentialHTTP, output)
+
+	fields := observedFieldsByEvent(t, logs, "RESPONSE_DATA")
+	assert.Equal(t, types.AppIDConfidentialHTTP, fields["appID"])
+	assert.Equal(t, "confidential_http_response", fields["responseType"])
+	assert.Equal(t, uint32(http.StatusOK), fields["statusCode"])
+	assert.Equal(t, int64(len("response-body")), fields["bodyLen"])
+	assert.Equal(t, []any{"Content-Type", "X-Trace"}, fields["headerNames"])
+}
+
+func TestInspectResponseOutputConfidentialWorkflows(t *testing.T) {
+	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
+	resp := &confworkflowtypes.ConfidentialWorkflowResponse{
+		SdkExecutionResult: &sdkpb.ExecutionResult{
+			Result: &sdkpb.ExecutionResult_Error{Error: "boom"},
+		},
+	}
+	output, err := proto.Marshal(resp)
+	require.NoError(t, err)
+
+	inspectResponseOutput(lggr, types.AppIDConfidentialWorkflows, output)
+
+	fields := observedFieldsByEvent(t, logs, "RESPONSE_DATA")
+	assert.Equal(t, types.AppIDConfidentialWorkflows, fields["appID"])
+	assert.Equal(t, "workflow_execution_result", fields["responseType"])
+	assert.Equal(t, "error", fields["resultKind"])
+	assert.Equal(t, true, fields["sdkResultPresent"])
+	assert.Equal(t, int64(0), fields["executionResultLen"])
+	assert.Equal(t, int64(len("boom")), fields["errorLen"])
+}
+
+func TestInspectResponseOutputInvalidProto(t *testing.T) {
+	for _, appID := range []string{types.AppIDConfidentialHTTP, types.AppIDConfidentialWorkflows} {
+		t.Run(appID, func(t *testing.T) {
+			lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
+
+			inspectResponseOutput(lggr, appID, []byte{0xff})
+
+			fields := observedFieldsByEvent(t, logs, "RESPONSE_DATA_DECODE_ERR")
+			assert.Equal(t, appID, fields["appID"])
+			assert.Equal(t, int64(1), fields["outputLen"])
+			assert.NotNil(t, fields["error"])
+		})
+	}
+}
+
+func TestInspectResponseOutputUnknownApp(t *testing.T) {
+	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
+
+	inspectResponseOutput(lggr, "unknown-app", []byte("opaque"))
+
+	fields := observedFieldsByEvent(t, logs, "RESPONSE_DATA_UNSUPPORTED")
+	assert.Equal(t, "unknown-app", fields["appID"])
+	assert.Equal(t, int64(6), fields["outputLen"])
+}
+
 func TestInspectPublicDataUnknownApp(t *testing.T) {
 	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 

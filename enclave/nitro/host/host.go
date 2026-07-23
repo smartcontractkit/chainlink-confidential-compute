@@ -705,6 +705,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		reqLog.Infow("response sent",
 			"event", "RESPONSE_OK",
 			"waitDuration", waitDuration.String())
+		inspectResponseOutput(reqLog, execReq.AppID, batchResp.response.Output)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(batchResp.response); err != nil {

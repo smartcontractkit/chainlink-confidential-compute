@@ -54,12 +54,58 @@ func inspectPublicData(reqLog cllogger.SugaredLogger, appID string, publicData [
 	}
 }
 
+// inspectResponseOutput decodes an execute-response output so response logging
+// derives its observations from the same typed message the enclave produced.
+func inspectResponseOutput(reqLog cllogger.SugaredLogger, appID string, output []byte) {
+	switch appID {
+	case types.AppIDConfidentialHTTP:
+		resp, err := decodeHTTPResponseOutput(output)
+		if err != nil {
+			logResponseOutputDecodeError(reqLog, appID, len(output), err)
+			return
+		}
+
+		logHTTPResponseOutput(reqLog, resp, len(output))
+
+	case types.AppIDConfidentialWorkflows:
+		resp, err := decodeWorkflowResponseOutput(output)
+		if err != nil {
+			logResponseOutputDecodeError(reqLog, appID, len(output), err)
+			return
+		}
+
+		logWorkflowResponseOutput(reqLog, resp, len(output))
+
+	default:
+		reqLog.Debugw("response output decoder unavailable",
+			"event", "RESPONSE_DATA_UNSUPPORTED",
+			"appID", appID,
+			"outputLen", len(output))
+	}
+}
+
 func decodeHTTPPublicData(publicData []byte) (*confhttptypes.Request, error) {
 	var req confhttptypes.Request
 	if err := proto.Unmarshal(publicData, &req); err != nil {
 		return nil, err
 	}
 	return &req, nil
+}
+
+func decodeHTTPResponseOutput(output []byte) (*confhttptypes.Response, error) {
+	var resp confhttptypes.Response
+	if err := proto.Unmarshal(output, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func decodeWorkflowResponseOutput(output []byte) (*confworkflowtypes.ConfidentialWorkflowResponse, error) {
+	var resp confworkflowtypes.ConfidentialWorkflowResponse
+	if err := proto.Unmarshal(output, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 func decodeWorkflowPublicData(publicData []byte) (*confworkflowtypes.WorkflowExecution, error) {
@@ -92,6 +138,20 @@ func workflowRequestKind(execution *confworkflowtypes.WorkflowExecution) string 
 		case *sdkpb.ExecuteRequest_PreHook:
 			return "pre_hook"
 		}
+	}
+	return "unset"
+}
+
+func workflowResultKind(result *sdkpb.ExecutionResult) string {
+	switch result.GetResult().(type) {
+	case *sdkpb.ExecutionResult_Value:
+		return "value"
+	case *sdkpb.ExecutionResult_Error:
+		return "error"
+	case *sdkpb.ExecutionResult_TriggerSubscriptions:
+		return "trigger_subscriptions"
+	case *sdkpb.ExecutionResult_Restrictions:
+		return "restrictions"
 	}
 	return "unset"
 }
@@ -169,10 +229,46 @@ func logWorkflowPublicData(
 	reqLog.Infow("decoded publicData", fields...)
 }
 
+func logHTTPResponseOutput(reqLog cllogger.SugaredLogger, resp *confhttptypes.Response, outputLen int) {
+	reqLog.Infow("decoded response output",
+		"event", "RESPONSE_DATA",
+		"appID", types.AppIDConfidentialHTTP,
+		"outputLen", outputLen,
+		"responseType", "confidential_http_response",
+		"statusCode", resp.GetStatusCode(),
+		"bodyLen", len(resp.GetBody()),
+		"headerNames", slices.Sorted(maps.Keys(resp.GetMultiHeaders())))
+}
+
+func logWorkflowResponseOutput(
+	reqLog cllogger.SugaredLogger,
+	resp *confworkflowtypes.ConfidentialWorkflowResponse,
+	outputLen int,
+) {
+	sdkResult := resp.GetSdkExecutionResult()
+	reqLog.Infow("decoded response output",
+		"event", "RESPONSE_DATA",
+		"appID", types.AppIDConfidentialWorkflows,
+		"outputLen", outputLen,
+		"responseType", "workflow_execution_result",
+		"resultKind", workflowResultKind(sdkResult),
+		"sdkResultPresent", sdkResult != nil,
+		"executionResultLen", len(resp.GetExecutionResult()),
+		"errorLen", len(sdkResult.GetError()))
+}
+
 func logPublicDataDecodeError(reqLog cllogger.SugaredLogger, appID string, publicDataLen int, err error) {
 	reqLog.Warnw("failed to decode publicData",
 		"event", "PUBLIC_DATA_DECODE_ERR",
 		"appID", appID,
 		"publicDataLen", publicDataLen,
+		"error", err)
+}
+
+func logResponseOutputDecodeError(reqLog cllogger.SugaredLogger, appID string, outputLen int, err error) {
+	reqLog.Warnw("failed to decode response output",
+		"event", "RESPONSE_DATA_DECODE_ERR",
+		"appID", appID,
+		"outputLen", outputLen,
 		"error", err)
 }
