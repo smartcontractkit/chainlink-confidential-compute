@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 
@@ -22,17 +21,11 @@ const (
 	hostInstrumentationScope = "github.com/smartcontractkit/confidential-compute/enclave/nitro/host"
 	defaultHostServiceName   = "confidential-compute-enclave-host"
 
-	envOTLPEndpoint    = "OTEL_EXPORTER_OTLP_ENDPOINT"
-	envOTELServiceName = "OTEL_SERVICE_NAME"
-	envPodName         = "POD_NAME"
-	envPodUID          = "POD_UID"
+	envOTLPEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
 )
 
 type hostTelemetryConfig struct {
-	Endpoint    string
-	ServiceName string
-	PodName     string
-	PodUID      string
+	Endpoint string
 }
 
 func (c hostTelemetryConfig) enabled() bool {
@@ -49,16 +42,8 @@ type metricExporterFactory func(context.Context, string) (sdkmetric.Exporter, er
 // An explicitly configured OTLP endpoint enables telemetry; without one the
 // host stays no-op for local development and tests.
 func loadHostTelemetryConfig(getenv func(string) string) hostTelemetryConfig {
-	serviceName := strings.TrimSpace(getenv(envOTELServiceName))
-	if serviceName == "" {
-		serviceName = defaultHostServiceName
-	}
-
 	return hostTelemetryConfig{
-		Endpoint:    strings.TrimSpace(getenv(envOTLPEndpoint)),
-		ServiceName: serviceName,
-		PodName:     strings.TrimSpace(getenv(envPodName)),
-		PodUID:      strings.TrimSpace(getenv(envPodUID)),
+		Endpoint: strings.TrimSpace(getenv(envOTLPEndpoint)),
 	}
 }
 
@@ -80,26 +65,12 @@ func newOTLPMetricExporter(ctx context.Context, endpoint string) (sdkmetric.Expo
 	return otlpmetricgrpc.New(ctx, otlpmetricgrpc.WithEndpointURL(endpoint))
 }
 
-func newHostResource(ctx context.Context, cfg hostTelemetryConfig) (*resource.Resource, error) {
-	instanceID := cfg.PodUID
-	if instanceID == "" {
-		var err error
-		instanceID, err = os.Hostname()
-		if err != nil {
-			return nil, fmt.Errorf("resolve telemetry service instance ID: %w", err)
-		}
-	}
-
+func newHostResource(ctx context.Context) (*resource.Resource, error) {
+	// Pod identity is supplied by the platform collector's Kubernetes
+	// attributes processor rather than deployment-specific host environment.
 	attrs := []attribute.KeyValue{
-		attribute.String("service.name", cfg.ServiceName),
-		attribute.String("service.instance.id", instanceID),
+		attribute.String("service.name", defaultHostServiceName),
 		attribute.String("enclave.type", "aws-nitro"),
-	}
-	if cfg.PodName != "" {
-		attrs = append(attrs, attribute.String("k8s.pod.name", cfg.PodName))
-	}
-	if cfg.PodUID != "" {
-		attrs = append(attrs, attribute.String("k8s.pod.uid", cfg.PodUID))
 	}
 
 	res, err := resource.Merge(resource.DefaultWithContext(ctx), resource.NewSchemaless(attrs...))
@@ -130,7 +101,7 @@ func newHostTelemetryWithExporter(
 		lggr.Errorw("telemetry export error", "error", err)
 	}))
 
-	res, err := newHostResource(ctx, cfg)
+	res, err := newHostResource(ctx)
 	if err != nil {
 		return hostTelemetry{}, err
 	}

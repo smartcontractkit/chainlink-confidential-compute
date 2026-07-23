@@ -24,22 +24,16 @@ func TestLoadHostTelemetryConfigDisabledByDefault(t *testing.T) {
 	cfg := loadHostTelemetryConfig(envGetter(nil))
 
 	assert.False(t, cfg.enabled())
-	assert.Equal(t, defaultHostServiceName, cfg.ServiceName)
+	assert.Empty(t, cfg.Endpoint)
 }
 
 func TestLoadHostTelemetryConfigEndpoint(t *testing.T) {
 	cfg := loadHostTelemetryConfig(envGetter(map[string]string{
-		envOTLPEndpoint:    " http://daemon-collector.open-telemetry.svc.cluster.local:4317 ",
-		envOTELServiceName: " enclave-host ",
-		envPodName:         " enclave-host-0 ",
-		envPodUID:          " 7d9cf36e-b747-4013-b680-061133be0e29 ",
+		envOTLPEndpoint: " http://daemon-collector.open-telemetry.svc.cluster.local:4317 ",
 	}))
 
 	assert.Equal(t, hostTelemetryConfig{
-		Endpoint:    "http://daemon-collector.open-telemetry.svc.cluster.local:4317",
-		ServiceName: "enclave-host",
-		PodName:     "enclave-host-0",
-		PodUID:      "7d9cf36e-b747-4013-b680-061133be0e29",
+		Endpoint: "http://daemon-collector.open-telemetry.svc.cluster.local:4317",
 	}, cfg)
 	assert.True(t, cfg.enabled())
 }
@@ -48,7 +42,7 @@ func TestNewHostTelemetryDisabled(t *testing.T) {
 	exporterCreated := false
 	telemetry, err := newHostTelemetryWithExporter(
 		context.Background(),
-		hostTelemetryConfig{ServiceName: defaultHostServiceName},
+		hostTelemetryConfig{},
 		cllogger.Sugared(cllogger.Nop()),
 		func(context.Context, string) (sdkmetric.Exporter, error) {
 			exporterCreated = true
@@ -71,10 +65,7 @@ func TestNewHostTelemetryExportsMetricsWithHostResource(t *testing.T) {
 	telemetry, err := newHostTelemetryWithExporter(
 		context.Background(),
 		hostTelemetryConfig{
-			Endpoint:    "http://collector:4317",
-			ServiceName: "enclave-host",
-			PodName:     "enclave-host-0",
-			PodUID:      "7d9cf36e-b747-4013-b680-061133be0e29",
+			Endpoint: "http://collector:4317",
 		},
 		cllogger.Sugared(cllogger.Nop()),
 		func(_ context.Context, endpoint string) (sdkmetric.Exporter, error) {
@@ -96,18 +87,15 @@ func TestNewHostTelemetryExportsMetricsWithHostResource(t *testing.T) {
 	exported := exporter.lastExport()
 	require.NotNil(t, exported)
 	attrs := exported.Resource.Set()
-	assertResourceAttribute(t, attrs, "service.name", "enclave-host")
-	assertResourceAttribute(t, attrs, "service.instance.id", "7d9cf36e-b747-4013-b680-061133be0e29")
+	assertResourceAttribute(t, attrs, "service.name", defaultHostServiceName)
 	assertResourceAttribute(t, attrs, "enclave.type", "aws-nitro")
-	assertResourceAttribute(t, attrs, "k8s.pod.name", "enclave-host-0")
-	assertResourceAttribute(t, attrs, "k8s.pod.uid", "7d9cf36e-b747-4013-b680-061133be0e29")
 }
 
 func TestNewHostTelemetryReturnsExporterError(t *testing.T) {
 	expected := errors.New("bad endpoint")
 	_, err := newHostTelemetryWithExporter(
 		context.Background(),
-		hostTelemetryConfig{Endpoint: "://invalid", ServiceName: defaultHostServiceName, PodUID: "pod-uid"},
+		hostTelemetryConfig{Endpoint: "://invalid"},
 		cllogger.Sugared(cllogger.Nop()),
 		func(context.Context, string) (sdkmetric.Exporter, error) {
 			return nil, expected
@@ -142,9 +130,7 @@ func TestHostTelemetryShutdownHonorsContext(t *testing.T) {
 	telemetry, err := newHostTelemetryWithExporter(
 		context.Background(),
 		hostTelemetryConfig{
-			Endpoint:    "http://collector:4317",
-			ServiceName: defaultHostServiceName,
-			PodUID:      "pod-uid",
+			Endpoint: "http://collector:4317",
 		},
 		cllogger.Sugared(cllogger.Nop()),
 		func(context.Context, string) (sdkmetric.Exporter, error) {
