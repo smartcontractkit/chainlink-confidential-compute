@@ -122,6 +122,52 @@ kubectl delete pod enclave-workflows-1-<hash> enclave-workflows-2-<hash> -n encl
 kubectl get pods -n enclave -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{range .spec.containers[*]}  {.image}{"\n"}{end}{end}' | grep -E "workflows|sha-"
 ```
 
+## 6. Watch enclave memory during a burst (`/memory`)
+
+The driver polls each enclave's `GET /memory` (`usedMB` = Go-runtime resident
+bytes) every 200ms through the burst plus a post-ACK hold window, and prints a
+`MEM PEAK <url> usedMB=N` per URL at the end. `/memory` is served by the
+host-container on port **8080** (same listener as `/publicKeys`), only on the
+VPC-internal address, so reach it with a port-forward:
+
+```bash
+# one per enclave, backgrounded; 8080 = the host-container HTTP port
+kubectl port-forward -n enclave deploy/enclave-workflows-1 18081:8080 &
+kubectl port-forward -n enclave deploy/enclave-workflows-2 18082:8080 &
+
+# add these to the fire command from section 3:
+LOADTEST_MEMORY_URLS="http://localhost:18081/memory,http://localhost:18082/memory" \
+LOADTEST_MEMORY_POLL_SECONDS=30 \   # keep sampling 30s past the ACKs, through execution
+  /tmp/loadtest.bin -test.run TestBurst_Concurrent -test.v -test.timeout 5m
+```
+
+Output: `MEM t=..s <url> usedMB=N` samples plus a final `MEM PEAK`. The enclave
+is 2048 MiB, so a peak nearing ~1900 MiB is close to the wedge threshold.
+`MEM poll <url> unreachable` = the port-forward is down (not a healthy enclave).
+
+### Stepped ramp — sample `/memory` before each fire (`TestRamp_Stepped`)
+
+To pin *which* memory level wedges an enclave: fires one trigger at a time
+(round-robin over the IDs) and prints each enclave's `/memory` right **before**
+every fire, so you see the exact pre-trigger state as executions accumulate
+(vs `TestBurst_Concurrent`, which fires all at once).
+
+```bash
+# the section-6 port-forwards must be up
+LOADTEST_GATEWAY_URL="$GW" CRE_LOADTEST_PRIVATE_KEY="$TRIG" LOADTEST_WORKFLOW_OWNER="$OWNER" \
+LOADTEST_WORKFLOW_IDS="<id1>,<id2>,..." \
+LOADTEST_MEMORY_URLS="http://localhost:18081/memory,http://localhost:18082/memory" \
+STEP_COUNT=20 \
+STEP_INTERVAL_SECONDS=2 \     # small = executions overlap and memory climbs; large = each drains first
+  /tmp/loadtest.bin -test.run TestRamp_Stepped -test.v -test.timeout 10m
+```
+
+Each step logs `STEP i  PRE-FIRE  <url> usedMB=N | ...` then `STEP i  FIRE  wf=.. http=.. exec=..`.
+Watch `usedMB` climb toward the ~1900 MiB neighborhood (2048 MiB enclave, wedge
+threshold). Note `usedMB` is Go-runtime mapped memory (high-water-ish; it
+doesn't drop instantly when an execution finishes), so it shows the growth
+envelope rather than exact live use.
+
 ## Gotchas
 
 - **Staging RPC `rpcs.main.stage.cldev.sh` is flaky** (EOF/timeout ~every other

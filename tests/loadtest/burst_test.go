@@ -23,26 +23,24 @@ import (
 // point this at a reachable address (e.g. a kubectl port-forward to the
 // enclave-workflows host-container). Returns a stop function.
 func startMemoryPoller(t *testing.T) func() {
-	raw := os.Getenv("LOADTEST_MEMORY_URLS")
-	if raw == "" {
+	urls := memURLs()
+	if len(urls) == 0 {
 		return func() {}
-	}
-	var urls []string
-	for _, u := range strings.Split(raw, ",") {
-		if u = strings.TrimSpace(u); u != "" {
-			urls = append(urls, u)
-		}
 	}
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	start := time.Now()
 	client := &http.Client{Timeout: 2 * time.Second}
+	var mu sync.Mutex
+	peak := make(map[string]uint64, len(urls)) // max usedMB seen per URL
+	reached := make(map[string]bool, len(urls))
 	for _, u := range urls {
 		wg.Add(1)
 		go func(u string) {
 			defer wg.Done()
 			tick := time.NewTicker(200 * time.Millisecond)
 			defer tick.Stop()
+			loggedErr := false
 			for {
 				select {
 				case <-stop:
@@ -50,6 +48,12 @@ func startMemoryPoller(t *testing.T) func() {
 				case <-tick.C:
 					resp, err := client.Get(u)
 					if err != nil {
+						// Surface the first failure so a broken port-forward is
+						// distinguishable from a healthy-but-silent enclave.
+						if !loggedErr {
+							t.Logf("MEM poll %s unreachable: %v (is the port-forward up?)", u, err)
+							loggedErr = true
+						}
 						continue
 					}
 					var m struct {
@@ -57,12 +61,31 @@ func startMemoryPoller(t *testing.T) func() {
 					}
 					_ = json.NewDecoder(resp.Body).Decode(&m)
 					_ = resp.Body.Close()
+					loggedErr = false
+					mu.Lock()
+					reached[u] = true
+					if m.UsedMB > peak[u] {
+						peak[u] = m.UsedMB
+					}
+					mu.Unlock()
 					t.Logf("MEM t=%5.1fs %s usedMB=%d", time.Since(start).Seconds(), u, m.UsedMB)
 				}
 			}
 		}(u)
 	}
-	return func() { close(stop); wg.Wait() }
+	return func() {
+		close(stop)
+		wg.Wait()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, u := range urls {
+			if reached[u] {
+				t.Logf("MEM PEAK %s usedMB=%d", u, peak[u])
+			} else {
+				t.Logf("MEM PEAK %s: never reached (no samples)", u)
+			}
+		}
+	}
 }
 
 // TestBurst_Concurrent fires BURST_N (default 10) requests as simultaneously as
