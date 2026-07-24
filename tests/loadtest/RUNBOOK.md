@@ -141,9 +141,13 @@ LOADTEST_MEMORY_POLL_SECONDS=30 \   # keep sampling 30s past the ACKs, through e
   /tmp/loadtest.bin -test.run TestBurst_Concurrent -test.v -test.timeout 5m
 ```
 
-Output: `MEM t=..s <url> usedMB=N` samples plus a final `MEM PEAK`. The enclave
-is 2048 MiB, so a peak nearing ~1900 MiB is close to the wedge threshold.
-`MEM poll <url> unreachable` = the port-forward is down (not a healthy enclave).
+Output: `MEM t=..s <url> rssMB=N usedMB=M` samples plus a final `MEM PEAK ... rssMB=N`.
+**`rssMB` is the number to watch** (process resident set, includes the wasmtime
+WASM native memory that drives the wedge); `usedMB` is Go-runtime-only and badly
+undercounts. The enclave is 2048 MiB, so an `rssMB` peak nearing ~1900 MiB is
+close to the wedge threshold. `MEM poll <url> unreachable` = the port-forward is
+down (not a healthy enclave). (`rssMB` needs the enclave build with the RSS
+endpoint change, chainlink-confidential-compute #22; older enclaves report `rssMB=0`.)
 
 ### Stepped ramp — sample `/memory` before each fire (`TestRamp_Stepped`)
 

@@ -58,17 +58,18 @@ func startMemoryPoller(t *testing.T) func() {
 					}
 					var m struct {
 						UsedMB uint64 `json:"usedMB"`
+						RSSMB  uint64 `json:"rssMB"` // native footprint incl. wasmtime; the number to watch
 					}
 					_ = json.NewDecoder(resp.Body).Decode(&m)
 					_ = resp.Body.Close()
 					loggedErr = false
 					mu.Lock()
 					reached[u] = true
-					if m.UsedMB > peak[u] {
-						peak[u] = m.UsedMB
+					if m.RSSMB > peak[u] {
+						peak[u] = m.RSSMB
 					}
 					mu.Unlock()
-					t.Logf("MEM t=%5.1fs %s usedMB=%d", time.Since(start).Seconds(), u, m.UsedMB)
+					t.Logf("MEM t=%5.1fs %s rssMB=%d usedMB=%d", time.Since(start).Seconds(), u, m.RSSMB, m.UsedMB)
 				}
 			}
 		}(u)
@@ -80,7 +81,7 @@ func startMemoryPoller(t *testing.T) func() {
 		defer mu.Unlock()
 		for _, u := range urls {
 			if reached[u] {
-				t.Logf("MEM PEAK %s usedMB=%d", u, peak[u])
+				t.Logf("MEM PEAK %s rssMB=%d", u, peak[u])
 			} else {
 				t.Logf("MEM PEAK %s: never reached (no samples)", u)
 			}

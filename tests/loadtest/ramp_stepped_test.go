@@ -39,10 +39,11 @@ func sampleMem(client *http.Client, urls []string) string {
 		}
 		var m struct {
 			UsedMB uint64 `json:"usedMB"`
+			RSSMB  uint64 `json:"rssMB"` // includes wasmtime native memory; the number to watch
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&m)
 		_ = resp.Body.Close()
-		parts = append(parts, fmt.Sprintf("%s usedMB=%d", u, m.UsedMB))
+		parts = append(parts, fmt.Sprintf("%s rssMB=%d usedMB=%d", u, m.RSSMB, m.UsedMB))
 	}
 	return strings.Join(parts, " | ")
 }
