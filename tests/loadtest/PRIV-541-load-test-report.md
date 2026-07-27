@@ -1,76 +1,34 @@
 # Confidential Workflows Load Test (PRIV-541)
 
-A single ~26-way burst wedged the staging confidential-workflows enclaves with
-zero auto-recovery. That was the headline. We fixed it, and here is what the
-enclaves can now do.
+The staging confidential-workflows enclaves now shed load instead of falling
+over, and recover themselves if they ever do. Here is where things stand.
 
 Staging, us-west-2. Enclaves `enclave-workflows-1` / `-2`, AWS Nitro, 2048 MiB,
-`c5.xlarge`. Workload: an HTTP-triggered workflow whose handler runs in the TEE.
-Driver: standalone Go (`tests/loadtest`), signs `workflows.execute` and POSTs to
-the gateway; outcomes read from `cre execution`. Each request is pinned to one
-enclave by `sha256(execID) mod N`, and all F+1 quorum nodes converge on it.
+`c5.xlarge`, both healthy. Running `sha-358ac81`, which carries admission
+control, self-heal, and the RSS `/memory` endpoint.
 
-## Gateway limit forces a harness
+## What the enclaves do under load
 
-You cannot load one workflow: the gateway rate-limits `workflows.execute`
-per-workflow (burst 3 + trickle, per gateway node, ~6 accepted at once). So we
-deploy many copies with distinct config (distinct workflowID to distinct rate
-bucket) and round-robin across them. N workflows x 1 hit = N real concurrent
-enclave executions.
+**Validated: 20 concurrent, both enclaves healthy: 19 SUCCESS, 1 capacity-shed,
+0 wedge.** The one execution the enclave could not take returned "enclave at
+capacity" instead of collapsing the pool. `rssMB` peaked 1377 / 1395 of 2048,
+well clear of the ~1900 danger zone. Admission control (CCC #4) held it; the
+self-heal (cc-infra #69) is on the pods as a backstop.
 
-## Finding 1: the enclave wedges, nothing recovers it
+Throughput (measured; execution 4-20s under load, mean ~12s):
 
-Minimal-workflow sweep, pre-fix:
+| workload | concurrency/enclave | per enclave | aggregate |
+|---|---|---|---|
+| vault (GetSecret) | ~10 | ~0.8-1 exec/s | ~1.7-2/s |
+| minimal (no secret) | ~10 | ~5-7 exec/s | ~10-14/s |
 
-| concurrent | result |
-|---|---|
-| 5 to 26 | 100% SUCCESS |
-| 28 | wedge (15 SUCCESS / 13 FAILURE, host crash-loop) |
+Vault-path throughput is gated by the shared relay/VaultDON round-trip, not the
+enclave, so adding enclaves helps it less. The minimal path is enclave-bound and
+scales with enclaves. Per-execution cost is ~63 MB RSS including wasmtime.
 
-A wedged enclave is `RUNNING` per `nitro-cli` but dead on vsock. Pod sits 2/3,
-host crash-loops, no VM re-launch. Recovery was a manual `kubectl delete pod`.
-Root cause: no admission control, so N concurrent wasmtime instances exhaust the
-fixed 2048 MiB and the VM goes unresponsive.
+## The remaining gap: a shed is not yet graceful
 
-## Finding 2: the vault path wedges sooner
-
-Add `rt.GetSecret` (VaultDON) to every execution:
-
-| concurrent | result |
-|---|---|
-| 13 | 13/13 SUCCESS |
-| 20 | wedge (all "no live enclaves") |
-
-A GetSecret execution holds its enclave slot for the whole relay-to-VaultDON
-round-trip and does a TDH2 decrypt on top. Bigger block, held longer. (This ~20
-landed on effectively one enclave; `-2` was flapping at the time.)
-
-## Finding 3: `/memory` measured the wrong memory
-
-`usedMB` came from Go's `runtime/metrics`, blind to the wasmtime WASM memory
-(native/CGO). Fixed in CCC #22 with an additive `rssMB` (process RSS). Live:
-`{"usedMB":376,"rssMB":678}` idle. RSS is ~2x the Go number; per-execution cost
-is ~**63 MB RSS** including wasmtime, vs the ~16 MB Go-side we were watching.
-
-## Fixes
-
-| PR | what | status |
-|---|---|---|
-| CCC #4 | Admission control: cap concurrent execs at `(T-reserve)/128`, shed with 429 instead of OOMing | live |
-| CCC #22 | `/memory` reports real footprint (`rssMB`) | live |
-| cc-infra #69 | Self-heal: probe + `preStop` on the launcher, restart + re-launch a wedged VM | live |
-| CCC #6 | Load harness (burst + stepped ramp), `/memory` poller, RUNBOOK, this report | open |
-
-## Validation on staging (`sha-358ac81`, all fixes live)
-
-**20 concurrent, both enclaves healthy: 19 SUCCESS, 1 capacity-shed, 0 wedge.**
-The one it could not take returned "enclave at capacity" instead of collapsing.
-`rssMB` peaked 1377 / 1395 of 2048, clear of the ~1900 danger zone. #4 prevented
-the wedge; #69 (caught being applied mid-test) is on the pods.
-
-## What a shed looks like to the DON (the rough edge)
-
-The enclave surviving is not the DON handling it well:
+The enclave surviving is not the same as the DON handling it well. Downstream:
 
 - The app returns 429, but the server hardcodes every app error to **500**
   (`server.go:695` ignores `execErr.Code`). The 429 is lost.
@@ -79,19 +37,9 @@ The enclave surviving is not the DON handling it well:
 - The node retries the shed **3x, exponential backoff, no jitter**, in lockstep
   across quorum nodes, so retries re-collide on the saturated enclave, then fail.
 
-So a shed is a mild retry amplifier today. Two small fixes close most of it:
-honor `execErr.Code` (one line) so a real 429 reaches the node, and give the
-node jittered, status-aware backoff.
-
-## Throughput (measured; exec 4-20s under load, mean ~12s)
-
-| workload | concurrency/enclave | per enclave | aggregate |
-|---|---|---|---|
-| vault (GetSecret) | ~10 | ~0.8-1 exec/s | ~1.7-2/s |
-| minimal (no secret) | ~10 | ~5-7 exec/s | ~10-14/s |
-
-Vault-path is gated by the shared relay/VaultDON, not the enclave, so more
-enclaves help it less. The minimal path is enclave-bound.
+So a shed today is a mild retry amplifier, not backpressure. Two small fixes
+close most of it: honor `execErr.Code` (one line) so a real 429 reaches the
+node, and give the node jittered, status-aware backoff.
 
 ## Open items
 
@@ -99,7 +47,45 @@ enclaves help it less. The minimal path is enclave-bound.
   "shed to spaced retry."
 - **Tune the cap.** Only 1/20 shed, so the effective cap beat the `~7-8`
   estimate; the 128 MB denominator is conservative vs the measured 63 MB/exec.
-- **4G enclaves (cc-infra #72, open)** for enclave-bound workloads.
+  Read the enclave startup log for the derived value.
+- **4G enclaves (cc-infra #72, open)** for the enclave-bound workloads.
+
+## Background: what was broken, and the fixes
+
+A single ~26-way burst used to wedge the enclaves with zero auto-recovery. A
+wedged enclave is `RUNNING` per `nitro-cli` but dead on vsock: pod stuck 2/3,
+host crash-loops, no VM re-launch, recovery was a manual `kubectl delete pod`.
+Root cause: no admission control, so N concurrent wasmtime instances exhausted
+the fixed 2048 MiB and the VM went unresponsive.
+
+The sweeps that found it:
+
+| workload | held | wedged |
+|---|---|---|
+| minimal (no secret) | 26 concurrent | 28 |
+| vault (GetSecret) | 13 concurrent | 20 |
+
+The vault path wedged sooner because a `GetSecret` execution holds its enclave
+slot for the whole relay-to-VaultDON round-trip and adds a TDH2 decrypt: bigger
+block, held longer. (That ~20 landed on effectively one enclave; `-2` was
+flapping then, since fixed.)
+
+`/memory` was no help at first: `usedMB` came from Go's `runtime/metrics`, blind
+to the wasmtime WASM memory (native/CGO). CCC #22 added `rssMB` (process RSS),
+which is what actually tracks the wedge.
+
+Fixes, all merged and live except the harness:
+
+| PR | what | status |
+|---|---|---|
+| CCC #4 | Admission control: cap concurrent execs, shed 429 instead of OOMing | live |
+| CCC #22 | `/memory` reports real footprint (`rssMB`) | live |
+| cc-infra #69 | Self-heal: probe + `preStop`, restart a wedged VM | live |
+| CCC #6 | Load harness, `/memory` poller, RUNBOOK, this report | open |
+
+Also worth knowing: you cannot load a single workflow (gateway rate-limits it to
+~6 concurrent), so the harness deploys many copies with distinct config and
+round-robins across them, N workflows x 1 hit = N real concurrent executions.
 
 The enclave no longer falls over. Whether the DON handles a shed gracefully is a
 different question, and right now the answer is: not yet.
