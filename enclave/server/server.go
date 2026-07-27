@@ -11,7 +11,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"runtime/metrics"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -235,10 +238,11 @@ func (s *enclaveServer) attestPublicKeys(dataToAttest [32]byte) ([]byte, error) 
 }
 
 // handleMemory handles the GET /memory endpoint. It reports the enclave process's
-// memory usage as read from the Go runtime, rounded to the nearest megabyte. The
-// megabyte granularity is deliberate: it is a coarse operational signal, and the
-// rounding limits the resolution of any memory-based side channel into the
-// confidential workload.
+// memory usage, rounded to the nearest megabyte: UsedMB from the Go runtime, and
+// RSSMB (resident set size) which also covers native allocations like the
+// wasmtime WASM linear memory. The megabyte granularity is deliberate: it is a
+// coarse operational signal, and the rounding limits the resolution of any
+// memory-based side channel into the confidential workload.
 func (s *enclaveServer) handleMemory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, fmt.Sprintf("method not allowed: %v", r.Method), http.StatusMethodNotAllowed)
@@ -247,6 +251,7 @@ func (s *enclaveServer) handleMemory(w http.ResponseWriter, r *http.Request) {
 
 	resp := types.MemoryEstimateResponse{
 		UsedMB: bytesToMB(readRuntimeMemoryBytes()),
+		RSSMB:  bytesToMB(readProcessRSSBytes()),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -267,6 +272,40 @@ func readRuntimeMemoryBytes() uint64 {
 	metrics.Read(samples)
 	if samples[0].Value.Kind() == metrics.KindUint64 {
 		return samples[0].Value.Uint64()
+	}
+	return 0
+}
+
+// readProcessRSSBytes returns the enclave process's resident set size in bytes,
+// from /proc/self/status (VmRSS). Unlike readRuntimeMemoryBytes, which sees only
+// Go-runtime-mapped memory, RSS includes native allocations such as the wasmtime
+// WASM linear memory that dominate the enclave's footprint under load. Returns 0
+// if unavailable (e.g. non-Linux dev builds, where /proc is absent).
+func readProcessRSSBytes() uint64 {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0
+	}
+	return parseVmRSSBytes(data)
+}
+
+// parseVmRSSBytes extracts VmRSS from /proc/<pid>/status content and returns it
+// in bytes (the file reports kB). Returns 0 if the line is absent or malformed.
+func parseVmRSSBytes(status []byte) uint64 {
+	for _, line := range strings.Split(string(status), "\n") {
+		rest, ok := strings.CutPrefix(line, "VmRSS:")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(rest) // e.g. ["123456", "kB"]
+		if len(fields) < 1 {
+			return 0
+		}
+		kb, err := strconv.ParseUint(fields[0], 10, 64)
+		if err != nil {
+			return 0
+		}
+		return kb * 1024
 	}
 	return 0
 }

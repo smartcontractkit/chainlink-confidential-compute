@@ -446,4 +446,9 @@ type MemoryEstimateResponse struct {
 	// UsedMB is all memory mapped by the Go runtime, rounded to the nearest
 	// megabyte.
 	UsedMB uint64 `json:"usedMB"`
+	// RSSMB is the enclave process's resident set size (VmRSS), rounded to the
+	// nearest megabyte. Unlike UsedMB it includes native allocations outside the
+	// Go runtime, notably the wasmtime WASM linear memory, so it reflects the
+	// enclave's true footprint under load. 0 if unavailable (e.g. non-Linux).
+	RSSMB uint64 `json:"rssMB"`
 }
