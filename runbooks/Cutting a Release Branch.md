@@ -18,9 +18,6 @@ git pull origin main
 
 # Create release branch
 git checkout -b release/a.b.c
-
-# Push the release branch
-git push -u origin release/a.b.c
 ```
 
 ### 3. Update the go.mod for app capabilities
@@ -31,6 +28,11 @@ git push -u origin release/a.b.c
 - Apply these go.mod changes to **both** capability apps:
   - `enclave/apps/confidential-http/capability/go.mod`
   - `enclave/apps/confidential-workflows/capability/go.mod`
+
+```bash
+# Push the release branch after committing the go.mod updates
+git push -u origin release/a.b.c
+```
 
 ### 4. CI Builds Images
 Pushing a new release branch automatically triggers CI workflows:
