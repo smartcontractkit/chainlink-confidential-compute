@@ -5,10 +5,10 @@ go 1.26.4
 require (
 	github.com/andybalholm/brotli v1.1.1
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260714160921-4033d0253977
+	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20260723230305-ecb010eae585
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260622152157-c8e129347b8b
 	github.com/smartcontractkit/chainlink-protos/storage-service v0.3.0
 	github.com/smartcontractkit/chainlink-protos/workflows/go v0.0.0-20260528173149-f5b8336b19d9
-	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
 	github.com/smartcontractkit/cre-sdk-go v1.9.0-capdev.1.0.20260612142557-01f4db8d7d47
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sys v0.45.0
