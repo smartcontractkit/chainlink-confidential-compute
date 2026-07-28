@@ -31,9 +31,18 @@ jobs:
   build-enclave-and-plugin:
     needs: check-label
     if: needs.check-label.outputs.has-deploy-label == 'true'
-    # nitro-cli cannot cross-build an EIF, so each architecture is built on a
-    # native Nitro-capable self-hosted runner.
-    runs-on: [self-hosted, Linux, "${{ matrix.runner_arch }}"]
+    # nitro-cli cannot cross-build an EIF, so each architecture builds on a
+    # native runner. build-enclave only needs a Docker daemon (not an
+    # enclave-enabled instance), so these are ordinary RunsOn runners; the
+    # self-hosted Nitro box is reserved for the real-enclave test suites.
+    runs-on:
+      - runs-on=${{ github.run_id }}
+      - cpu=8+16
+      - ram=16+64
+      - family=${{ matrix.family }}
+      - image=${{ matrix.image }}
+      - volume=120gb
+      - spot=false
     permissions:
       contents: read
       packages: write
@@ -52,9 +61,11 @@ jobs:
             plugin_prefix: enclave-workflows
         include:
           - arch: amd64
-            runner_arch: X64
+            family: c7i+c7a+c6i
+            image: ubuntu24-full-x64
           - arch: arm64
-            runner_arch: ARM64
+            family: c7g+c6g
+            image: ubuntu24-full-arm64
 
     steps:
       - name: Checkout repository
@@ -65,14 +76,34 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
 
-      - name: Check Nitro CLI
+      # Built natively for this runner's architecture, so the EIF picks up the
+      # matching aarch64/x86_64 kernel blobs. The CLI version is deliberately
+      # unpinned so each build tracks the latest Amazon Linux 2023 package; the
+      # exact package and base image resolved are recorded below, since the
+      # blobs they ship determine PCR0 and PCR1.
+      - name: Build containerised Nitro CLI
         run: |
-          if ! command -v nitro-cli &> /dev/null; then
-            echo "::error::nitro-cli not found on this $(uname -m) runner. Self-hosted Nitro builders must have nitro-cli preinstalled."
-            exit 1
-          fi
-          echo "nitro-cli is installed:"
-          nitro-cli --version
+          docker pull -q amazonlinux:2023
+          BASE_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' amazonlinux:2023)
+
+          docker build \
+            --build-arg NITRO_CLI_VERSION="${{ vars.NITRO_CLI_VERSION }}" \
+            -t nitro-cli:ci \
+            enclave/nitro/nitro-cli
+
+          NITRO_CLI_PACKAGE=$(docker run --rm --entrypoint rpm nitro-cli:ci -q aws-nitro-enclaves-cli)
+          NITRO_CLI_VERSION=$(docker run --rm nitro-cli:ci --version)
+
+          echo "Base image:  ${BASE_IMAGE}"
+          echo "CLI package: ${NITRO_CLI_PACKAGE}"
+          echo "CLI version: ${NITRO_CLI_VERSION}"
+
+          # Consumed by the provenance record written alongside the EIF.
+          {
+            echo "BASE_IMAGE=${BASE_IMAGE}"
+            echo "NITRO_CLI_PACKAGE=${NITRO_CLI_PACKAGE}"
+            echo "NITRO_CLI_VERSION=${NITRO_CLI_VERSION}"
+          } >> $GITHUB_ENV
 
       - name: Generate docker metadata for nitro image
         id: nitro-meta
@@ -107,7 +138,7 @@ jobs:
           docker load --input /tmp/${{ matrix.app.name }}-nitro-image-${{ matrix.arch }}.tar
 
           # Create the EIF file
-          BUILD_OUTPUT=$(sudo nitro-cli build-enclave --docker-uri "${{ matrix.app.nitro_prefix }}:latest" --output-file go-enclave-outbound.eif)
+          BUILD_OUTPUT=$(.github/scripts/build-eif.sh "${{ matrix.app.nitro_prefix }}:latest" "$PWD/go-enclave-outbound.eif")
           echo "$BUILD_OUTPUT"
 
           # Verify the EIF was created
@@ -116,6 +147,38 @@ jobs:
           # Extract PCR measurements
           MEASUREMENTS_SECTION=$(echo "$BUILD_OUTPUT" | awk '/^{/,/^}$/' | sed 's/^}/}/')
           echo "$MEASUREMENTS_SECTION" > pcr_measurements.json
+
+          # Record how this EIF was constructed. The EIF digest is included so a
+          # given binary can be tied to the measurements published for it.
+          EIF_SHA256=$(sha256sum go-enclave-outbound.eif | cut -d' ' -f1)
+          jq -n \
+            --arg commit "${{ github.sha }}" \
+            --arg run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --arg app "${{ matrix.app.name }}" \
+            --arg arch "linux/${{ matrix.arch }}" \
+            --arg dockerfile "${{ matrix.app.dockerfile }}" \
+            --arg source_image "${{ fromJSON(steps.build-nitro.outputs.metadata)['containerimage.digest'] }}" \
+            --arg base_image "$BASE_IMAGE" \
+            --arg nitro_cli_package "$NITRO_CLI_PACKAGE" \
+            --arg nitro_cli_version "$NITRO_CLI_VERSION" \
+            --arg eif_sha256 "$EIF_SHA256" \
+            --argjson measurements "$MEASUREMENTS_SECTION" \
+            '{
+              git_commit: $commit,
+              workflow_run: $run,
+              app: $app,
+              platform: $arch,
+              dockerfile: $dockerfile,
+              source_image_digest: $source_image,
+              nitro_cli: {
+                base_image: $base_image,
+                package: $nitro_cli_package,
+                version: $nitro_cli_version
+              },
+              eif_sha256: $eif_sha256
+            } + $measurements' > build_provenance.json
+
+          cat build_provenance.json
 
       - name: Determine Plugin Tags
         id: plugin-meta
@@ -148,6 +211,7 @@ jobs:
           path: |
             go-enclave-outbound.eif
             pcr_measurements.json
+            build_provenance.json
           retention-days: 30
 
       - name: Save image details and measurements
@@ -166,6 +230,13 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           echo "**EIF File:** go-enclave-outbound.eif created successfully" >> $GITHUB_STEP_SUMMARY
+          echo "- SHA256: \`$(sha256sum go-enclave-outbound.eif | cut -d' ' -f1)\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "**EIF Toolchain:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Nitro CLI: \`${NITRO_CLI_PACKAGE}\` (${NITRO_CLI_VERSION})" >> $GITHUB_STEP_SUMMARY
+          echo "- Base image: \`${BASE_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Source image: \`${NITRO_IMAGE_DIGEST}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [ -f pcr_measurements.json ]; then
@@ -230,7 +301,7 @@ jobs:
         id: create-insecure-eif
         run: |
           docker load --input /tmp/${{ matrix.app.name }}-nitro-insecure-image-${{ matrix.arch }}.tar
-          BUILD_OUTPUT=$(sudo nitro-cli build-enclave --docker-uri "${{ matrix.app.nitro_prefix }}-insecure:latest" --output-file go-enclave-outbound-insecure.eif)
+          BUILD_OUTPUT=$(.github/scripts/build-eif.sh "${{ matrix.app.nitro_prefix }}-insecure:latest" "$PWD/go-enclave-outbound-insecure.eif")
           echo "$BUILD_OUTPUT"
           ls -la go-enclave-outbound-insecure.eif
 
@@ -254,7 +325,7 @@ jobs:
           fi
 
           # Overwrite the EIF so the plugin Dockerfile picks it up
-          sudo cp go-enclave-outbound-insecure.eif go-enclave-outbound.eif
+          cp go-enclave-outbound-insecure.eif go-enclave-outbound.eif
 
       - name: Generate docker metadata for insecure plugin image
         id: insecure-plugin-meta
