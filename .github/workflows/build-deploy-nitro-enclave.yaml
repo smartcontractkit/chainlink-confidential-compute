@@ -31,23 +31,31 @@ jobs:
   build-enclave-and-plugin:
     needs: check-label
     if: needs.check-label.outputs.has-deploy-label == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    # nitro-cli cannot cross-build an EIF, so each architecture is built on a
+    # native Nitro-capable self-hosted runner.
+    runs-on: [self-hosted, Linux, "${{ matrix.runner_arch }}"]
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - app: confidential-http
+        arch: [amd64, arm64]
+        app:
+          - name: confidential-http
             dockerfile: enclave/nitro/Dockerfile
             nitro_prefix: nitro-enclave
             plugin_prefix: enclave
-          - app: confidential-workflows
+          - name: confidential-workflows
             dockerfile: enclave/nitro/Dockerfile.cgo
             nitro_prefix: nitro-workflows
             plugin_prefix: enclave-workflows
-    
+        include:
+          - arch: amd64
+            runner_arch: X64
+          - arch: arm64
+            runner_arch: ARM64
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
@@ -57,18 +65,14 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
 
-      - name: Install Nitro CLI
+      - name: Check Nitro CLI
         run: |
-          if command -v nitro-cli &> /dev/null; then
-            echo "nitro-cli is already installed:"
-            nitro-cli --version
-          else
-            echo "nitro-cli not found, installing..."
-            sudo apt-get update
-            sudo apt-get install -y awscli
-            wget https://github.com/aws/aws-nitro-enclaves-cli/releases/download/v1.2.2/nitro-cli_1.2.2_amd64.deb
-            sudo dpkg -i nitro-cli_1.2.2_amd64.deb || sudo apt-get install -f -y
+          if ! command -v nitro-cli &> /dev/null; then
+            echo "::error::nitro-cli not found on this $(uname -m) runner. Self-hosted Nitro builders must have nitro-cli preinstalled."
+            exit 1
           fi
+          echo "nitro-cli is installed:"
+          nitro-cli --version
 
       - name: Generate docker metadata for nitro image
         id: nitro-meta
@@ -76,38 +80,39 @@ jobs:
         env:
           DOCKER_METADATA_PR_HEAD_SHA: "true"
         with:
-          images: ${{ matrix.nitro_prefix }}
+          images: ${{ matrix.app.nitro_prefix }}
           tags: |
-            type=sha,prefix=${{ matrix.nitro_prefix }}-sha-
-            type=ref,event=tag,prefix=${{ matrix.nitro_prefix }}-
+            type=sha,prefix=${{ matrix.app.nitro_prefix }}-sha-
+            type=ref,event=tag,prefix=${{ matrix.app.nitro_prefix }}-
 
       - name: Build Nitro Docker image
         id: build-nitro
         uses: docker/build-push-action@4a13e500e55cf31b7a5d59a38ab2040ab0f42f56 # v5.1.0
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
-          outputs: type=docker,dest=/tmp/${{ matrix.app }}-nitro-image.tar
-          tags: ${{ matrix.nitro_prefix }}:latest
+          file: ${{ matrix.app.dockerfile }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=docker,dest=/tmp/${{ matrix.app.name }}-nitro-image-${{ matrix.arch }}.tar
+          tags: ${{ matrix.app.nitro_prefix }}:latest
           labels: ${{ steps.nitro-meta.outputs.labels }}
           build-args: |
-            APP_NAME=${{ matrix.app }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+            APP_NAME=${{ matrix.app.name }}
+          cache-from: type=gha,scope=${{ matrix.app.name }}-nitro-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app.name }}-nitro-${{ matrix.arch }},ignore-error=true
 
       - name: Create EIF file from Nitro image
         id: create-eif
         run: |
           # Load the image we just built
-          docker load --input /tmp/${{ matrix.app }}-nitro-image.tar
-          
+          docker load --input /tmp/${{ matrix.app.name }}-nitro-image-${{ matrix.arch }}.tar
+
           # Create the EIF file
-          BUILD_OUTPUT=$(sudo nitro-cli build-enclave --docker-uri "${{ matrix.nitro_prefix }}:latest" --output-file go-enclave-outbound.eif)
+          BUILD_OUTPUT=$(sudo nitro-cli build-enclave --docker-uri "${{ matrix.app.nitro_prefix }}:latest" --output-file go-enclave-outbound.eif)
           echo "$BUILD_OUTPUT"
-          
+
           # Verify the EIF was created
           ls -la go-enclave-outbound.eif
-          
+
           # Extract PCR measurements
           MEASUREMENTS_SECTION=$(echo "$BUILD_OUTPUT" | awk '/^{/,/^}$/' | sed 's/^}/}/')
           echo "$MEASUREMENTS_SECTION" > pcr_measurements.json
@@ -118,10 +123,10 @@ jobs:
         env:
           DOCKER_METADATA_PR_HEAD_SHA: "true"
         with:
-          images: ${{ matrix.plugin_prefix }}
+          images: ${{ matrix.app.plugin_prefix }}
           tags: |
-            type=sha,prefix=${{ matrix.plugin_prefix }}-sha-
-            type=ref,event=tag,prefix=${{ matrix.plugin_prefix }}-
+            type=sha,prefix=${{ matrix.app.plugin_prefix }}-sha-
+            type=ref,event=tag,prefix=${{ matrix.app.plugin_prefix }}-
 
       - name: Build K8s Plugin image
         id: build-plugin
@@ -129,16 +134,17 @@ jobs:
         with:
           context: .
           file: enclave/nitro/aws-k8s-plugin/Dockerfile
-          outputs: type=docker,dest=/tmp/${{ matrix.app }}-plugin-image.tar
-          tags: ${{ matrix.plugin_prefix }}:latest
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=docker,dest=/tmp/${{ matrix.app.name }}-plugin-image-${{ matrix.arch }}.tar
+          tags: ${{ matrix.app.plugin_prefix }}:latest
           labels: ${{ steps.plugin-meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=${{ matrix.app.name }}-plugin-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app.name }}-plugin-${{ matrix.arch }},ignore-error=true
 
       - name: Archive EIF file and measurements
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.app }}-eif
+          name: ${{ matrix.app.name }}-eif-${{ matrix.arch }}
           path: |
             go-enclave-outbound.eif
             pcr_measurements.json
@@ -148,8 +154,8 @@ jobs:
         run: |
           NITRO_IMAGE_DIGEST=${{ fromJSON(steps.build-nitro.outputs.metadata)['containerimage.digest'] }}
           PLUGIN_IMAGE_DIGEST=${{ fromJSON(steps.build-plugin.outputs.metadata)['containerimage.digest'] }}
-          
-          echo '### Docker Images Built (${{ matrix.app }})' >> $GITHUB_STEP_SUMMARY
+
+          echo '### Docker Images Built (${{ matrix.app.name }} / linux/${{ matrix.arch }})' >> $GITHUB_STEP_SUMMARY
 
           echo "**Nitro Enclave Image:**" >> $GITHUB_STEP_SUMMARY
           echo "- Image Digest: ${NITRO_IMAGE_DIGEST}" >> $GITHUB_STEP_SUMMARY
@@ -168,29 +174,29 @@ jobs:
             PCR1=$(echo "$MEASUREMENTS" | grep -oP '"PCR1": "\K[^"]+' || echo "N/A")
             PCR2=$(echo "$MEASUREMENTS" | grep -oP '"PCR2": "\K[^"]+' || echo "N/A")
 
-            echo "**PCR Measurements:**" >> $GITHUB_STEP_SUMMARY
+            echo "**PCR Measurements (linux/${{ matrix.arch }}):**" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             echo "PCR0: $PCR0" >> $GITHUB_STEP_SUMMARY
             echo "PCR1: $PCR1" >> $GITHUB_STEP_SUMMARY
             echo "PCR2: $PCR2" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi
-          
+
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Git Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Nitro Docker Image
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.app }}-nitro-image
-          path: /tmp/${{ matrix.app }}-nitro-image.tar
+          name: ${{ matrix.app.name }}-nitro-image-${{ matrix.arch }}
+          path: /tmp/${{ matrix.app.name }}-nitro-image-${{ matrix.arch }}.tar
           retention-days: 1
-          
+
       - name: Upload Plugin Docker Image
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.app }}-plugin-image
-          path: /tmp/${{ matrix.app }}-plugin-image.tar
+          name: ${{ matrix.app.name }}-plugin-image-${{ matrix.arch }}
+          path: /tmp/${{ matrix.app.name }}-plugin-image-${{ matrix.arch }}.tar
           retention-days: 1
 
       - name: Generate docker metadata for insecure nitro image
@@ -199,31 +205,32 @@ jobs:
         env:
           DOCKER_METADATA_PR_HEAD_SHA: "true"
         with:
-          images: ${{ matrix.nitro_prefix }}-insecure
+          images: ${{ matrix.app.nitro_prefix }}-insecure
           tags: |
-            type=sha,prefix=${{ matrix.nitro_prefix }}-insecure-sha-
-            type=ref,event=tag,prefix=${{ matrix.nitro_prefix }}-insecure-
+            type=sha,prefix=${{ matrix.app.nitro_prefix }}-insecure-sha-
+            type=ref,event=tag,prefix=${{ matrix.app.nitro_prefix }}-insecure-
 
       - name: Build Insecure Nitro Docker image (allows reconfig)
         id: build-nitro-insecure
         uses: docker/build-push-action@4a13e500e55cf31b7a5d59a38ab2040ab0f42f56 # v5.1.0
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
-          outputs: type=docker,dest=/tmp/${{ matrix.app }}-nitro-insecure-image.tar
-          tags: ${{ matrix.nitro_prefix }}-insecure:latest
+          file: ${{ matrix.app.dockerfile }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=docker,dest=/tmp/${{ matrix.app.name }}-nitro-insecure-image-${{ matrix.arch }}.tar
+          tags: ${{ matrix.app.nitro_prefix }}-insecure:latest
           labels: ${{ steps.insecure-nitro-meta.outputs.labels }}
           build-args: |
-            APP_NAME=${{ matrix.app }}
+            APP_NAME=${{ matrix.app.name }}
             ALLOW_RECONFIG=true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=${{ matrix.app.name }}-nitro-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app.name }}-nitro-insecure-${{ matrix.arch }},ignore-error=true
 
       - name: Create insecure EIF file from insecure Nitro image
         id: create-insecure-eif
         run: |
-          docker load --input /tmp/${{ matrix.app }}-nitro-insecure-image.tar
-          BUILD_OUTPUT=$(sudo nitro-cli build-enclave --docker-uri "${{ matrix.nitro_prefix }}-insecure:latest" --output-file go-enclave-outbound-insecure.eif)
+          docker load --input /tmp/${{ matrix.app.name }}-nitro-insecure-image-${{ matrix.arch }}.tar
+          BUILD_OUTPUT=$(sudo nitro-cli build-enclave --docker-uri "${{ matrix.app.nitro_prefix }}-insecure:latest" --output-file go-enclave-outbound-insecure.eif)
           echo "$BUILD_OUTPUT"
           ls -la go-enclave-outbound-insecure.eif
 
@@ -237,7 +244,7 @@ jobs:
             PCR1=$(echo "$MEASUREMENTS" | grep -oP '"PCR1": "\K[^"]+' || echo "N/A")
             PCR2=$(echo "$MEASUREMENTS" | grep -oP '"PCR2": "\K[^"]+' || echo "N/A")
 
-            echo "**Insecure PCR Measurements [FOR TESTING ONLY] (${{ matrix.app }}):**" >> $GITHUB_STEP_SUMMARY
+            echo "**Insecure PCR Measurements [FOR TESTING ONLY] (${{ matrix.app.name }} / linux/${{ matrix.arch }}):**" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             echo "PCR0: $PCR0" >> $GITHUB_STEP_SUMMARY
             echo "PCR1: $PCR1" >> $GITHUB_STEP_SUMMARY
@@ -255,10 +262,10 @@ jobs:
         env:
           DOCKER_METADATA_PR_HEAD_SHA: "true"
         with:
-          images: ${{ matrix.plugin_prefix }}-insecure
+          images: ${{ matrix.app.plugin_prefix }}-insecure
           tags: |
-            type=sha,prefix=${{ matrix.plugin_prefix }}-insecure-sha-
-            type=ref,event=tag,prefix=${{ matrix.plugin_prefix }}-insecure-
+            type=sha,prefix=${{ matrix.app.plugin_prefix }}-insecure-sha-
+            type=ref,event=tag,prefix=${{ matrix.app.plugin_prefix }}-insecure-
 
       - name: Build Insecure K8s Plugin image
         id: build-plugin-insecure
@@ -266,24 +273,25 @@ jobs:
         with:
           context: .
           file: enclave/nitro/aws-k8s-plugin/Dockerfile
-          outputs: type=docker,dest=/tmp/${{ matrix.app }}-plugin-insecure-image.tar
-          tags: ${{ matrix.plugin_prefix }}-insecure:latest
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=docker,dest=/tmp/${{ matrix.app.name }}-plugin-insecure-image-${{ matrix.arch }}.tar
+          tags: ${{ matrix.app.plugin_prefix }}-insecure:latest
           labels: ${{ steps.insecure-plugin-meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=${{ matrix.app.name }}-plugin-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app.name }}-plugin-insecure-${{ matrix.arch }},ignore-error=true
 
       - name: Upload Insecure Nitro Docker Image
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.app }}-nitro-insecure-image
-          path: /tmp/${{ matrix.app }}-nitro-insecure-image.tar
+          name: ${{ matrix.app.name }}-nitro-insecure-image-${{ matrix.arch }}
+          path: /tmp/${{ matrix.app.name }}-nitro-insecure-image-${{ matrix.arch }}.tar
           retention-days: 1
 
       - name: Upload Insecure Plugin Docker Image
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.app }}-plugin-insecure-image
-          path: /tmp/${{ matrix.app }}-plugin-insecure-image.tar
+          name: ${{ matrix.app.name }}-plugin-insecure-image-${{ matrix.arch }}
+          path: /tmp/${{ matrix.app.name }}-plugin-insecure-image-${{ matrix.arch }}.tar
           retention-days: 1
 
   push-images:
@@ -311,9 +319,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download all artifacts
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
+
+      - name: Download image artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: '${{ matrix.app.name }}-*-image-*'
           path: /tmp/artifacts
 
       - name: Configure AWS credentials
@@ -330,9 +342,6 @@ jobs:
           registries: ${{ matrix.account }}
 
       # --- Push Nitro Image ---
-      - name: Load Nitro Image
-        run: docker load --input /tmp/artifacts/${{ matrix.app.name }}-nitro-image/${{ matrix.app.name }}-nitro-image.tar
-
       - name: Generate Nitro metadata
         id: nitro-meta
         uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8d19755c6f78e81
@@ -345,19 +354,13 @@ jobs:
             type=ref,event=tag,prefix=${{ matrix.app.nitro_prefix }}-
 
       - name: Push Nitro Image
-        run: |
-          echo "${{ steps.nitro-meta.outputs.tags }}" | while read -r tag; do
-            if [ -n "$tag" ]; then
-              echo "Tagging and pushing $tag"
-              docker tag ${{ matrix.app.nitro_prefix }}:latest "$tag"
-              docker push "$tag"
-            fi
-          done
+        env:
+          LOCAL_IMAGE: ${{ matrix.app.nitro_prefix }}:latest
+          TARBALL_FMT: /tmp/artifacts/${{ matrix.app.name }}-nitro-image-{arch}/${{ matrix.app.name }}-nitro-image-{arch}.tar
+          TAGS: ${{ steps.nitro-meta.outputs.tags }}
+        run: .github/scripts/push-multiarch-image.sh
 
       # --- Push Plugin Image ---
-      - name: Load Plugin Image
-        run: docker load --input /tmp/artifacts/${{ matrix.app.name }}-plugin-image/${{ matrix.app.name }}-plugin-image.tar
-
       - name: Generate Plugin metadata
         id: plugin-meta
         uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8d19755c6f78e81
@@ -370,19 +373,13 @@ jobs:
             type=ref,event=tag,prefix=${{ matrix.app.plugin_prefix }}-
 
       - name: Push Plugin Image
-        run: |
-          echo "${{ steps.plugin-meta.outputs.tags }}" | while read -r tag; do
-            if [ -n "$tag" ]; then
-              echo "Tagging and pushing $tag"
-              docker tag ${{ matrix.app.plugin_prefix }}:latest "$tag"
-              docker push "$tag"
-            fi
-          done
+        env:
+          LOCAL_IMAGE: ${{ matrix.app.plugin_prefix }}:latest
+          TARBALL_FMT: /tmp/artifacts/${{ matrix.app.name }}-plugin-image-{arch}/${{ matrix.app.name }}-plugin-image-{arch}.tar
+          TAGS: ${{ steps.plugin-meta.outputs.tags }}
+        run: .github/scripts/push-multiarch-image.sh
 
       # --- Push Insecure Images ---
-      - name: Load Insecure Nitro Image
-        run: docker load --input /tmp/artifacts/${{ matrix.app.name }}-nitro-insecure-image/${{ matrix.app.name }}-nitro-insecure-image.tar
-
       - name: Generate Insecure Nitro metadata
         id: insecure-nitro-meta
         uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8d19755c6f78e81
@@ -395,17 +392,11 @@ jobs:
             type=ref,event=tag,prefix=${{ matrix.app.nitro_prefix }}-insecure-
 
       - name: Push Insecure Nitro Image
-        run: |
-          echo "${{ steps.insecure-nitro-meta.outputs.tags }}" | while read -r tag; do
-            if [ -n "$tag" ]; then
-              echo "Tagging and pushing $tag"
-              docker tag ${{ matrix.app.nitro_prefix }}-insecure:latest "$tag"
-              docker push "$tag"
-            fi
-          done
-
-      - name: Load Insecure Plugin Image
-        run: docker load --input /tmp/artifacts/${{ matrix.app.name }}-plugin-insecure-image/${{ matrix.app.name }}-plugin-insecure-image.tar
+        env:
+          LOCAL_IMAGE: ${{ matrix.app.nitro_prefix }}-insecure:latest
+          TARBALL_FMT: /tmp/artifacts/${{ matrix.app.name }}-nitro-insecure-image-{arch}/${{ matrix.app.name }}-nitro-insecure-image-{arch}.tar
+          TAGS: ${{ steps.insecure-nitro-meta.outputs.tags }}
+        run: .github/scripts/push-multiarch-image.sh
 
       - name: Generate Insecure Plugin metadata
         id: insecure-plugin-meta
@@ -419,18 +410,15 @@ jobs:
             type=ref,event=tag,prefix=${{ matrix.app.plugin_prefix }}-insecure-
 
       - name: Push Insecure Plugin Image
-        run: |
-          echo "${{ steps.insecure-plugin-meta.outputs.tags }}" | while read -r tag; do
-            if [ -n "$tag" ]; then
-              echo "Tagging and pushing $tag"
-              docker tag ${{ matrix.app.plugin_prefix }}-insecure:latest "$tag"
-              docker push "$tag"
-            fi
-          done
+        env:
+          LOCAL_IMAGE: ${{ matrix.app.plugin_prefix }}-insecure:latest
+          TARBALL_FMT: /tmp/artifacts/${{ matrix.app.name }}-plugin-insecure-image-{arch}/${{ matrix.app.name }}-plugin-insecure-image-{arch}.tar
+          TAGS: ${{ steps.insecure-plugin-meta.outputs.tags }}
+        run: .github/scripts/push-multiarch-image.sh
 
       - name: Save images details
         if: matrix.account == '312157985241'
         shell: bash
         run: |
           echo "### Docker Images Pushed (${{ matrix.app.name }})" >> $GITHUB_STEP_SUMMARY
-          echo "Images pushed to all accounts." >> $GITHUB_STEP_SUMMARY
+          echo "Images pushed to all accounts as multi-arch manifests (linux/amd64, linux/arm64)." >> $GITHUB_STEP_SUMMARY

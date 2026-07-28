@@ -10,6 +10,10 @@ on:
 jobs:
   verify-reproducible-build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -24,10 +28,10 @@ jobs:
           git clone https://github.com/seedcx/wireguard-go-vsock.git /tmp/wireguard-go-vsock
           cd /tmp/wireguard-go-vsock
           git checkout 5a4ddc8ae0ff255e7fd3ea25a0397ae55a66b956
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -v -trimpath -ldflags="-s -w" -o "wireguard-go-vsock"
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -v -trimpath -ldflags="-s -w" -o "wireguard-go-vsock"
 
       - name: Verify reproducible build
         run: |
-          echo "Comparing newly built binary with the one in the repository..."
-          diff ./enclave/nitro/wireguard-go-vsock /tmp/wireguard-go-vsock/wireguard-go-vsock
-          echo "Success: The pre-built binary is reproducible."
+          echo "Comparing newly built ${{ matrix.arch }} binary with the one in the repository..."
+          diff ./enclave/nitro/wireguard-go-vsock-${{ matrix.arch }} /tmp/wireguard-go-vsock/wireguard-go-vsock
+          echo "Success: The pre-built ${{ matrix.arch }} binary is reproducible."
