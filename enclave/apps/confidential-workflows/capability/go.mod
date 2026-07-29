@@ -10,10 +10,10 @@ replace github.com/smartcontractkit/chainlink-confidential-compute => ../../../.
 
 require (
 	github.com/smartcontractkit/capabilities/libs v0.0.0-20260223172632-a716db2e04a0
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260716194407-93eeb23b3f6b
-	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260622152157-c8e129347b8b
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260727165036-9952de44dbab
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20260422000908-67af9e15fe65
 	github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework v0.0.0-20260422000908-67af9e15fe65
+	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260622152157-c8e129347b8b
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/protobuf v1.36.11
 )
@@ -60,6 +60,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jmoiron/sqlx v1.4.0 // indirect
+	github.com/jonboulle/clockwork v0.5.0 // indirect
 	github.com/jpillora/backoff v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
@@ -85,11 +86,12 @@ require (
 	github.com/scylladb/go-reflectx v1.0.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/smartcontractkit/chain-selectors v1.0.100 // indirect
-	github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260626151909-052e55e62e62 // indirect
+	github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260724142814-45996a1bcb72 // indirect
+	github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-00010101000000-000000000000 // indirect
 	github.com/smartcontractkit/chainlink-protos/linking-service/go v0.0.0-20251002192024-d2ad9222409b // indirect
+	github.com/smartcontractkit/chainlink-protos/metering/go v0.0.0-20260710151514-27b5a126dabe // indirect
 	github.com/smartcontractkit/chainlink-protos/node-platform v0.0.0-20260709145319-7782fb89eb16 // indirect
 	github.com/smartcontractkit/chainlink-protos/workflows/go v0.0.0-20260528173149-f5b8336b19d9 // indirect
-	github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-00010101000000-000000000000 // indirect
 	github.com/smartcontractkit/freeport v0.1.3-0.20250716200817-cb5dfd0e369e // indirect
 	github.com/smartcontractkit/grpc-proxy v0.0.0-20240830132753-a7e17fec5ab7 // indirect
 	github.com/smartcontractkit/libocr v0.0.0-20250912173940-f3ab0246e23d // indirect
@@ -128,8 +130,8 @@ require (
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260401024825-9d38bb4040a9 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260401024825-9d38bb4040a9 // indirect
-	google.golang.org/grpc v1.80.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
+	google.golang.org/grpc v1.82.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
