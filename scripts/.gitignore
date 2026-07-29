@@ -1,6 +1,0 @@
-output.yaml
-.env
-*.env
-secrets.txt
-encrypted_output.txt
-pubkeys.txt

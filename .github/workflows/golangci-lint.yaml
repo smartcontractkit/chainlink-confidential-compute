@@ -86,10 +86,9 @@ jobs:
       - name: Tidy module
         # Needed for modules whose go.sum is missing transitive entries
         # at lint time. Without this, golangci-lint's package loader
-        # bails with "no go files to analyze" on ./scripts even though
-        # main.go is present (the load resolves zero packages because
-        # `go list ./...` fails). Matches the prior install.sh-based
-        # workflow's pre-lint step.
+        # bails with "no go files to analyze" because `go list ./...`
+        # fails and resolves zero packages. Matches the prior
+        # install.sh-based workflow's pre-lint step.
         working-directory: ${{ matrix.module }}
         run: go mod tidy
       - name: Lint Go module
