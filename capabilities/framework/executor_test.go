@@ -2264,28 +2264,9 @@ func TestParseConfig(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to unmarshal config")
 	})
 
-	t.Run("partial cache config overrides only specified fields", func(t *testing.T) {
-		configJSON := `{
-			"EnableCache": false,
-			"CacheTTLSeconds": 120,
-			"CacheMaxTTLSeconds": 600
-		}`
-		parsed, err := framework.ParseConfig(configJSON)
-		require.NoError(t, err)
-
-		assert.False(t, parsed.CacheConfig.EnableCache)
-		assert.Equal(t, 120*time.Second, parsed.CacheConfig.DefaultTTL)
-		assert.Equal(t, 600*time.Second, parsed.CacheConfig.MaxTTL)
-		// Unset fields keep defaults
-		assert.Equal(t, enclaveclient.DefaultCacheConfig.CleanupInterval, parsed.CacheConfig.CleanupInterval)
-		assert.Equal(t, enclaveclient.DefaultCacheConfig.TTLBufferPercent, parsed.CacheConfig.TTLBufferPercent)
-		assert.Equal(t, enclaveclient.DefaultCacheConfig.EnableProactiveRefresh, parsed.CacheConfig.EnableProactiveRefresh)
-		assert.Equal(t, enclaveclient.DefaultCacheConfig.RefreshIntervalPercent, parsed.CacheConfig.RefreshIntervalPercent)
-		assert.Equal(t, enclaveclient.DefaultCacheConfig.MinRefreshInterval, parsed.CacheConfig.MinRefreshInterval)
-		assert.Equal(t, enclaveclient.DefaultCacheConfig.RefreshTimeout, parsed.CacheConfig.RefreshTimeout)
-	})
-
-	t.Run("all cache config fields can be overridden", func(t *testing.T) {
+	t.Run("deprecated cache config fields in job-spec are ignored", func(t *testing.T) {
+		// cresettings are authoritative; deprecated job-spec Config fields are no
+		// longer read by ParseConfig, so the parsed cache config stays at defaults.
 		configJSON := `{
 			"EnableCache": false,
 			"CacheTTLSeconds": 60,
@@ -2300,18 +2281,10 @@ func TestParseConfig(t *testing.T) {
 		parsed, err := framework.ParseConfig(configJSON)
 		require.NoError(t, err)
 
-		assert.False(t, parsed.CacheConfig.EnableCache)
-		assert.Equal(t, 60*time.Second, parsed.CacheConfig.DefaultTTL)
-		assert.Equal(t, 300*time.Second, parsed.CacheConfig.MaxTTL)
-		assert.Equal(t, 120*time.Second, parsed.CacheConfig.CleanupInterval)
-		assert.InDelta(t, 0.2, parsed.CacheConfig.TTLBufferPercent, 0.001)
-		assert.False(t, parsed.CacheConfig.EnableProactiveRefresh)
-		assert.InDelta(t, 0.5, parsed.CacheConfig.RefreshIntervalPercent, 0.001)
-		assert.Equal(t, 10*time.Second, parsed.CacheConfig.MinRefreshInterval)
-		assert.Equal(t, 15*time.Second, parsed.CacheConfig.RefreshTimeout)
+		assert.Equal(t, enclaveclient.DefaultCacheConfig, parsed.CacheConfig)
 	})
 
-	t.Run("session config overrides", func(t *testing.T) {
+	t.Run("deprecated session config fields in job-spec are ignored", func(t *testing.T) {
 		configJSON := `{
 			"EnableSessionPersistence": false,
 			"SessionHeaderName": "X-Custom-Session"
@@ -2319,19 +2292,10 @@ func TestParseConfig(t *testing.T) {
 		parsed, err := framework.ParseConfig(configJSON)
 		require.NoError(t, err)
 
-		assert.False(t, parsed.SessionConfig.EnableSessionPersistence)
-		assert.Equal(t, "X-Custom-Session", parsed.SessionConfig.SessionHeaderName)
+		assert.Equal(t, enclaveclient.DefaultSessionConfig, parsed.SessionConfig)
 	})
 
-	t.Run("enclave request timeout override", func(t *testing.T) {
-		configJSON := `{"EnclaveRequestTimeoutSeconds": 30}`
-		parsed, err := framework.ParseConfig(configJSON)
-		require.NoError(t, err)
-
-		assert.Equal(t, 30*time.Second, parsed.EnclaveRequestTimeout)
-	})
-
-	t.Run("all scalar overrides", func(t *testing.T) {
+	t.Run("deprecated scalar fields in job-spec are ignored", func(t *testing.T) {
 		configJSON := `{
 			"MaxRetries": 5,
 			"RetryBackoffSeconds": 10,
@@ -2340,18 +2304,32 @@ func TestParseConfig(t *testing.T) {
 			"GlobalRPS": 2000.0,
 			"GlobalBurst": 3000,
 			"EnableSecretsCache": true,
-			"EnclaveRequestTimeoutSeconds": 20
+			"EnclaveRequestTimeoutSeconds": 20,
+			"PublicKeyRequestTimeoutSeconds": 9,
+			"EnclaveRefreshIntervalSeconds": 45,
+			"InsecureSkipTLSVerify": true
 		}`
 		parsed, err := framework.ParseConfig(configJSON)
 		require.NoError(t, err)
 
-		assert.Equal(t, 5, parsed.MaxRetries)
-		assert.Equal(t, 10, parsed.RetryBackoffSeconds)
-		assert.Equal(t, 500.0, parsed.WorkflowOwnerRPS)
-		assert.Equal(t, 250, parsed.WorkflowOwnerBurst)
-		assert.Equal(t, 2000.0, parsed.GlobalRPS)
-		assert.Equal(t, 3000, parsed.GlobalBurst)
-		assert.True(t, parsed.EnableSecretsCache)
-		assert.Equal(t, 20*time.Second, parsed.EnclaveRequestTimeout)
+		// All values remain at their baseline defaults regardless of the job-spec.
+		assert.Equal(t, framework.DefaultMaxRetries, parsed.MaxRetries)
+		assert.Equal(t, framework.DefaultRetryBackoffSeconds, parsed.RetryBackoffSeconds)
+		assert.Equal(t, float64(framework.DefaultWorkflowOwnerRPS), parsed.WorkflowOwnerRPS)
+		assert.Equal(t, framework.DefaultWorkflowOwnerBurst, parsed.WorkflowOwnerBurst)
+		assert.Equal(t, float64(framework.DefaultGlobalRPS), parsed.GlobalRPS)
+		assert.Equal(t, framework.DefaultGlobalBurst, parsed.GlobalBurst)
+		assert.Equal(t, enclavetypes.DefaultEnableSecretsCache, parsed.EnableSecretsCache)
+		assert.Equal(t, enclavetypes.DefaultEnclaveRequestTimeout, parsed.EnclaveRequestTimeout)
+		assert.Equal(t, enclavetypes.DefaultPublicKeyRequestTimeout, parsed.PublicKeyRequestTimeout)
+		assert.False(t, parsed.InsecureSkipTLSVerify)
+	})
+
+	t.Run("EncryptedAPIKeys is still parsed", func(t *testing.T) {
+		configJSON := `{"EncryptedAPIKeys": "abc,def"}`
+		parsed, err := framework.ParseConfig(configJSON)
+		require.NoError(t, err)
+
+		assert.Equal(t, "abc,def", parsed.Config.EncryptedAPIKeys)
 	})
 }
