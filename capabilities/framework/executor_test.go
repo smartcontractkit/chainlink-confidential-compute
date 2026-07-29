@@ -1212,6 +1212,63 @@ func TestExecutor_ExecuteFailAfterRetry(t *testing.T) {
 	})
 }
 
+func TestExecutor_QuorumTimeout(t *testing.T) {
+	newVaultDON := func() framework.VaultDON {
+		mockVaultDONCapability := &MockVaultDONCapability{}
+		mockVaultDONCapability.ExecuteFunc = func(ctx context.Context, req capabilities.CapabilityRequest) (capabilities.CapabilityResponse, error) {
+			respAny, _ := anypb.New(getValidGetSecretsResponse())
+			return capabilities.CapabilityResponse{Payload: respAny}, nil
+		}
+		return framework.VaultDON{
+			CryptographyThreshold: 1,
+			Capability:            mockVaultDONCapability,
+		}
+	}
+
+	t.Run("quorum timeout is retried and only classified as a user error once retries are exhausted", func(t *testing.T) {
+		maxAllowedRetries := 3
+		executeBatchCalls := 0
+
+		mockEnclaveClient := &MockEnclaveClient{}
+		mockEnclaveClient.ExecuteBatchFunc = func(ctx context.Context, reqs []enclavetypes.SignedComputeRequest, enclaveIDs [][32]byte) ([]enclavetypes.ExecuteResponse, error) {
+			executeBatchCalls++
+			return nil, errors.New(enclavetypes.ErrQuorumTimeout)
+		}
+
+		mockMetrics := NewMockMetrics()
+		_, err := setupAndExecuteExecutor(t, mockEnclaveClient, newVaultDON(), mockMetrics, getDefaultRateLimiter(), maxAllowedRetries, 0)
+		require.Error(t, err)
+
+		assert.Equal(t, maxAllowedRetries, executeBatchCalls, "quorum timeout must be retried, not short-circuited as a user error")
+		AssertCalledNTimes(t, mockMetrics, "quorum_timeout", maxAllowedRetries)
+
+		var capErr caperrors.Error
+		require.True(t, errors.As(err, &capErr), "expected error to unwrap into caperrors.Error")
+		assert.Equal(t, caperrors.OriginUser, capErr.Origin())
+		assert.Equal(t, caperrors.DeadlineExceeded, capErr.Code())
+	})
+
+	t.Run("quorum timeout that clears on retry returns no error", func(t *testing.T) {
+		executeBatchCalls := 0
+
+		mockEnclaveClient := &MockEnclaveClient{}
+		mockEnclaveClient.ExecuteBatchFunc = func(ctx context.Context, reqs []enclavetypes.SignedComputeRequest, enclaveIDs [][32]byte) ([]enclavetypes.ExecuteResponse, error) {
+			executeBatchCalls++
+			if executeBatchCalls == 1 {
+				return nil, errors.New(enclavetypes.ErrQuorumTimeout)
+			}
+			return mockEnclaveClient.commonExecuteBatchReturn(t)
+		}
+
+		mockMetrics := NewMockMetrics()
+		_, err := setupAndExecuteExecutor(t, mockEnclaveClient, newVaultDON(), mockMetrics, getDefaultRateLimiter(), 3, 0)
+		require.NoError(t, err)
+
+		assert.Equal(t, 2, executeBatchCalls)
+		AssertCalledNTimes(t, mockMetrics, "quorum_timeout", 1)
+	})
+}
+
 func TestExecutor_DifferentEnclaveOnRetry(t *testing.T) {
 	t.Run("GetPublicKeys is called on each retry attempt", func(t *testing.T) {
 		mockVaultDONCapability := &MockVaultDONCapability{}

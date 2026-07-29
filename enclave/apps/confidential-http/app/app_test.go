@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	enclavetypes "github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/types"
 	httpsmocks "github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/outbound-https/mocks"
@@ -1603,4 +1604,58 @@ func TestHTTPEnclaveApp_Execute_EncryptOutputFalseWithKey(t *testing.T) {
 	assert.Nil(t, output)
 	assert.Equal(t, http.StatusBadRequest, execError.Code)
 	assert.Contains(t, execError.Error, types.ErrKeyPresentNoEncryption)
+}
+
+func TestConvertHeaders_PreservesValidUTF8(t *testing.T) {
+	in := http.Header{
+		"Content-Type": []string{"application/json"},
+		"X-Multi":      []string{"héllo", "wörld"}, // valid multi-byte UTF-8
+		"X-Empty-Kept": []string{""},
+	}
+
+	got := convertHeaders(in)
+
+	require.Len(t, got, len(in))
+	for name, values := range in {
+		hv, ok := got[name]
+		require.True(t, ok, "header %q should be preserved", name)
+		require.NotNil(t, hv)
+		assert.Equal(t, values, hv.Values, "valid header values must be untouched")
+	}
+}
+
+func TestConvertHeaders_SanitizesInvalidUTF8(t *testing.T) {
+	invalidValue := "prefix" + string([]byte{0xff, 0xfe}) + "suffix"
+	invalidName := "X-Bad" + string([]byte{0xff})
+
+	in := http.Header{
+		"X-Good":    []string{"clean"},
+		invalidName: []string{invalidValue, "also-clean"},
+	}
+
+	got := convertHeaders(in)
+
+	// Valid header is untouched.
+	require.Contains(t, got, "X-Good")
+	assert.Equal(t, []string{"clean"}, got["X-Good"].Values)
+
+	// The invalid header name is sanitized, so look it up by its sanitized form.
+	sanitizedName := sanitizeUTF8(invalidName)
+	require.True(t, utf8.ValidString(sanitizedName))
+	hv, ok := got[sanitizedName]
+	require.True(t, ok, "sanitized header name should be present")
+	require.Len(t, hv.Values, 2)
+	assert.True(t, utf8.ValidString(hv.Values[0]), "invalid value must be sanitized")
+	assert.Equal(t, "also-clean", hv.Values[1], "already-valid value must be untouched")
+
+	// The whole Response must now marshal without the gRPC UTF-8 error.
+	resp := &enclavetypes.Response{MultiHeaders: got}
+	_, err := proto.Marshal(resp)
+	require.NoError(t, err)
+}
+
+func TestSanitizeUTF8_ReturnsValidStringUnchanged(t *testing.T) {
+	for _, s := range []string{"", "ascii", "héllo wörld", "日本語", "emoji 🚀"} {
+		assert.Equal(t, s, sanitizeUTF8(s))
+	}
 }

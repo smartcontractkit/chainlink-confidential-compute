@@ -65,9 +65,7 @@ confidential-compute/
 ├── enclave-client/                  # Client/pool for enclave communication
 ├── types/                           # Shared type definitions and protobuf
 ├── util/                            # Utility functions
-├── tests/                           # End-to-end tests
-├── scripts/                         # Build and utility scripts
-└── runbooks/                        # Operational documentation
+└── tests/                           # End-to-end tests
 ```
 ---
 

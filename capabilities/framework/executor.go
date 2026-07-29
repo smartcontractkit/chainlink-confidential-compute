@@ -337,8 +337,8 @@ type RealExecutor struct {
 	apiKey                     string
 	limitsFactory              limits.Factory
 
-	// quorumTimeoutIsUserError classifies an enclave quorum timeout as a public
-	// user error when true, or as an internal/node error (retried) when false.
+	// quorumTimeoutIsUserError classifies an enclave quorum timeout that survives all
+	// retries as a public user error when true, or as an internal/node error when false.
 	// Set per-capability at construction.
 	quorumTimeoutIsUserError bool
 
@@ -667,11 +667,6 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 					"workflow.id":      metadata.WorkflowID,
 					"duration_seconds": enclaveExecuteErrDuration.Seconds(),
 				})
-				// When quorumTimeoutIsUserError is disabled, surface the timeout as an
-				// internal/node error so it is retried and does not count against the user.
-				if e.quorumTimeoutIsUserError {
-					return caperrors.NewPublicUserError(fmt.Errorf("enclave quorum timeout: %w", err), caperrors.DeadlineExceeded)
-				}
 				return fmt.Errorf("enclave quorum timeout: %w", err)
 			}
 			if strings.Contains(err.Error(), types.ErrEncryptionRequestedNoKey) ||
@@ -699,6 +694,9 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 		return nil
 	})
 	if err != nil {
+		if e.quorumTimeoutIsUserError && strings.Contains(err.Error(), types.ErrQuorumTimeout) {
+			return nil, caperrors.NewPublicUserError(fmt.Errorf("enclave quorum timeout: %w", err), caperrors.DeadlineExceeded)
+		}
 		return nil, err
 	}
 
