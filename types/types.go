@@ -31,34 +31,6 @@ const (
 	SettingsPath  = "/settings"
 )
 
-// SettingsRequest carries runtime config + secrets injected into the enclave
-// by the host-side settings injector over vsock (never proxied to the external
-// network). A Nitro EIF is measured (PCR), so environment-specific endpoints
-// and tunables cannot be baked in without changing the attestation; they are
-// supplied here at runtime instead, keeping one EIF usable across environments.
-//
-//   - StorageKey: hex ed25519 key (32-byte seed or 64-byte full) the enclave
-//     uses to authenticate CRE storage-service DownloadArtifact calls.
-//   - StorageServiceURL / StorageServiceTLS: the storage-service gRPC endpoint
-//     the enclave fetches workflow binaries from.
-//   - GatewayURL: the Gateway endpoint for remote dispatch (dynamic secrets +
-//     capability calls). Empty leaves the enclave in local-only mode.
-//   - MaxBinarySize: max decompressed workflow-binary size accepted from
-//     storage, in bytes. Zero falls back to the enclave's built-in default.
-//   - BinaryFetchTimeout: per-fetch timeout for downloading a workflow binary.
-//     Zero falls back to the enclave's built-in default.
-//   - MaxCacheBytes: size bound of the verified-binary LRU cache, in bytes.
-//     Zero falls back to the enclave's built-in default.
-type SettingsRequest struct {
-	StorageKey         string        `json:"storageKey"`
-	StorageServiceURL  string        `json:"storageServiceUrl,omitempty"`
-	StorageServiceTLS  bool          `json:"storageServiceTls,omitempty"`
-	GatewayURL         string        `json:"gatewayUrl,omitempty"`
-	MaxBinarySize      int64         `json:"maxBinarySize,omitempty"`
-	BinaryFetchTimeout time.Duration `json:"binaryFetchTimeout,omitempty"`
-	MaxCacheBytes      int64         `json:"maxCacheBytes,omitempty"`
-}
-
 type EnclaveType string
 
 const (
@@ -259,9 +231,6 @@ type ExecuteResponse struct {
 	// events (e.g. capability_execution) count correctly. Additive for backward
 	// compatibility with hosts/enclaves that only understand Metrics.
 	MetricEvents []MetricEvent `json:"metricEvents,omitempty"`
-	// AttestationFallbackUsed is set client-side when attestation validated against
-	// previously trusted measurements instead of the current configured measurements.
-	AttestationFallbackUsed bool `json:"-"`
 }
 
 // Error data must not contain sensitive information.
@@ -305,9 +274,6 @@ func (er *ExecuteResponse) UserDataHash(requestVersion string) []byte {
 type EnclavePublicKeyData struct {
 	PublicKeyResponse
 	EnclaveID [32]byte
-	// AttestationFallbackUsed is set client-side when attestation validated against
-	// previously trusted measurements instead of the current configured measurements.
-	AttestationFallbackUsed bool `json:"-"`
 }
 
 type PublicKeyResponse struct {
@@ -480,4 +446,9 @@ type MemoryEstimateResponse struct {
 	// UsedMB is all memory mapped by the Go runtime, rounded to the nearest
 	// megabyte.
 	UsedMB uint64 `json:"usedMB"`
+	// RSSMB is the enclave process's resident set size (VmRSS), rounded to the
+	// nearest megabyte. Unlike UsedMB it includes native allocations outside the
+	// Go runtime, notably the wasmtime WASM linear memory, so it reflects the
+	// enclave's true footprint under load. 0 if unavailable (e.g. non-Linux).
+	RSSMB uint64 `json:"rssMB"`
 }

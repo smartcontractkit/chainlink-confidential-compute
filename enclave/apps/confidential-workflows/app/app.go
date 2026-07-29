@@ -12,8 +12,8 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/host"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
-	"github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-workflows/httpfetch"
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -31,6 +31,11 @@ type confidentialWorkflowsApp struct {
 	httpFetcher         *httpfetch.Fetcher
 	requirementsHandler host.RequirementsHandler
 	tpe                 sdkpb.TeeType
+
+	// limiter bounds concurrent executions so a burst can't exhaust the fixed
+	// enclave memory and wedge the VM. Unbounded unless WithMaxConcurrentExecutions
+	// is set (the nitro entrypoint derives a limit from enclave memory).
+	limiter *executionLimiter
 
 	// Runtime config + secrets injected via InjectSettings (host over vsock). A
 	// Nitro EIF is measured (PCR), so environment-specific endpoints can't be
@@ -90,14 +95,31 @@ func WithStorageService(url string, tls bool) Option {
 	}
 }
 
-// InjectSettings receives runtime config + secrets injected by the host over
-// vsock and wires up whatever arrived: the storage fetcher (once both the
-// endpoint and the ed25519 key are known) and, on the first gateway URL, the
-// remote dispatcher (via the factory). Fetcher tunables (max binary size, fetch
-// timeout, cache size) are applied when present, falling back to the defaults
-// in constants.go. An injected StorageServiceURL overrides the startup default.
-// Safe to call again (e.g. key rotation).
-func (a *confidentialWorkflowsApp) InjectSettings(req types.SettingsRequest) error {
+
+// WithMaxConcurrentExecutions bounds concurrent Execute calls to n; n <= 0 means
+// unbounded. The nitro entrypoint derives n from enclave memory so a burst of
+// executions can't exhaust the fixed enclave memory and wedge the VM. fake/local
+// runs and tests leave it unbounded.
+func WithMaxConcurrentExecutions(n int64) Option {
+	return func(a *confidentialWorkflowsApp) {
+		a.limiter = newExecutionLimiter(n)
+	}
+}
+
+// InjectSettings receives the raw settings JSON injected by the host over vsock,
+// unmarshals the fields this app uses, and wires up whatever arrived: the
+// storage fetcher (once both the endpoint and the ed25519 key are known) and, on
+// the first gateway URL, the remote dispatcher (via the factory). Fetcher
+// tunables (max binary size, fetch timeout, cache size) are applied when
+// present, falling back to the defaults in constants.go. An injected
+// StorageServiceURL overrides the startup default. Safe to call again (e.g. key
+// rotation).
+func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
+	var req types.WorkflowSettings
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return fmt.Errorf("parsing settings: %w", err)
+	}
+
 	a.fetcher.SetMaxCacheBytes(int(req.MaxCacheBytes))
 
 	a.mu.Lock()
@@ -164,6 +186,7 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, _ types.
 		fetcher:     NewBinaryFetcher(lggr),
 		httpFetcher: httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
 		tpe:         tpe,
+		limiter:     newExecutionLimiter(0), // unbounded unless an option overrides
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -174,6 +197,17 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, _ types.
 }
 
 func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, rawSignedRequests ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
+	// Bound concurrent executions so a burst can't exhaust the fixed enclave
+	// memory and wedge the VM. Fail fast when full rather than piling on.
+	if !a.limiter.tryAcquire() {
+		emitter.Emit("execution_rejected_at_capacity", map[string]any{"max_concurrent": a.limiter.capacity()})
+		return nil, &types.ExecuteError{
+			Error: "enclave at capacity: too many concurrent executions",
+			Code:  http.StatusTooManyRequests,
+		}
+	}
+	defer a.limiter.release()
+
 	if appID != types.AppIDConfidentialWorkflows {
 		return nil, &types.ExecuteError{
 			Error: fmt.Sprintf("invalid app ID: expected %s, got %s", types.AppIDConfidentialWorkflows, appID),
@@ -237,7 +271,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		}
 	}
 
-	helper := &enclaveExecutionHelper{
+	var helper host.ExecutionHelper = &enclaveExecutionHelper{
 		requestID:        requestID,
 		workflowID:       execution.WorkflowId,
 		owner:            execution.GetOwner(),
@@ -257,6 +291,8 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 			Code:  http.StatusBadRequest,
 		}
 	}
+
+	helper = host.NewRestrictedExecutionHelper(helper, execution.Restrictions)
 
 	// Execute the WASM binary with the deserialized ExecuteRequest.
 	// The fetched binary is brotli-compressed.

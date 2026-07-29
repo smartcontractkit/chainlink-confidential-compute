@@ -3,7 +3,7 @@ package fake
 import (
 	"fmt"
 
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 // FakeAttestor is a dummy attestor for the fake enclave environment.

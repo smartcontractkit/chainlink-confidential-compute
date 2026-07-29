@@ -2,7 +2,7 @@ package framework
 
 import (
 	"github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 func MapEnclaveType(et types.EnclaveType) sdk.TeeType {

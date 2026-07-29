@@ -21,16 +21,12 @@ import (
 	"syscall"
 	"time"
 
-	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
-	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
-	confhttptypes "github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-http/types"
-	signatureverifier "github.com/smartcontractkit/confidential-compute/enclave/services/signature-verifier"
-	"github.com/smartcontractkit/confidential-compute/enclave/vsock"
-	"github.com/smartcontractkit/confidential-compute/types"
-	"github.com/smartcontractkit/confidential-compute/util"
+	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/vsock"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"go.uber.org/zap/zapcore"
-	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -40,19 +36,29 @@ var (
 )
 
 var (
-	httpPort       = flag.Int("port", 8080, "HTTP port to listen on")
-	configHttpPort = flag.Int("config-port", 8081, "HTTP port for config endpoint (localhost only)")
-	enclavePort    = flag.Int("enclave-port", 5000, "VSOCK port the enclave is listening on")
-	enclaveCID     = flag.Int("enclave-cid", 16, "VSOCK CID of the enclave")
-	quorumTimeout  = flag.Duration("quorum-timeout", types.QuorumTimeout, "Timeout for waiting for quorum to be reached")
-	storageKey     = flag.String("storage-key", os.Getenv("STORAGE_KEY"), "hex ed25519 CRE storage-service key to inject into the enclave over vsock (from a K8s secret). Reads STORAGE_KEY.")
-	storageSvcURL  = flag.String("storage-service-url", os.Getenv("STORAGE_SERVICE_URL"), "CRE storage-service gRPC address (host:port) to inject into the enclave. Reads STORAGE_SERVICE_URL.")
-	storageSvcTLS  = flag.Bool("storage-service-tls", os.Getenv("STORAGE_SERVICE_TLS") != "false", "whether the enclave should use TLS for the storage-service connection. Reads STORAGE_SERVICE_TLS (default true).")
-	gatewayURL     = flag.String("gateway-url", os.Getenv("GATEWAY_URL"), "Gateway URL for remote dispatch to inject into the enclave. Empty leaves the enclave local-only. Reads GATEWAY_URL.")
+	httpPort        = flag.Int("port", 8080, "HTTP port to listen on")
+	configHttpPort  = flag.Int("config-port", 8081, "HTTP port for config endpoint (localhost only)")
+	enclavePort     = flag.Int("enclave-port", 5000, "VSOCK port the enclave is listening on")
+	enclaveCID      = flag.Int("enclave-cid", 16, "VSOCK CID of the enclave")
+	quorumTimeout   = flag.Duration("quorum-timeout", types.QuorumTimeout, "Timeout for waiting for quorum to be reached")
+	shutdownTimeout = flag.Duration("shutdown-timeout", 25*time.Second, "Maximum time to drain servers and flush telemetry during shutdown; keep below the process termination grace period")
+	// requireBFTQuorum raises the batch quorum threshold from f+1 (one honest
+	// node) to 2f+1 (a BFT supermajority). Reads REQUIRE_BFT_QUORUM.
+	requireBFTQuorum = flag.Bool("require-bft-quorum", os.Getenv("REQUIRE_BFT_QUORUM") == "true", "require a 2f+1 BFT quorum instead of f+1. Reads REQUIRE_BFT_QUORUM.")
+	storageKey       = flag.String("storage-key", os.Getenv("STORAGE_KEY"), "hex ed25519 CRE storage-service key to inject into the enclave over vsock (from a K8s secret). Reads STORAGE_KEY.")
+	storageSvcURL    = flag.String("storage-service-url", os.Getenv("STORAGE_SERVICE_URL"), "CRE storage-service gRPC address (host:port) to inject into the enclave. Reads STORAGE_SERVICE_URL.")
+	storageSvcTLS    = flag.Bool("storage-service-tls", os.Getenv("STORAGE_SERVICE_TLS") != "false", "whether the enclave should use TLS for the storage-service connection. Reads STORAGE_SERVICE_TLS (default true).")
+	gatewayURL       = flag.String("gateway-url", os.Getenv("GATEWAY_URL"), "Gateway URL(s) for remote dispatch to inject into the enclave. Comma-separated for round-robin failover across multiple gateways. Empty leaves the enclave local-only. Reads GATEWAY_URL.")
 
 	maxBinarySize      = flag.Int64("max-binary-size", envInt64("MAX_BINARY_SIZE"), "max workflow-binary size in bytes the enclave accepts from storage. 0 uses the enclave default. Reads MAX_BINARY_SIZE.")
 	binaryFetchTimeout = flag.Duration("binary-fetch-timeout", envDuration("BINARY_FETCH_TIMEOUT"), "per-fetch timeout for downloading a workflow binary (e.g. 90s). 0 uses the enclave default. Reads BINARY_FETCH_TIMEOUT.")
 	maxCacheBytes      = flag.Int64("max-cache-bytes", envInt64("MAX_CACHE_BYTES"), "size bound in bytes of the enclave's verified-binary LRU cache. 0 uses the enclave default. Reads MAX_CACHE_BYTES.")
+
+	// settingsJSON, when set, overrides all the individual settings flags above:
+	// the host forwards this raw JSON to the enclave verbatim instead of building
+	// the payload from the typed flags. The enclave app owns the schema. Empty
+	// falls back to the individual flags. Reads ENCLAVE_SETTINGS (a JSON object).
+	settingsJSON = flag.String("settings", os.Getenv("ENCLAVE_SETTINGS"), "raw JSON settings to inject into the enclave over vsock, forwarded verbatim. Overrides the individual settings flags when set. Reads ENCLAVE_SETTINGS.")
 
 	// readHeaderTimeout bounds how long a client may take to send request headers.
 	readHeaderTimeout = flag.Duration("read-header-timeout", 30*time.Second, "Max duration allowed to read request headers")
@@ -102,6 +108,7 @@ type hostServer struct {
 	responseCache        *util.Cache[*types.ExecuteResponse]
 	verifier             signatureverifier.SignatureVerifier
 	logger               cllogger.SugaredLogger
+	metrics              executionMetrics
 }
 
 type batchRequest struct {
@@ -123,108 +130,6 @@ func (br *batchRequest) signers() []string {
 type batchResponse struct {
 	response *types.ExecuteResponse
 	err      error
-}
-
-func logPublicData(reqLog cllogger.SugaredLogger, appID string, publicData []byte) {
-	switch appID {
-	case types.AppIDConfidentialHTTP:
-		var req confhttptypes.Request
-		if err := proto.Unmarshal(publicData, &req); err != nil {
-			reqLog.Warnw("failed to decode publicData",
-				"event", "PUBLIC_DATA_DECODE_ERR",
-				"appID", appID,
-				"publicDataLen", len(publicData),
-				"error", err)
-			return
-		}
-
-		bodyKind := "none"
-		bodyLen := 0
-		switch body := req.GetBody().(type) {
-		case *confhttptypes.Request_BodyString:
-			bodyKind = "string"
-			bodyLen = len(body.BodyString)
-		case *confhttptypes.Request_BodyBytes:
-			bodyKind = "bytes"
-			bodyLen = len(body.BodyBytes)
-		}
-
-		timeout := ""
-		if req.GetTimeout() != nil {
-			timeout = req.GetTimeout().AsDuration().String()
-		}
-
-		reqLog.Infow("decoded publicData",
-			"event", "PUBLIC_DATA",
-			"appID", appID,
-			"publicDataLen", len(publicData),
-			"publicDataType", "confidential_http_request",
-			"url", req.GetUrl(),
-			"method", req.GetMethod(),
-			"bodyKind", bodyKind,
-			"bodyLen", bodyLen,
-			"headerNames", slices.Sorted(maps.Keys(req.GetMultiHeaders())),
-			"templatePublicValueKeys", slices.Sorted(maps.Keys(req.GetTemplatePublicValues())),
-			"customRootCACertPEMLen", len(req.GetCustomRootCaCertPem()),
-			"timeout", timeout,
-			"encryptOutput", req.GetEncryptOutput())
-
-	case types.AppIDConfidentialWorkflows:
-		var execution confworkflowtypes.WorkflowExecution
-		if err := proto.Unmarshal(publicData, &execution); err != nil {
-			reqLog.Warnw("failed to decode publicData",
-				"event", "PUBLIC_DATA_DECODE_ERR",
-				"appID", appID,
-				"publicDataLen", len(publicData),
-				"error", err)
-			return
-		}
-
-		executeRequestKind := "unset"
-		executeRequestConfigLen := 0
-		var maxResponseSize uint64
-		fields := []any{
-			"event", "PUBLIC_DATA",
-			"appID", appID,
-			"publicDataLen", len(publicData),
-			"publicDataType", "workflow_execution",
-			"workflowID", execution.GetWorkflowId(),
-			"executionID", execution.GetExecutionId(),
-			"owner", execution.GetOwner(),
-			"orgID", execution.GetOrgId(),
-			"binaryURL", execution.GetBinaryUrl(),
-			"binaryHash", hex.EncodeToString(execution.GetBinaryHash()),
-			"requirementsPresent", execution.GetRequirements() != nil,
-			"restrictionsPresent", execution.GetRestrictions() != nil,
-		}
-
-		if execReq := execution.GetSdkExecuteRequest(); execReq != nil {
-			executeRequestConfigLen = len(execReq.GetConfig())
-			maxResponseSize = execReq.GetMaxResponseSize()
-			switch req := execReq.GetRequest().(type) {
-			case *sdkpb.ExecuteRequest_Subscribe:
-				executeRequestKind = "subscribe"
-			case *sdkpb.ExecuteRequest_Trigger:
-				executeRequestKind = "trigger"
-				fields = append(fields, "triggerID", req.Trigger.GetId())
-			case *sdkpb.ExecuteRequest_PreHook:
-				executeRequestKind = "pre_hook"
-				fields = append(fields, "triggerID", req.PreHook.GetId())
-			}
-		}
-
-		fields = append(fields,
-			"executeRequestKind", executeRequestKind,
-			"executeRequestConfigLen", executeRequestConfigLen,
-			"maxResponseSize", maxResponseSize)
-		reqLog.Infow("decoded publicData", fields...)
-
-	default:
-		reqLog.Debugw("publicData decoder unavailable",
-			"event", "PUBLIC_DATA_UNSUPPORTED",
-			"appID", appID,
-			"publicDataLen", len(publicData))
-	}
 }
 
 func NewHostServer(ctx context.Context, clientOverride *http.Client) *hostServer {
@@ -252,7 +157,8 @@ func NewHostServer(ctx context.Context, clientOverride *http.Client) *hostServer
 		config:               types.EnclaveConfig{},
 		verifier:             signatureverifier.NewEd25519SignatureVerifier(),
 		// No-op by default so tests stay quiet; main injects the real logger.
-		logger: cllogger.Sugared(cllogger.Nop()),
+		logger:  cllogger.Sugared(cllogger.Nop()),
+		metrics: noopExecutionMetrics{},
 	}
 }
 
@@ -442,19 +348,14 @@ func (h *hostServer) handleInjectSettings(w http.ResponseWriter, r *http.Request
 	_, _ = io.Copy(w, resp.Body)
 }
 
-// injectSettings is the host-side "settings service": it reads runtime config +
-// secrets from the host (K8s env vars) and POSTs them to the enclave's /settings
-// endpoint over vsock. That endpoint is deliberately NOT exposed on the host's
-// external HTTP ports, so the values only ever travel host->enclave over vsock,
-// never the network. A Nitro EIF is measured, so environment endpoints (storage
-// URL, gateway URL) can't be baked in and are injected here alongside the
-// storage key. Retries while the enclave is still booting.
-func (h *hostServer) injectSettings(ctx context.Context, settings types.SettingsRequest) error {
-	payload, err := json.Marshal(settings)
-	if err != nil {
-		return fmt.Errorf("marshaling settings: %w", err)
-	}
-
+// injectSettings is the host-side "settings service": it POSTs the opaque
+// settings JSON to the enclave's /settings endpoint over vsock. That endpoint is
+// deliberately NOT exposed on the host's external HTTP ports, so the values only
+// ever travel host->enclave over vsock, never the network. A Nitro EIF is
+// measured, so environment endpoints (storage URL, gateway URL) can't be baked
+// in and are injected here at runtime. The host forwards the payload verbatim;
+// the enclave app owns the schema. Retries while the enclave is still booting.
+func (h *hostServer) injectSettings(ctx context.Context, payload []byte) error {
 	const (
 		maxAttempts = 60
 		retryDelay  = 2 * time.Second
@@ -551,6 +452,16 @@ func (h *hostServer) proxyConfig(w http.ResponseWriter, r *http.Request, method 
 	}
 }
 
+// quorumThreshold returns the number of identical signed requests required to
+// dispatch a batch to the enclave. By default this is f+1 (at least one honest
+// node); with --require-bft-quorum it is 2f+1 (a BFT supermajority).
+func quorumThreshold(f uint32) int {
+	if *requireBFTQuorum {
+		return int(2*f + 1)
+	}
+	return int(f + 1)
+}
+
 // handleExecute handles the /requests endpoint, which executes a confidential HTTPS request through the enclave.
 func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	arrivalTime := time.Now()
@@ -595,7 +506,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		"ephemeralPK", ephemeralPKHex,
 		"bodyLen", len(body),
 		"arrivalTime", arrivalTime.Format(time.RFC3339Nano))
-	logPublicData(reqLog, execReq.AppID, execReq.PublicData)
+	metadata := inspectPublicData(reqLog, execReq.AppID, execReq.PublicData)
 
 	// Log hash input components for debugging hash divergence
 	reqLog.Debugw("hash inputs",
@@ -687,7 +598,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 			"event", "BATCH_NEW",
 			"T", t,
 			"F", f,
-			"threshold", f+1)
+			"threshold", quorumThreshold(f))
 		br = &batchRequest{
 			requests:    make([]types.SignedComputeRequest, 0, len(h.config.Signers)),
 			responseCh:  make([]chan *batchResponse, 0, len(h.config.Signers)),
@@ -703,7 +614,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 			"event", "BATCH_JOIN",
 			"batchAge", time.Since(br.createdAt).String(),
 			"currentBatchSize", len(br.requests),
-			"threshold", f+1)
+			"threshold", quorumThreshold(f))
 	}
 
 	// If this signer already contributed to the batch, don't add a new signature
@@ -725,7 +636,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		// to prevent race with timeout handler. The equality check ensures that
 		// only the request that reaches exactly the threshold triggers processing;
 		// subsequent requests will not re-trigger since len > threshold.
-		threshold := int(f + 1)
+		threshold := quorumThreshold(f)
 		shouldProcess := len(br.requests) == threshold
 		if shouldProcess {
 			br.processingRequest = true
@@ -752,9 +663,16 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 				"signers", signers,
 				"signatureCount", len(requests))
 			go func() {
+				finishExecution := h.metrics.startExecution(metadata)
 				enclaveStart := time.Now()
 				resp, err := h.processBatch(requests)
 				enclaveDuration := time.Since(enclaveStart)
+				outcome := executionOutcomeSuccess
+				if err != nil {
+					outcome = executionOutcomeError
+				}
+				finishExecution(outcome)
+
 				if err != nil {
 					reqLog.Errorw("enclave execution failed",
 						"event", "ENCLAVE_ERR",
@@ -787,6 +705,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		reqLog.Infow("response sent",
 			"event", "RESPONSE_OK",
 			"waitDuration", waitDuration.String())
+		inspectResponseOutput(reqLog, execReq.AppID, batchResp.response.Output)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(batchResp.response); err != nil {
@@ -908,7 +827,7 @@ func (h *hostServer) failBatchIfNotProcessed(requestHash [32]byte, f uint32, isS
 		return false
 	}
 
-	threshold := int(f + 1)
+	threshold := quorumThreshold(f)
 	received := len(br.requests)
 
 	// Log which signers we did receive
@@ -984,6 +903,15 @@ func main() {
 	if *writeTimeout <= *quorumTimeout {
 		log.Fatalf("write-timeout (%v) must be greater than quorum-timeout (%v)", *writeTimeout, *quorumTimeout)
 	}
+	if *shutdownTimeout <= 0 {
+		log.Fatalf("shutdown-timeout (%v) must be greater than zero", *shutdownTimeout)
+	}
+
+	if *requireBFTQuorum {
+		lggr.Infow("BFT quorum required: batch threshold is 2f+1", "requireBFTQuorum", true)
+	} else {
+		lggr.Infow("standard quorum: batch threshold is f+1", "requireBFTQuorum", false)
+	}
 
 	// Set up context with signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -992,9 +920,23 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
+	telemetryCfg := loadHostTelemetryConfig(os.Getenv)
+	telemetry, err := newHostTelemetry(ctx, telemetryCfg, lggr)
+	if err != nil {
+		log.Fatalf("failed to initialize telemetry: %v", err)
+	}
+	metrics, err := newHostMetrics(telemetry.meter)
+	if err != nil {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), *shutdownTimeout)
+		_ = telemetry.close(closeCtx)
+		closeCancel()
+		log.Fatalf("failed to initialize host metrics: %v", err)
+	}
+
 	// Start servers. Optionally handle the config endpoint on a different port.
 	host := NewHostServer(ctx, nil)
 	host.logger = lggr
+	host.metrics = metrics
 	mainMux := http.NewServeMux()
 
 	var configServer *http.Server
@@ -1048,21 +990,34 @@ func main() {
 	// Inject runtime config + settings into the enclave over vsock: the storage
 	// endpoint + key (workflow-binary fetch) and the gateway URL (remote
 	// dispatch). These can't be baked into the measured EIF, so the host supplies
-	// them from its K8s env. Skipped only if nothing is configured.
+	// them at runtime. The raw --settings JSON, when set, is forwarded verbatim
+	// and overrides the individual flags; otherwise the payload is built from
+	// them. Skipped only if nothing is configured.
 	// TODO: re-inject on enclave restart.
-	settings := types.SettingsRequest{
-		StorageKey:         *storageKey,
-		StorageServiceURL:  *storageSvcURL,
-		StorageServiceTLS:  *storageSvcTLS,
-		GatewayURL:         *gatewayURL,
-		MaxBinarySize:      *maxBinarySize,
-		BinaryFetchTimeout: *binaryFetchTimeout,
-		MaxCacheBytes:      *maxCacheBytes,
+	var payload []byte
+	if *settingsJSON != "" {
+		payload = []byte(*settingsJSON)
+	} else {
+		settings := types.WorkflowSettings{
+			StorageKey:         *storageKey,
+			StorageServiceURL:  *storageSvcURL,
+			StorageServiceTLS:  *storageSvcTLS,
+			GatewayURL:         *gatewayURL,
+			MaxBinarySize:      *maxBinarySize,
+			BinaryFetchTimeout: *binaryFetchTimeout,
+			MaxCacheBytes:      *maxCacheBytes,
+		}
+		if settings.StorageKey != "" || settings.StorageServiceURL != "" || settings.GatewayURL != "" ||
+			settings.MaxBinarySize != 0 || settings.BinaryFetchTimeout != 0 || settings.MaxCacheBytes != 0 {
+			var err error
+			if payload, err = json.Marshal(settings); err != nil {
+				slog.Error("failed to marshal enclave settings", "error", err)
+			}
+		}
 	}
-	if settings.StorageKey != "" || settings.StorageServiceURL != "" || settings.GatewayURL != "" ||
-		settings.MaxBinarySize != 0 || settings.BinaryFetchTimeout != 0 || settings.MaxCacheBytes != 0 {
+	if len(payload) > 0 {
 		go func() {
-			if err := host.injectSettings(ctx, settings); err != nil {
+			if err := host.injectSettings(ctx, payload); err != nil {
 				slog.Error("failed to inject settings into enclave", "error", err)
 			}
 		}()
@@ -1076,7 +1031,7 @@ func main() {
 	cancel()
 
 	// Give pending requests time to complete
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), *shutdownTimeout)
 	defer shutdownCancel()
 
 	// Shutdown servers gracefully
@@ -1087,6 +1042,9 @@ func main() {
 	}
 	if err := mainServer.Shutdown(shutdownCtx); err != nil {
 		lggr.Errorw("main server shutdown error", "error", err)
+	}
+	if err := telemetry.close(shutdownCtx); err != nil {
+		lggr.Errorw("telemetry shutdown error", "error", err)
 	}
 
 	lggr.Infow("graceful shutdown complete")

@@ -12,8 +12,8 @@ import (
 	"strings"
 
 	"github.com/smartcontractkit/chainlink-protos/cre/go/values"
-	"github.com/smartcontractkit/confidential-compute/enclave/nitro"
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"golang.org/x/crypto/nacl/box"
 	"google.golang.org/protobuf/encoding/protojson"
 	"gopkg.in/yaml.v3"

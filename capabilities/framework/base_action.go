@@ -7,15 +7,15 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
-	"github.com/smartcontractkit/confidential-compute/types"
-	framework "github.com/smartcontractkit/confidential-compute/types/frameworktypes"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	framework "github.com/smartcontractkit/chainlink-confidential-compute/types/frameworktypes"
 	"google.golang.org/protobuf/proto"
 )
 
 // ExecutorInput must be satisfied by all capabilities running on the Confidential Compute Framework.
 // The `GetInput` function is satisfied by any proto struct with an `Input` field.
 // The GetVaultDonSecrets method may be satisfied by adding the `SecretIdentifier` struct
-// available in the `github.com/smartcontractkit/confidential-compute/types/frameworktypes` package.
+// available in the `github.com/smartcontractkit/chainlink-confidential-compute/types/frameworktypes` package.
 type ExecutorInput interface {
 	GetInput() proto.Message
 	GetVaultDonSecrets() []*framework.SecretIdentifier
@@ -52,6 +52,7 @@ type baseConfidentialAction[TInput ExecutorInput, TOutput proto.Message] struct 
 	capabilityID               string
 	confidentialComputeVersion string
 	limitsFactory              limits.Factory
+	quorumTimeoutIsUserError   bool
 	emptyOutputCreator         func() TOutput
 }
 
@@ -64,6 +65,7 @@ func NewConfidentialAction[TInput ExecutorInput, TOutput proto.Message](
 	capabilityID string,
 	confidentialComputeVersion string,
 	limitsFactory limits.Factory,
+	quorumTimeoutIsUserError bool,
 	outputCreator func() TOutput,
 ) ConfidentialAction[TInput, TOutput] {
 	return &baseConfidentialAction[TInput, TOutput]{
@@ -73,6 +75,7 @@ func NewConfidentialAction[TInput ExecutorInput, TOutput proto.Message](
 		capabilityID:               capabilityID,
 		confidentialComputeVersion: confidentialComputeVersion,
 		limitsFactory:              limitsFactory,
+		quorumTimeoutIsUserError:   quorumTimeoutIsUserError,
 		emptyOutputCreator:         outputCreator,
 	}
 }
@@ -83,7 +86,7 @@ func (a *baseConfidentialAction[TInput, TOutput]) Initialise(
 	a.lggr.Debugf("Initialising %s", a.name)
 	a.lggr.Debugf("Config: %s", dependencies.Config)
 
-	a.executor = NewRealExecutor(a.lggr, dependencies, a.capabilityID, a.confidentialComputeVersion, a.limitsFactory)
+	a.executor = NewRealExecutor(a.lggr, dependencies, a.capabilityID, a.confidentialComputeVersion, a.limitsFactory, a.quorumTimeoutIsUserError)
 
 	return a.Start(ctx)
 }

@@ -7,7 +7,7 @@
 package types
 
 import (
-	frameworktypes "github.com/smartcontractkit/confidential-compute/types/frameworktypes"
+	frameworktypes "github.com/smartcontractkit/chainlink-confidential-compute/types/frameworktypes"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	durationpb "google.golang.org/protobuf/types/known/durationpb"
@@ -375,7 +375,7 @@ const file_enclave_apps_confidential_http_types_types_proto_rawDesc = "" +
 	"\rmulti_headers\x18\x03 \x03(\v2!.types.Response.MultiHeadersEntryR\fmultiHeaders\x1aT\n" +
 	"\x11MultiHeadersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
-	"\x05value\x18\x02 \x01(\v2\x13.types.HeaderValuesR\x05value:\x028\x01BWZUgithub.com/smartcontractkit/confidential-compute/enclave/apps/confidential-http/typesb\x06proto3"
+	"\x05value\x18\x02 \x01(\v2\x13.types.HeaderValuesR\x05value:\x028\x01BaZ_github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/typesb\x06proto3"
 
 var (
 	file_enclave_apps_confidential_http_types_types_proto_rawDescOnce sync.Once

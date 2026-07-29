@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 // BinaryFetcher verifies WASM binaries against their SHA-256 hash and caches the

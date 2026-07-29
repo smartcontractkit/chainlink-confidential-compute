@@ -1,4 +1,4 @@
-module github.com/smartcontractkit/confidential-compute/tests/e2e/testdata/workflow
+module github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/testdata/workflow
 
 go 1.25.3
 

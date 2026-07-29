@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 type MockHTTPClient struct {

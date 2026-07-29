@@ -4,8 +4,8 @@ import (
 	"crypto/sha256"
 	"testing"
 
-	enclaveselector "github.com/smartcontractkit/confidential-compute/enclave-client/enclave-selector"
-	"github.com/smartcontractkit/confidential-compute/types"
+	enclaveselector "github.com/smartcontractkit/chainlink-confidential-compute/enclave-client/enclave-selector"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/stretchr/testify/assert"
 )
 

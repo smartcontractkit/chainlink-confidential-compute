@@ -11,9 +11,9 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
 
-	"github.com/smartcontractkit/confidential-compute/capabilities/framework"
-	cctypes "github.com/smartcontractkit/confidential-compute/types"
-	"github.com/smartcontractkit/confidential-compute/types/frameworktypes"
+	"github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework"
+	cctypes "github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types/frameworktypes"
 
 	caperrors "github.com/smartcontractkit/chainlink-common/pkg/capabilities/errors"
 	confhttptypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialhttp"
@@ -113,6 +113,7 @@ func NewService(lggr logger.Logger, limitsFactory limits.Factory) *ConfidentialH
 			cctypes.AppIDConfidentialHTTP,
 			cctypes.ServiceConfidentialComputeVersion,
 			limitsFactory,
+			true, // quorumTimeoutIsUserError: surface quorum timeouts as user errors (no retry)
 			func() *confhttptypes.HTTPResponse {
 				return &confhttptypes.HTTPResponse{}
 			},

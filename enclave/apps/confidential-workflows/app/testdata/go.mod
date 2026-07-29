@@ -1,4 +1,4 @@
-module github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-workflows/app/testdata/engine-test
+module github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/app/testdata/engine-test
 
 go 1.26.4
 

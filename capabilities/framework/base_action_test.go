@@ -11,7 +11,7 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
 
-	frameworktypes "github.com/smartcontractkit/confidential-compute/types/frameworktypes"
+	frameworktypes "github.com/smartcontractkit/chainlink-confidential-compute/types/frameworktypes"
 )
 
 type testExecutorInput struct{}
@@ -28,6 +28,7 @@ func TestBaseConfidentialAction_Initialise_CreatesExecutor(t *testing.T) {
 		"test-capability-id",
 		"test-version",
 		limits.Factory{},
+		true, // quorumTimeoutIsUserError
 		func() *TestOutput { return &TestOutput{} },
 	)
 

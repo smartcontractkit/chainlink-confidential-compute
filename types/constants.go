@@ -54,6 +54,12 @@ const (
 	// gateway.WithTimeout.
 	DefaultGatewayRequestTimeout = DefaultEnclaveRequestTimeout
 
+	// GatewayFailoverDelay is the wait inserted before failing over to the next
+	// gateway URL after a transport/proxy error. It gives a briefly-unhealthy
+	// gateway a moment to recover and avoids hammering the backends in a tight
+	// loop when several are degraded at once.
+	GatewayFailoverDelay = 5 * time.Second
+
 	// Workflow-binary fetch & cache defaults. Each is overridable per-deployment
 	// at runtime via SettingsRequest (host injects them over vsock); these values
 	// apply only when the corresponding setting is left unset.
@@ -99,10 +105,6 @@ const (
 	ErrKeyPresentNoEncryption   = "AES-GCM key present but encryption not requested"
 	ErrResponseBodyTooLarge     = "response body exceeds maximum allowed size"
 	ErrQuorumTimeout            = "quorum_timeout"
-
-	// MaxRedundantMeasurements is the max number of backup trusted measurements
-	// retained per enclave for attestation fallback.
-	MaxRedundantMeasurements = 32
 
 	// ErrVaultSystemErrorFallback is the literal string the chainlink core vault plugin returns
 	// in SecretResponse.Error for any non-user-classified failure. See userFacingError() in

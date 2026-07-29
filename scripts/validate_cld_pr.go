@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/teeattestation/nitro"
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"gopkg.in/yaml.v3"
 )
 

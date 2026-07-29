@@ -1,6 +1,6 @@
 // This root module represents the minimal TCB of all applications we run in enclaves.
 // Dependencies should seldom be added here.
-module github.com/smartcontractkit/confidential-compute
+module github.com/smartcontractkit/chainlink-confidential-compute
 
 go 1.26.4
 

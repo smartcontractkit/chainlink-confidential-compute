@@ -6,7 +6,7 @@ import (
 	"strings"
 	texttemplate "text/template"
 
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 // echoEnclaveApp is a minimal reference implementation of the EnclaveApp

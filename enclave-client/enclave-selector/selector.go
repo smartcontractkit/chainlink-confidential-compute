@@ -4,7 +4,7 @@
 package enclaveselector
 
 import (
-	"github.com/smartcontractkit/confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 type EnclaveSelector interface {

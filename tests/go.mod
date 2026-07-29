@@ -1,12 +1,12 @@
-module github.com/smartcontractkit/confidential-compute/tests
+module github.com/smartcontractkit/chainlink-confidential-compute/tests
 
 go 1.26.4
 
-replace github.com/smartcontractkit/confidential-compute => ../
+replace github.com/smartcontractkit/chainlink-confidential-compute => ../
 
-replace github.com/smartcontractkit/confidential-compute/enclave-client => ../enclave-client
+replace github.com/smartcontractkit/chainlink-confidential-compute/enclave-client => ../enclave-client
 
-replace github.com/smartcontractkit/confidential-compute/enclave/apps/confidential-workflows => ../enclave/apps/confidential-workflows
+replace github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows => ../enclave/apps/confidential-workflows
 
 require (
 	github.com/andybalholm/brotli v1.2.1
@@ -25,8 +25,8 @@ require (
 	github.com/smartcontractkit/chainlink/system-tests/lib v0.0.0-20260714171716-a1ea8cd88034
 	github.com/smartcontractkit/chainlink/system-tests/tests v0.0.0-20260714171716-a1ea8cd88034
 	github.com/smartcontractkit/chainlink/v2 v2.32.0
-	github.com/smartcontractkit/confidential-compute v0.0.0
-	github.com/smartcontractkit/confidential-compute/enclave-client v0.0.0-00010101000000-000000000000
+	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
+	github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-00010101000000-000000000000
 	github.com/smartcontractkit/tdh2/go/tdh2 v0.0.0-20251120172354-e8ec0386b06c
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.54.0

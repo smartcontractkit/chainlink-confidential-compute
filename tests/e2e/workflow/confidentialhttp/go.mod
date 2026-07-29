@@ -1,4 +1,4 @@
-module github.com/smartcontractkit/confidential-compute/tests/e2e/workflow/confidentialhttp
+module github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/workflow/confidentialhttp
 
 go 1.25.5
 
