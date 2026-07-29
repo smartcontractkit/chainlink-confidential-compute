@@ -70,6 +70,14 @@ type EnclaveParams struct {
 	EnclaveEphemeralPublicKey []byte
 }
 
+// Config is the capability job-spec configuration.
+//
+// All fields other than EncryptedAPIKeys are deprecated and NO LONGER READ: cresettings
+// (github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings) are the sole
+// source of truth for these values, applied in applyLimitSettings. The deprecated fields
+// are retained only so existing job-specs that still set them continue to unmarshal
+// cleanly; their values are ignored. EncryptedAPIKeys has no cresetting equivalent and is
+// still consumed.
 type Config struct {
 	// Enclave communication
 	//
@@ -202,70 +210,12 @@ func ParseConfig(capConfigRaw string) (*ParsedConfig, error) {
 		SessionConfig:           enclaveclient.DefaultSessionConfig,
 	}
 
-	// Override with provided values
-	if capConfig.MaxRetries != nil {
-		parsed.MaxRetries = *capConfig.MaxRetries
-	}
-	if capConfig.RetryBackoffSeconds != nil {
-		parsed.RetryBackoffSeconds = *capConfig.RetryBackoffSeconds
-	}
-	if capConfig.GlobalRPS != nil {
-		parsed.GlobalRPS = *capConfig.GlobalRPS
-	}
-	if capConfig.GlobalBurst != nil {
-		parsed.GlobalBurst = *capConfig.GlobalBurst
-	}
-	if capConfig.WorkflowOwnerRPS != nil {
-		parsed.WorkflowOwnerRPS = *capConfig.WorkflowOwnerRPS
-	}
-	if capConfig.WorkflowOwnerBurst != nil {
-		parsed.WorkflowOwnerBurst = *capConfig.WorkflowOwnerBurst
-	}
-	if capConfig.EnableSecretsCache != nil {
-		parsed.EnableSecretsCache = *capConfig.EnableSecretsCache
-	}
-	if capConfig.EnclaveRequestTimeoutSeconds != nil {
-		parsed.EnclaveRequestTimeout = time.Duration(*capConfig.EnclaveRequestTimeoutSeconds) * time.Second
-	}
-	if capConfig.PublicKeyRequestTimeoutSeconds != nil {
-		parsed.PublicKeyRequestTimeout = time.Duration(*capConfig.PublicKeyRequestTimeoutSeconds) * time.Second
-	}
-	if capConfig.EnclaveRefreshIntervalSeconds != nil {
-		parsed.EnclaveRefreshInterval = time.Duration(*capConfig.EnclaveRefreshIntervalSeconds) * time.Second
-	}
-	if capConfig.EnableCache != nil {
-		parsed.CacheConfig.EnableCache = *capConfig.EnableCache
-	}
-	if capConfig.CacheTTLSeconds != nil {
-		parsed.CacheConfig.DefaultTTL = time.Duration(*capConfig.CacheTTLSeconds) * time.Second
-	}
-	if capConfig.CacheMaxTTLSeconds != nil {
-		parsed.CacheConfig.MaxTTL = time.Duration(*capConfig.CacheMaxTTLSeconds) * time.Second
-	}
-	if capConfig.CacheCleanupSeconds != nil {
-		parsed.CacheConfig.CleanupInterval = time.Duration(*capConfig.CacheCleanupSeconds) * time.Second
-	}
-	if capConfig.CacheTTLBufferPercent != nil {
-		parsed.CacheConfig.TTLBufferPercent = *capConfig.CacheTTLBufferPercent
-	}
-	if capConfig.EnableProactiveRefresh != nil {
-		parsed.CacheConfig.EnableProactiveRefresh = *capConfig.EnableProactiveRefresh
-	}
-	if capConfig.RefreshIntervalPercent != nil {
-		parsed.CacheConfig.RefreshIntervalPercent = *capConfig.RefreshIntervalPercent
-	}
-	if capConfig.MinRefreshIntervalSeconds != nil {
-		parsed.CacheConfig.MinRefreshInterval = time.Duration(*capConfig.MinRefreshIntervalSeconds) * time.Second
-	}
-	if capConfig.RefreshTimeoutSeconds != nil {
-		parsed.CacheConfig.RefreshTimeout = time.Duration(*capConfig.RefreshTimeoutSeconds) * time.Second
-	}
-	if capConfig.EnableSessionPersistence != nil {
-		parsed.SessionConfig.EnableSessionPersistence = *capConfig.EnableSessionPersistence
-	}
-	if capConfig.SessionHeaderName != nil {
-		parsed.SessionConfig.SessionHeaderName = *capConfig.SessionHeaderName
-	}
+	// NOTE: the deprecated per-node job-spec Config fields (rate limits, timeouts,
+	// cache/session toggles, TLS verification, retry policy, etc.) are intentionally
+	// NOT read here anymore. cresettings are the source of truth and are applied by
+	// applyLimitSettings, which runs after every ParseConfig. The baseline values set
+	// above are only a safety default in case limits are unavailable. EncryptedAPIKeys
+	// (which has no cresetting equivalent) is preserved via parsed.Config = capConfig.
 
 	return parsed, nil
 }
@@ -340,74 +290,10 @@ func (e *RealExecutor) applyLimitSettings(ctx context.Context, parsed *ParsedCon
 		SessionHeaderName:        sessionHeaderName,
 	}
 
-	// Deprecated job-spec overrides, retained during migration.
-	cfg := parsed.Config
-	if cfg.GlobalRPS != nil {
-		parsed.GlobalRPS = *cfg.GlobalRPS
-	}
-	if cfg.GlobalBurst != nil {
-		parsed.GlobalBurst = *cfg.GlobalBurst
-	}
-	if cfg.WorkflowOwnerRPS != nil {
-		parsed.WorkflowOwnerRPS = *cfg.WorkflowOwnerRPS
-	}
-	if cfg.WorkflowOwnerBurst != nil {
-		parsed.WorkflowOwnerBurst = *cfg.WorkflowOwnerBurst
-	}
-	if cfg.MaxRetries != nil {
-		parsed.MaxRetries = *cfg.MaxRetries
-	}
-	if cfg.RetryBackoffSeconds != nil {
-		parsed.RetryBackoffSeconds = *cfg.RetryBackoffSeconds
-	}
-	if cfg.EnableSecretsCache != nil {
-		parsed.EnableSecretsCache = *cfg.EnableSecretsCache
-	}
-	if cfg.EnclaveRequestTimeoutSeconds != nil {
-		parsed.EnclaveRequestTimeout = time.Duration(*cfg.EnclaveRequestTimeoutSeconds) * time.Second
-	}
-	if cfg.PublicKeyRequestTimeoutSeconds != nil {
-		parsed.PublicKeyRequestTimeout = time.Duration(*cfg.PublicKeyRequestTimeoutSeconds) * time.Second
-	}
-	if cfg.InsecureSkipTLSVerify != nil {
-		parsed.InsecureSkipTLSVerify = *cfg.InsecureSkipTLSVerify
-	}
-	if cfg.EnclaveRefreshIntervalSeconds != nil {
-		parsed.EnclaveRefreshInterval = time.Duration(*cfg.EnclaveRefreshIntervalSeconds) * time.Second
-	}
-	if cfg.EnableCache != nil {
-		parsed.CacheConfig.EnableCache = *cfg.EnableCache
-	}
-	if cfg.CacheTTLSeconds != nil {
-		parsed.CacheConfig.DefaultTTL = time.Duration(*cfg.CacheTTLSeconds) * time.Second
-	}
-	if cfg.CacheMaxTTLSeconds != nil {
-		parsed.CacheConfig.MaxTTL = time.Duration(*cfg.CacheMaxTTLSeconds) * time.Second
-	}
-	if cfg.CacheCleanupSeconds != nil {
-		parsed.CacheConfig.CleanupInterval = time.Duration(*cfg.CacheCleanupSeconds) * time.Second
-	}
-	if cfg.CacheTTLBufferPercent != nil {
-		parsed.CacheConfig.TTLBufferPercent = *cfg.CacheTTLBufferPercent
-	}
-	if cfg.EnableProactiveRefresh != nil {
-		parsed.CacheConfig.EnableProactiveRefresh = *cfg.EnableProactiveRefresh
-	}
-	if cfg.RefreshIntervalPercent != nil {
-		parsed.CacheConfig.RefreshIntervalPercent = *cfg.RefreshIntervalPercent
-	}
-	if cfg.MinRefreshIntervalSeconds != nil {
-		parsed.CacheConfig.MinRefreshInterval = time.Duration(*cfg.MinRefreshIntervalSeconds) * time.Second
-	}
-	if cfg.RefreshTimeoutSeconds != nil {
-		parsed.CacheConfig.RefreshTimeout = time.Duration(*cfg.RefreshTimeoutSeconds) * time.Second
-	}
-	if cfg.EnableSessionPersistence != nil {
-		parsed.SessionConfig.EnableSessionPersistence = *cfg.EnableSessionPersistence
-	}
-	if cfg.SessionHeaderName != nil {
-		parsed.SessionConfig.SessionHeaderName = *cfg.SessionHeaderName
-	}
+	// cresettings are the sole source of truth for the values above. The previously
+	// retained per-node job-spec Config overrides have been removed; the deprecated
+	// Config fields are no longer read (EncryptedAPIKeys, which has no cresetting
+	// equivalent, is still consumed separately).
 }
 
 // getCapConfig returns the current parsed config snapshot. The pointer is
