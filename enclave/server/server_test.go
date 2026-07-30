@@ -1028,8 +1028,43 @@ func TestHandleExecute_ServerConcerns(t *testing.T) {
 					}
 				}
 			},
-			expectedStatus: http.StatusInternalServerError,
+			expectedStatus: http.StatusBadRequest,
 			expectedError:  "mock app error",
+		},
+		{
+			// The app rejects at capacity with 429; the caller has to be able to
+			// tell that apart from an enclave fault to know a retry is worthwhile.
+			name: "app rejection at capacity relays 429",
+			request: &enclavetypes.Request{
+				Method: http.MethodPost,
+				Url:    "https://example.com/api",
+			},
+			mockAppBehavior: func(m *mockEnclaveApp) {
+				m.executeFunc = func(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter) ([]byte, *types.ExecuteError) {
+					return nil, &types.ExecuteError{
+						Error: "enclave at capacity",
+						Code:  http.StatusTooManyRequests,
+					}
+				}
+			},
+			expectedStatus: http.StatusTooManyRequests,
+			expectedError:  "enclave at capacity",
+		},
+		{
+			// An app that sets no code (or a code outside the error range) is still
+			// an enclave-side failure.
+			name: "app error without a code falls back to 500",
+			request: &enclavetypes.Request{
+				Method: http.MethodPost,
+				Url:    "https://example.com/api",
+			},
+			mockAppBehavior: func(m *mockEnclaveApp) {
+				m.executeFunc = func(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter) ([]byte, *types.ExecuteError) {
+					return nil, &types.ExecuteError{Error: "uncoded app error"}
+				}
+			},
+			expectedStatus: http.StatusInternalServerError,
+			expectedError:  "uncoded app error",
 		},
 		{
 			name:                         "invalid http method for execute endpoint",

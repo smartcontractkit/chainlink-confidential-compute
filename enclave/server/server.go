@@ -728,7 +728,14 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		responseEmitter.Emit("app_execution_failed", map[string]any{
 			"error": execErr,
 		})
-		responseEmitter.WriteErrorResponse(w, fmt.Sprintf("error executing enclave app request: %v", execErr), http.StatusInternalServerError)
+		// Relay the app's own classification (400 malformed, 429 at capacity) rather
+		// than calling every app failure an enclave fault. WriteHeader panics
+		// outside 100-999, so an unset or non-error Code falls back to 500.
+		status := execErr.Code
+		if status < 400 || status > 599 {
+			status = http.StatusInternalServerError
+		}
+		responseEmitter.WriteErrorResponse(w, fmt.Sprintf("error executing enclave app request: %v", execErr), status)
 		return
 	}
 
