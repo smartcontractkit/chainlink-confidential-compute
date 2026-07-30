@@ -27,7 +27,7 @@ import (
 var (
 	vsockPort         = flag.Uint("vsock-port", 5000, "vsock listening port")
 	allowReconfig     = flag.Bool("allow-reconfig", false, "Allow the enclave config to be set multiple times (insecure, for testing only)")
-	gatewayTimeout    = flag.Duration("gateway-timeout", types.DefaultGatewayRequestTimeout, "HTTP client timeout for enclave->gateway requests (secrets + capabilities). Should not exceed the enclave request timeout.")
+	gatewayTimeout    = flag.Duration("gateway-timeout", types.DefaultGatewayRequestTimeout, "Fallback HTTP client timeout for enclave->gateway requests (secrets + capabilities), used when the host injects none. Should not exceed the enclave request timeout.")
 	keypairRotation   = flag.Duration("keypair-rotation", types.DefaultKeypairRotationFrequency, "How often to rotate ephemeral keypairs")
 	keypairExpiration = flag.Duration("keypair-expiration", types.DefaultKeypairExpiration, "How long ephemeral keypairs survive before deletion")
 )
@@ -69,8 +69,11 @@ func main() {
 	// Runtime config is injected by the host over vsock (see host
 	// injectSettings -> app.InjectSettings); the factory builds the remote
 	// dispatcher once the gateway URL arrives.
-	dispatcherFactory := func(gatewayURL string) app.RemoteDispatcher {
-		client := gateway.NewGatewayClient(gatewayURL, att, gateway.WithTimeout(*gatewayTimeout))
+	dispatcherFactory := func(gatewayURL string, timeout time.Duration) app.RemoteDispatcher {
+		if timeout <= 0 {
+			timeout = *gatewayTimeout
+		}
+		client := gateway.NewGatewayClient(gatewayURL, att, gateway.WithTimeout(timeout))
 		verifier := signatureverifier.NewEd25519SignatureVerifier()
 		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier)
 	}

@@ -54,6 +54,13 @@ var (
 	binaryFetchTimeout = flag.Duration("binary-fetch-timeout", envDuration("BINARY_FETCH_TIMEOUT"), "per-fetch timeout for downloading a workflow binary (e.g. 90s). 0 uses the enclave default. Reads BINARY_FETCH_TIMEOUT.")
 	maxCacheBytes      = flag.Int64("max-cache-bytes", envInt64("MAX_CACHE_BYTES"), "size bound in bytes of the enclave's verified-binary LRU cache. 0 uses the enclave default. Reads MAX_CACHE_BYTES.")
 
+	requestTimeout   = flag.Duration("request-timeout", envDuration("REQUEST_TIMEOUT"), "global request timeout inside the enclave, applied to outbound HTTP a workflow makes without its own timeout (e.g. 80s). 0 uses the enclave default. Reads REQUEST_TIMEOUT.")
+	gatewayTimeout   = flag.Duration("gateway-timeout", envDuration("GATEWAY_TIMEOUT"), "HTTP client timeout for enclave->gateway requests (secrets + capabilities), e.g. 75s. Should not exceed --request-timeout. 0 uses the enclave default. Reads GATEWAY_TIMEOUT.")
+	executionTimeout = flag.Duration("execution-timeout", envDuration("EXECUTION_TIMEOUT"), "wall-clock bound on a single workflow execution in the enclave (e.g. 80s), capping how long a runaway workflow holds an execution slot. 0 uses the WASM host default of 10m. Reads EXECUTION_TIMEOUT.")
+	// workflowGracePeriod delays the start of every validated execution. Negative
+	// disables the wait; 0 leaves the enclave default (2s) in place.
+	workflowGracePeriod = flag.Duration("workflow-grace-period", envDuration("WORKFLOW_GRACE_PERIOD"), "how long each workflow execution waits before it starts running (e.g. 2s). Negative disables the wait; 0 uses the enclave default. Reads WORKFLOW_GRACE_PERIOD.")
+
 	// settingsJSON, when set, overrides all the individual settings flags above:
 	// the host forwards this raw JSON to the enclave verbatim instead of building
 	// the payload from the typed flags. The enclave app owns the schema. Empty
@@ -999,16 +1006,22 @@ func main() {
 		payload = []byte(*settingsJSON)
 	} else {
 		settings := types.WorkflowSettings{
-			StorageKey:         *storageKey,
-			StorageServiceURL:  *storageSvcURL,
-			StorageServiceTLS:  *storageSvcTLS,
-			GatewayURL:         *gatewayURL,
-			MaxBinarySize:      *maxBinarySize,
-			BinaryFetchTimeout: *binaryFetchTimeout,
-			MaxCacheBytes:      *maxCacheBytes,
+			StorageKey:            *storageKey,
+			StorageServiceURL:     *storageSvcURL,
+			StorageServiceTLS:     *storageSvcTLS,
+			GatewayURL:            *gatewayURL,
+			MaxBinarySize:         *maxBinarySize,
+			BinaryFetchTimeout:    *binaryFetchTimeout,
+			MaxCacheBytes:         *maxCacheBytes,
+			RequestTimeout:        *requestTimeout,
+			GatewayRequestTimeout: *gatewayTimeout,
+			ExecutionTimeout:      *executionTimeout,
+			WorkflowGracePeriod:   *workflowGracePeriod,
 		}
 		if settings.StorageKey != "" || settings.StorageServiceURL != "" || settings.GatewayURL != "" ||
-			settings.MaxBinarySize != 0 || settings.BinaryFetchTimeout != 0 || settings.MaxCacheBytes != 0 {
+			settings.MaxBinarySize != 0 || settings.BinaryFetchTimeout != 0 || settings.MaxCacheBytes != 0 ||
+			settings.RequestTimeout != 0 || settings.GatewayRequestTimeout != 0 || settings.ExecutionTimeout != 0 ||
+			settings.WorkflowGracePeriod != 0 {
 			var err error
 			if payload, err = json.Marshal(settings); err != nil {
 				slog.Error("failed to marshal enclave settings", "error", err)

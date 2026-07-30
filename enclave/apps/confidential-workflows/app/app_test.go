@@ -396,6 +396,113 @@ func TestExecute_EngineTestWasm_RemoteGetSecrets(t *testing.T) {
 	}
 }
 
+// An execution that outlives the injected timeout is a caller-facing 504, not
+// an enclave failure, and it releases its execution slot instead of holding it
+// for the WASM host's 10-minute default.
+func TestExecute_ExecutionTimeout(t *testing.T) {
+	raw := buildTestWasm(t, "spin")
+	var compressed bytes.Buffer
+	w := brotli.NewWriter(&compressed)
+	_, err := w.Write(raw)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	binary := compressed.Bytes()
+	hash := sha256.Sum256(binary)
+
+	app, locator := newStorageBackedApp(t, binary)
+	settings, err := json.Marshal(types.WorkflowSettings{ExecutionTimeout: time.Second})
+	require.NoError(t, err)
+	require.NoError(t, app.(*confidentialWorkflowsApp).InjectSettings(settings))
+
+	execution := makeExecution(t, "wf-spin", locator, hash[:])
+	data, err := proto.Marshal(execution)
+	require.NoError(t, err)
+
+	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+	require.NotNil(t, execErr)
+	assert.Equal(t, http.StatusGatewayTimeout, execErr.Code)
+	assert.Contains(t, execErr.Error, context.DeadlineExceeded.Error())
+}
+
+// Every execution is held for the grace period before it starts; a negative
+// setting turns the wait off entirely.
+func TestExecute_GracePeriod(t *testing.T) {
+	raw := buildTestWasm(t, "hello")
+	var compressed bytes.Buffer
+	w := brotli.NewWriter(&compressed)
+	_, err := w.Write(raw)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	binary := compressed.Bytes()
+	hash := sha256.Sum256(binary)
+
+	run := func(t *testing.T, grace time.Duration) time.Duration {
+		t.Helper()
+		app, locator := newStorageBackedApp(t, binary)
+		settings, err := json.Marshal(types.WorkflowSettings{WorkflowGracePeriod: grace})
+		require.NoError(t, err)
+		require.NoError(t, app.(*confidentialWorkflowsApp).InjectSettings(settings))
+
+		execution := makeExecution(t, "wf-grace", locator, hash[:])
+		data, err := proto.Marshal(execution)
+		require.NoError(t, err)
+
+		start := time.Now()
+		_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+		require.Nil(t, execErr, "expected no error, got: %+v", execErr)
+		return time.Since(start)
+	}
+
+	t.Run("injected period is waited out", func(t *testing.T) {
+		assert.GreaterOrEqual(t, run(t, 500*time.Millisecond), 500*time.Millisecond)
+	})
+
+	t.Run("negative disables the wait", func(t *testing.T) {
+		assert.Less(t, run(t, -1), types.DefaultWorkflowGracePeriod)
+	})
+}
+
+// The host injects both timeouts over vsock; the gateway one reaches the
+// dispatcher factory and a zero leaves the factory's own fallback in charge.
+func TestInjectSettings_Timeouts(t *testing.T) {
+	newApp := func() (*confidentialWorkflowsApp, *time.Duration) {
+		var got time.Duration
+		a := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil,
+			WithRemoteDispatcherFactory(func(_ string, timeout time.Duration) RemoteDispatcher {
+				got = timeout
+				return &testRemoteDispatcher{}
+			}),
+		).(*confidentialWorkflowsApp)
+		return a, &got
+	}
+
+	inject := func(t *testing.T, a *confidentialWorkflowsApp, s types.WorkflowSettings) {
+		raw, err := json.Marshal(s)
+		require.NoError(t, err)
+		require.NoError(t, a.InjectSettings(raw))
+	}
+
+	t.Run("forwarded to the dispatcher factory", func(t *testing.T) {
+		a, got := newApp()
+		inject(t, a, types.WorkflowSettings{
+			GatewayURL:            "https://gateway.example.com",
+			RequestTimeout:        80 * time.Second,
+			GatewayRequestTimeout: 75 * time.Second,
+			ExecutionTimeout:      80 * time.Second,
+		})
+		assert.Equal(t, 75*time.Second, *got)
+		assert.Equal(t, int64(80*time.Second), a.executionTimeout.Load())
+	})
+
+	t.Run("omitted leaves the fallback to the factory", func(t *testing.T) {
+		a, got := newApp()
+		inject(t, a, types.WorkflowSettings{GatewayURL: "https://gateway.example.com"})
+		assert.Zero(t, *got)
+	})
+}
+
 // testRemoteDispatcher is a stub that returns pre-configured secrets and
 // optionally handles capability calls via onCallCapability.
 type testRemoteDispatcher struct {

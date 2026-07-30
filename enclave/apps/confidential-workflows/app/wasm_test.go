@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
@@ -44,11 +46,32 @@ func TestExecuteWasm_Hello(t *testing.T) {
 			Trigger: &sdkpb.Trigger{Id: 0, Payload: payload},
 		},
 	}
-	result, err := executeWasm(t.Context(), logger.Test(t), binary, execReq, false, &enclaveExecutionHelper{})
+	result, err := executeWasm(t.Context(), logger.Test(t), binary, execReq, false, &enclaveExecutionHelper{}, 0)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
 	errResult, ok := result.Result.(*sdkpb.ExecutionResult_Value)
 	require.True(t, ok, "expected error result, got %T", result.Result)
 	assert.Equal(t, "hello from enclave wasm", errResult.Value.GetStringValue())
+}
+
+// A workflow spinning in pure compute makes no host calls, so the module
+// timeout (wasmtime epoch deadline) is the only thing that can stop it. The
+// WASM host reports that as context.DeadlineExceeded.
+func TestExecuteWasm_Timeout(t *testing.T) {
+	binary := buildTestWasm(t, "spin")
+
+	payload, err := anypb.New(&basictrigger.Outputs{CoolOutput: "cool"})
+	require.NoError(t, err)
+	execReq := &sdkpb.ExecuteRequest{
+		Request: &sdkpb.ExecuteRequest_Trigger{
+			Trigger: &sdkpb.Trigger{Id: 0, Payload: payload},
+		},
+	}
+
+	start := time.Now()
+	result, err := executeWasm(t.Context(), logger.Test(t), binary, execReq, false, &enclaveExecutionHelper{}, time.Second)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Nil(t, result)
+	assert.Less(t, time.Since(start), 30*time.Second, "the epoch deadline should interrupt the guest promptly")
 }

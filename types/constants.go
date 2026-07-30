@@ -54,6 +54,11 @@ const (
 	// gateway.WithTimeout.
 	DefaultGatewayRequestTimeout = DefaultEnclaveRequestTimeout
 
+	// DefaultWorkflowGracePeriod is how long a validated execution waits before
+	// it starts running. Overridable per-deployment via WorkflowSettings
+	// (workflowGracePeriod); a negative setting disables the wait.
+	DefaultWorkflowGracePeriod = 2 * time.Second
+
 	// GatewayFailoverDelay is the wait inserted before failing over to the next
 	// gateway URL after a transport/proxy error. It gives a briefly-unhealthy
 	// gateway a moment to recover and avoids hammering the backends in a tight
