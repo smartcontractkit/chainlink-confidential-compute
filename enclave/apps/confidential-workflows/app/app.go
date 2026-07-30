@@ -45,6 +45,11 @@ type confidentialWorkflowsApp struct {
 	// so it is atomic rather than guarded by mu.
 	executionTimeout atomic.Int64
 
+	// gracePeriod is how long a validated execution waits before it starts
+	// running (nanoseconds; non-positive = no wait). Same reasoning as above for
+	// the atomic.
+	gracePeriod atomic.Int64
+
 	// Runtime config + secrets injected via InjectSettings (host over vsock). A
 	// Nitro EIF is measured (PCR), so environment-specific endpoints can't be
 	// baked in; the storage endpoint, the ed25519 storage key, and the gateway
@@ -135,6 +140,9 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	if req.ExecutionTimeout > 0 {
 		a.executionTimeout.Store(int64(req.ExecutionTimeout))
 	}
+	if req.WorkflowGracePeriod != 0 {
+		a.gracePeriod.Store(int64(req.WorkflowGracePeriod))
+	}
 
 	a.mu.Lock()
 	if req.StorageServiceURL != "" {
@@ -202,6 +210,7 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, _ types.
 		tpe:         tpe,
 		limiter:     newExecutionLimiter(0), // unbounded unless an option overrides
 	}
+	a.gracePeriod.Store(int64(types.DefaultWorkflowGracePeriod))
 	for _, opt := range opts {
 		opt(a)
 	}
@@ -263,6 +272,13 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 			Error: "execute_request is required",
 			Code:  http.StatusBadRequest,
 		}
+	}
+
+	// Hold every validated execution for the grace period before starting it.
+	// The execution slot is already taken at this point, so the wait costs
+	// throughput as well as latency.
+	if grace := time.Duration(a.gracePeriod.Load()); grace > 0 {
+		time.Sleep(grace)
 	}
 
 	emitter.Emit("workflow_execute_started", map[string]any{

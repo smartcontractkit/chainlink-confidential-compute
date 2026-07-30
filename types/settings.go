@@ -36,6 +36,9 @@ import "time"
 //     WASM module run). Caps how long a hung or runaway workflow holds one of
 //     the enclave's bounded execution slots. Zero falls back to the WASM host's
 //     built-in default, which is 10 minutes.
+//   - WorkflowGracePeriod: how long each validated execution waits before it
+//     starts running. Zero falls back to DefaultWorkflowGracePeriod; a negative
+//     value disables the wait.
 //
 // TODO: this type lives here only so the host can build the payload from its
 // individual settings flags. Once those flags are deprecated in favor of the
@@ -53,4 +56,5 @@ type WorkflowSettings struct {
 	RequestTimeout        time.Duration `json:"requestTimeout,omitempty"`
 	GatewayRequestTimeout time.Duration `json:"gatewayRequestTimeout,omitempty"`
 	ExecutionTimeout      time.Duration `json:"executionTimeout,omitempty"`
+	WorkflowGracePeriod   time.Duration `json:"workflowGracePeriod,omitempty"`
 }

@@ -425,6 +425,45 @@ func TestExecute_ExecutionTimeout(t *testing.T) {
 	assert.Contains(t, execErr.Error, context.DeadlineExceeded.Error())
 }
 
+// Every execution is held for the grace period before it starts; a negative
+// setting turns the wait off entirely.
+func TestExecute_GracePeriod(t *testing.T) {
+	raw := buildTestWasm(t, "hello")
+	var compressed bytes.Buffer
+	w := brotli.NewWriter(&compressed)
+	_, err := w.Write(raw)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	binary := compressed.Bytes()
+	hash := sha256.Sum256(binary)
+
+	run := func(t *testing.T, grace time.Duration) time.Duration {
+		t.Helper()
+		app, locator := newStorageBackedApp(t, binary)
+		settings, err := json.Marshal(types.WorkflowSettings{WorkflowGracePeriod: grace})
+		require.NoError(t, err)
+		require.NoError(t, app.(*confidentialWorkflowsApp).InjectSettings(settings))
+
+		execution := makeExecution(t, "wf-grace", locator, hash[:])
+		data, err := proto.Marshal(execution)
+		require.NoError(t, err)
+
+		start := time.Now()
+		_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+		require.Nil(t, execErr, "expected no error, got: %+v", execErr)
+		return time.Since(start)
+	}
+
+	t.Run("injected period is waited out", func(t *testing.T) {
+		assert.GreaterOrEqual(t, run(t, 500*time.Millisecond), 500*time.Millisecond)
+	})
+
+	t.Run("negative disables the wait", func(t *testing.T) {
+		assert.Less(t, run(t, -1), types.DefaultWorkflowGracePeriod)
+	})
+}
+
 // The host injects both timeouts over vsock; the gateway one reaches the
 // dispatcher factory and a zero leaves the factory's own fallback in charge.
 func TestInjectSettings_Timeouts(t *testing.T) {
