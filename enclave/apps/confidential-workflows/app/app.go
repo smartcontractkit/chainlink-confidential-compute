@@ -3,17 +3,20 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/host"
-	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -37,6 +40,11 @@ type confidentialWorkflowsApp struct {
 	// is set (the nitro entrypoint derives a limit from enclave memory).
 	limiter *executionLimiter
 
+	// executionTimeout bounds a single WASM run (nanoseconds; 0 = the WASM
+	// host's own default). Injected via InjectSettings, read on every Execute,
+	// so it is atomic rather than guarded by mu.
+	executionTimeout atomic.Int64
+
 	// Runtime config + secrets injected via InjectSettings (host over vsock). A
 	// Nitro EIF is measured (PCR), so environment-specific endpoints can't be
 	// baked in; the storage endpoint, the ed25519 storage key, and the gateway
@@ -45,8 +53,8 @@ type confidentialWorkflowsApp struct {
 	storageServiceURL string // startup default (fake/tests); an injected URL overrides
 	storageServiceTLS bool
 	storageFetcher    RawFetcher
-	dispatcher        RemoteDispatcher                         // nil = local mode
-	dispatcherFactory func(gatewayURL string) RemoteDispatcher // builds dispatcher on first GatewayURL injection
+	dispatcher        RemoteDispatcher                                                // nil = local mode
+	dispatcherFactory func(gatewayURL string, timeout time.Duration) RemoteDispatcher // builds dispatcher on first GatewayURL injection
 	lastConfig        types.EnclaveConfig
 	haveConfig        bool
 }
@@ -67,10 +75,11 @@ func WithRemoteDispatcher(d RemoteDispatcher) Option {
 }
 
 // WithRemoteDispatcherFactory supplies a builder that constructs the remote
-// dispatcher from a Gateway URL injected at runtime (via InjectSettings). The
-// measured EIF can't bake the gateway URL, so the nitro/fake mains pass a
-// factory here and the dispatcher is created when the host injects the URL.
-func WithRemoteDispatcherFactory(f func(gatewayURL string) RemoteDispatcher) Option {
+// dispatcher from a Gateway URL and client timeout injected at runtime (via
+// InjectSettings). The measured EIF can't bake the gateway URL, so the
+// nitro/fake mains pass a factory here and the dispatcher is created when the
+// host injects the URL. A non-positive timeout means the caller's own default.
+func WithRemoteDispatcherFactory(f func(gatewayURL string, timeout time.Duration) RemoteDispatcher) Option {
 	return func(a *confidentialWorkflowsApp) {
 		a.dispatcherFactory = f
 	}
@@ -95,7 +104,6 @@ func WithStorageService(url string, tls bool) Option {
 	}
 }
 
-
 // WithMaxConcurrentExecutions bounds concurrent Execute calls to n; n <= 0 means
 // unbounded. The nitro entrypoint derives n from enclave memory so a burst of
 // executions can't exhaust the fixed enclave memory and wedge the VM. fake/local
@@ -110,10 +118,10 @@ func WithMaxConcurrentExecutions(n int64) Option {
 // unmarshals the fields this app uses, and wires up whatever arrived: the
 // storage fetcher (once both the endpoint and the ed25519 key are known) and, on
 // the first gateway URL, the remote dispatcher (via the factory). Fetcher
-// tunables (max binary size, fetch timeout, cache size) are applied when
-// present, falling back to the defaults in constants.go. An injected
-// StorageServiceURL overrides the startup default. Safe to call again (e.g. key
-// rotation).
+// tunables (max binary size, fetch timeout, cache size) and the timeouts
+// (global request, gateway client, workflow execution) are applied when present,
+// falling back to the built-in defaults. An injected StorageServiceURL overrides
+// the startup default. Safe to call again (e.g. key rotation).
 func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	var req types.WorkflowSettings
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -121,6 +129,12 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	}
 
 	a.fetcher.SetMaxCacheBytes(int(req.MaxCacheBytes))
+	if a.httpFetcher != nil {
+		a.httpFetcher.SetDefaultTimeout(req.RequestTimeout)
+	}
+	if req.ExecutionTimeout > 0 {
+		a.executionTimeout.Store(int64(req.ExecutionTimeout))
+	}
 
 	a.mu.Lock()
 	if req.StorageServiceURL != "" {
@@ -150,7 +164,7 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	if req.GatewayURL != "" {
 		a.mu.Lock()
 		if a.dispatcher == nil && a.dispatcherFactory != nil {
-			d := a.dispatcherFactory(req.GatewayURL)
+			d := a.dispatcherFactory(req.GatewayURL, req.GatewayRequestTimeout)
 			if a.haveConfig {
 				// Config may have arrived before credentials; apply it now so the
 				// freshly built dispatcher has the vault's MasterPublicKey/T.
@@ -303,11 +317,27 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		Owner:    execution.GetOwner(),
 		Workflow: execution.WorkflowId,
 	})
-	result, err := executeWasm(execCtx, a.logger, binary, execution.SdkExecuteRequest, true, helper)
+	// Both bounds come from the same setting: the ctx deadline unblocks host-side
+	// capability and secrets calls, while the module timeout is what actually
+	// interrupts the guest.
+	execTimeout := time.Duration(a.executionTimeout.Load())
+	if execTimeout > 0 {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(execCtx, execTimeout)
+		defer cancel()
+	}
+	result, err := executeWasm(execCtx, a.logger, binary, execution.SdkExecuteRequest, true, helper, execTimeout)
 	if err != nil {
+		// A timed-out execution is a caller-facing condition, not an enclave
+		// failure: the WASM host normalizes its epoch deadline to
+		// context.DeadlineExceeded.
+		code := http.StatusInternalServerError
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = http.StatusGatewayTimeout
+		}
 		return nil, &types.ExecuteError{
 			Error: fmt.Sprintf("executing wasm: %s", err.Error()),
-			Code:  http.StatusInternalServerError,
+			Code:  code,
 		}
 	}
 

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	httpcap "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http"
@@ -55,10 +56,14 @@ type httpDoer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
-// Fetcher executes outbound HTTP requests according to a fixed Policy.
+// Fetcher executes outbound HTTP requests according to a fixed Policy. The
+// default timeout is held separately as an atomic because it is the one knob the
+// host can move at runtime (injected over vsock), while a Fetcher is shared
+// across concurrent executions.
 type Fetcher struct {
-	client httpDoer
-	policy Policy
+	client         httpDoer
+	policy         Policy
+	defaultTimeout atomic.Int64 // nanoseconds
 }
 
 // NewFetcher builds a Fetcher on top of the shared restricted HTTP client
@@ -81,10 +86,22 @@ func NewFetcher(policy Policy) *Fetcher {
 // Production code should use NewFetcher; this exists for tests that need to
 // reach endpoints the restricted client blocks (e.g. loopback test servers).
 func NewFetcherWithClient(policy Policy, client httpDoer) *Fetcher {
-	return &Fetcher{
+	f := &Fetcher{
 		client: client,
 		policy: policy,
 	}
+	f.defaultTimeout.Store(int64(policy.DefaultTimeout))
+	return f
+}
+
+// SetDefaultTimeout updates the deadline applied to requests that carry no
+// caller-supplied timeout. A non-positive value is ignored, leaving the policy
+// default in place.
+func (f *Fetcher) SetDefaultTimeout(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	f.defaultTimeout.Store(int64(d))
 }
 
 // Fetch executes a single HTTP request. On success the returned Response has
@@ -104,7 +121,7 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request) (*httpcap.Resp
 		return nil, errors.New("url is empty")
 	}
 
-	timeout := resolveTimeout(in.GetTimeout(), f.policy.DefaultTimeout)
+	timeout := resolveTimeout(in.GetTimeout(), time.Duration(f.defaultTimeout.Load()))
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
