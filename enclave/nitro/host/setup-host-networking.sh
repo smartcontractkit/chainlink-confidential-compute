@@ -50,12 +50,13 @@ if [ "$SKIP_WIREGUARD_SETUP" = "false" ]; then
     echo
 
     # Kill any previously running instance and remove stale interface
-    sudo killall -q wireguard-go-vsock || true
+    sudo pkill -f wireguard-go-vsock || true
     sudo ip link delete wg0 2>/dev/null || true
 
-    # Configure the WireGuard interface using wireguard-go-vsock
-    echo "Starting wireguard-go-vsock..."
-    sudo ${NITRO_PATH}/wireguard-go-vsock wg0
+    # Configure the WireGuard interface using the binary for this host's architecture
+    WG_VSOCK_BIN="${NITRO_PATH}/wireguard-go-vsock-$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')"
+    echo "Starting ${WG_VSOCK_BIN}..."
+    sudo "${WG_VSOCK_BIN}" wg0
 
     # Set the WireGuard interface IP addresses
     HOST_IP=100.64.0.$HOST_CID
