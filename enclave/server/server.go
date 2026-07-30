@@ -56,6 +56,24 @@ type enclaveServer struct {
 	// attestationGroup collapses concurrent pubKeyAttestations misses for the
 	// same content into a single NSM attestation.
 	attestationGroup singleflight.Group
+	// limiter bounds concurrent app executions. Unbounded unless
+	// WithMaxConcurrentExecutions is passed; /memory reports its limit and
+	// occupancy so the host can see what this enclave will admit.
+	limiter *executionLimiter
+}
+
+// Option configures optional enclave-server behavior.
+type Option func(*enclaveServer)
+
+// WithMaxConcurrentExecutions bounds concurrent app executions to n; n <= 0 means
+// unbounded. Only an entrypoint that can see the enclave's memory can pick n (the
+// nitro confidential-workflows main derives it from total RAM), so it is supplied
+// here rather than computed by the server. fake/local runs and tests stay
+// unbounded.
+func WithMaxConcurrentExecutions(n int64) Option {
+	return func(s *enclaveServer) {
+		s.limiter = newExecutionLimiter(n)
+	}
 }
 
 type RequestTemplate struct {
@@ -76,6 +94,7 @@ func NewEnclaveServer(
 	emitter types.Emitter,
 	config types.EnclaveConfig,
 	allowReconfig bool,
+	opts ...Option,
 ) *enclaveServer {
 	replayCacheTTL := types.DefaultKeypairExpiration
 	inProgressReqs := util.NewBoundedCache[struct{}](&replayCacheTTL, nil, types.MaxReplayCacheEntries)
@@ -85,7 +104,7 @@ func NewEnclaveServer(
 	pubKeyAttestationTTL := types.PublicKeyAttestationCacheTTL
 	pubKeyAttestations := util.NewCache[[]byte](&pubKeyAttestationTTL, nil)
 
-	return &enclaveServer{
+	s := &enclaveServer{
 		app:                app,
 		attestor:           attestor,
 		logger:             logger,
@@ -99,7 +118,12 @@ func NewEnclaveServer(
 		executedReqs:       executedReqs,
 		pendingConfigVotes: pendingConfigVotes,
 		pubKeyAttestations: pubKeyAttestations,
+		limiter:            newExecutionLimiter(0), // unbounded unless an option overrides
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Handler returns the HTTP handler for the enclave server.
@@ -243,6 +267,11 @@ func (s *enclaveServer) attestPublicKeys(dataToAttest [32]byte) ([]byte, error) 
 // wasmtime WASM linear memory. The megabyte granularity is deliberate: it is a
 // coarse operational signal, and the rounding limits the resolution of any
 // memory-based side channel into the confidential workload.
+//
+// It also reports the execution limit this server admits to and how much of it
+// is occupied. The limit is derived from memory only the enclave observes, so
+// this endpoint is how the host learns what the enclave will admit rather than
+// inferring it from a 429.
 func (s *enclaveServer) handleMemory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, fmt.Sprintf("method not allowed: %v", r.Method), http.StatusMethodNotAllowed)
@@ -250,8 +279,10 @@ func (s *enclaveServer) handleMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := types.MemoryEstimateResponse{
-		UsedMB: bytesToMB(readRuntimeMemoryBytes()),
-		RSSMB:  bytesToMB(readProcessRSSBytes()),
+		UsedMB:                  bytesToMB(readRuntimeMemoryBytes()),
+		RSSMB:                   bytesToMB(readProcessRSSBytes()),
+		MaxConcurrentExecutions: s.limiter.capacity(),
+		InFlightExecutions:      s.limiter.inFlight(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -717,6 +748,19 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		"num_ciphertexts":  len(req.Ciphertexts),
 	})
 
+	// Bound concurrent executions so a burst can't exhaust the enclave's fixed
+	// memory and wedge the VM, failing fast when full rather than piling on. This
+	// sits after the in-progress and replay checks, so the duplicate dispatches the
+	// DON sends for a single request are already 409'd and never take a slot.
+	if !s.limiter.tryAcquire() {
+		responseEmitter.Emit("execution_rejected_at_capacity", map[string]any{
+			"max_concurrent": s.limiter.capacity(),
+		})
+		responseEmitter.WriteErrorResponse(w, "enclave at capacity: too many concurrent executions", http.StatusTooManyRequests)
+		return
+	}
+	defer s.limiter.release()
+
 	appExecStart := time.Now()
 	// Forward the full F+1 signed batch to the app; confidential-workflows relays it
 	// to the relay DON as the authorization for any secrets requests.
@@ -728,9 +772,10 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		responseEmitter.Emit("app_execution_failed", map[string]any{
 			"error": execErr,
 		})
-		// Relay the app's own classification (400 malformed, 429 at capacity) rather
-		// than calling every app failure an enclave fault. WriteHeader panics
-		// outside 100-999, so an unset or non-error Code falls back to 500.
+		// Relay the app's own classification (400 for a malformed request, 502 for a
+		// failed upstream) rather than calling every app failure an enclave fault.
+		// WriteHeader panics outside 100-999, so an unset or non-error Code falls
+		// back to 500.
 		status := execErr.Code
 		if status < 400 || status > 599 {
 			status = http.StatusInternalServerError

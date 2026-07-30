@@ -106,7 +106,7 @@ func encryptShare(data []byte, publicKeyBytes []byte) ([]byte, error) {
 	return box.SealAnonymous(nil, data, &publicKey, nil)
 }
 
-func setupTestServerWithMockApp(t *testing.T, mockApp types.EnclaveApp) string {
+func setupTestServerWithMockApp(t *testing.T, mockApp types.EnclaveApp, opts ...Option) string {
 	verifier := signatureverifier.NewEd25519SignatureVerifier()
 
 	// Create a test server with TCP listener
@@ -124,6 +124,7 @@ func setupTestServerWithMockApp(t *testing.T, mockApp types.EnclaveApp) string {
 		emitter.NewNoOpEmitter(),
 		types.EnclaveConfig{},
 		false,
+		opts...,
 	)
 
 	go func() {
@@ -624,6 +625,10 @@ func TestHandleMemory(t *testing.T) {
 	// running process always has some memory mapped.
 	assert.Positive(t, mem.UsedMB)
 
+	// A server built without a limit is unbounded, which reads as 0.
+	assert.Zero(t, mem.MaxConcurrentExecutions)
+	assert.Zero(t, mem.InFlightExecutions)
+
 	// Non-GET methods are rejected.
 	req, err = http.NewRequest(http.MethodPost, serverURL+types.MemoryPath, nil)
 	require.NoError(t, err)
@@ -631,6 +636,143 @@ func TestHandleMemory(t *testing.T) {
 	require.NoError(t, err)
 	defer util.SafeClose(resp)
 	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+}
+
+// The limit exists so a burst can't exhaust the enclave's fixed memory, and the
+// host can only learn it by asking. Both halves are checked through the HTTP
+// surface: /memory reports the limit and the live occupancy, and an execution
+// that arrives with every slot held is rejected with 429 instead of piling on.
+func TestHandleExecute_AtCapacity(t *testing.T) {
+	t.Parallel()
+
+	// Buffered so an unexpected extra admission fails the 429 assertion rather
+	// than deadlocking the app in an unreceived send.
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	mockApp := newMockEnclaveApp()
+	mockApp.executeFunc = func([32]byte, string, []byte, map[string][]byte, types.Emitter) ([]byte, *types.ExecuteError) {
+		entered <- struct{}{}
+		<-release
+		return []byte("done"), nil
+	}
+
+	serverURL := setupTestServerWithMockApp(t, mockApp, WithMaxConcurrentExecutions(1))
+	client := &http.Client{}
+
+	// Configure with a signer we hold the key for, so batches can be signed.
+	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	testConfig := types.EnclaveConfig{
+		Signers:         [][]byte{pubKey},
+		MasterPublicKey: []byte("master-public-key"),
+		T:               1,
+		F:               0,
+	}
+	configBytes, err := json.Marshal(testConfig)
+	require.NoError(t, err)
+	configBody, err := json.Marshal(types.ConfigRequest{Config: configBytes})
+	require.NoError(t, err)
+	configReq, err := http.NewRequest(http.MethodPost, serverURL+"/config", bytes.NewReader(configBody))
+	require.NoError(t, err)
+	configReq.Header.Set("Content-Type", "application/json")
+	configResp, err := client.Do(configReq)
+	require.NoError(t, err)
+	util.SafeClose(configResp)
+	require.Equal(t, http.StatusOK, configResp.StatusCode)
+
+	// The enclave decrypts with the keypair the request names, so a batch has to
+	// carry the server's current public key.
+	pkResp, err := client.Get(serverURL + "/publicKeys")
+	require.NoError(t, err)
+	var pkBody types.PublicKeyResponse
+	err = json.NewDecoder(pkResp.Body).Decode(&pkBody)
+	util.SafeClose(pkResp)
+	require.NoError(t, err)
+	require.NotEmpty(t, pkBody.PublicKeys)
+
+	// No ciphertexts: this test is about admission, not share combining.
+	newBatch := func(name string) io.Reader {
+		t.Helper()
+		computeReq := types.ComputeRequest{
+			RequestID:                 sha256.Sum256([]byte(name)),
+			PublicData:                []byte("{}"),
+			MasterPublicKey:           testConfig.MasterPublicKey,
+			EnclaveEphemeralPublicKey: pkBody.PublicKeys[0],
+			AppID:                     "test-app",
+			Version:                   "1.0.0",
+		}
+		hash := computeReq.Hash()
+		prefixed := types.MakePeerIDSignatureDomainSeparatedPayload(util.GetConfidentialComputePayloadPrefix(), hash[:])
+		batch, err := json.Marshal([]types.SignedComputeRequest{{
+			ComputeRequest: computeReq,
+			Signature:      ed25519.Sign(privKey, prefixed[:]),
+		}})
+		require.NoError(t, err)
+		return bytes.NewReader(batch)
+	}
+	post := func(body io.Reader) (*http.Response, error) {
+		req, err := http.NewRequest(http.MethodPost, serverURL+"/requests", body)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return client.Do(req)
+	}
+
+	// Occupy the only slot, then read the endpoint the host reads.
+	type postResult struct {
+		resp *http.Response
+		err  error
+	}
+	firstCh := make(chan postResult, 1)
+	firstBody := newBatch("first")
+	go func() {
+		resp, err := post(firstBody)
+		firstCh <- postResult{resp, err}
+	}()
+	<-entered
+
+	memResp, err := client.Get(serverURL + types.MemoryPath)
+	require.NoError(t, err)
+	var mem types.MemoryEstimateResponse
+	err = json.NewDecoder(memResp.Body).Decode(&mem)
+	util.SafeClose(memResp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), mem.MaxConcurrentExecutions)
+	assert.Equal(t, int64(1), mem.InFlightExecutions, "the running execution should hold the only slot")
+
+	// A second execution arrives with nothing free.
+	rejected, err := post(newBatch("second"))
+	require.NoError(t, err)
+	defer util.SafeClose(rejected)
+	assert.Equal(t, http.StatusTooManyRequests, rejected.StatusCode)
+
+	// A duplicate of the running batch is turned away by the in-progress claim,
+	// not by the limiter, so it must not disturb occupancy: 409, still 1 in flight.
+	duplicate, err := post(newBatch("first"))
+	require.NoError(t, err)
+	defer util.SafeClose(duplicate)
+	assert.Equal(t, http.StatusConflict, duplicate.StatusCode)
+	memResp, err = client.Get(serverURL + types.MemoryPath)
+	require.NoError(t, err)
+	err = json.NewDecoder(memResp.Body).Decode(&mem)
+	util.SafeClose(memResp)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), mem.InFlightExecutions, "a 409'd duplicate must not consume a slot")
+
+	close(release)
+	first := <-firstCh
+	require.NoError(t, first.err)
+	defer util.SafeClose(first.resp)
+	assert.Equal(t, http.StatusOK, first.resp.StatusCode)
+
+	// 429 must be transient: the rejected batch is unmarked and admitted once the
+	// slot frees. If a future change marked it executed or left its in-progress
+	// claim behind, saturation would become permanent per-request failure.
+	retried, err := post(newBatch("second"))
+	require.NoError(t, err)
+	defer util.SafeClose(retried)
+	assert.Equal(t, http.StatusOK, retried.StatusCode, "a batch rejected at capacity must succeed on retry")
 }
 
 // configureTestServer POSTs a minimal non-zero config so the server will serve
