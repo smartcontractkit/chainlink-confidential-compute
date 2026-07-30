@@ -27,9 +27,12 @@ func (f *fakeTimeoutGetter) GetScoped(context.Context, settings.Scope, string) (
 	return f.value, f.err
 }
 
-func TestApplyLimitSettings_OverlaysExecutorConfigSettings(t *testing.T) {
+func TestApplyLimitSettings_IgnoresDeprecatedJobSpecConfig(t *testing.T) {
 	t.Parallel()
 
+	// The job-spec sets several deprecated Config fields, but they are no longer read:
+	// cresettings are authoritative, so applyLimitSettings resolves the limits defaults
+	// and the job-spec values are ignored.
 	parsed, err := framework.ParseConfig(`{
 		"InsecureSkipTLSVerify": true,
 		"EnclaveRefreshIntervalSeconds": 30,
@@ -47,12 +50,12 @@ func TestApplyLimitSettings_OverlaysExecutorConfigSettings(t *testing.T) {
 	)
 	exec.ApplyLimitSettingsForTesting(context.Background(), parsed)
 
-	assert.True(t, parsed.InsecureSkipTLSVerify, "deprecated job-spec override wins for InsecureSkipTLSVerify")
-	assert.Equal(t, 30*time.Second, parsed.EnclaveRefreshInterval, "deprecated job-spec override wins for refresh interval")
-	assert.False(t, parsed.CacheConfig.EnableCache, "deprecated job-spec override wins for EnableCache")
-	assert.Equal(t, 120*time.Second, parsed.CacheConfig.DefaultTTL, "deprecated job-spec override wins for CacheTTLSeconds")
-	assert.False(t, parsed.SessionConfig.EnableSessionPersistence, "deprecated job-spec override wins for EnableSessionPersistence")
-	assert.Equal(t, "Custom-Session", parsed.SessionConfig.SessionHeaderName, "deprecated job-spec override wins for SessionHeaderName")
+	assert.False(t, parsed.InsecureSkipTLSVerify, "job-spec value ignored; cresettings default wins")
+	assert.Equal(t, 10*time.Second, parsed.EnclaveRefreshInterval, "job-spec value ignored; cresettings default wins")
+	assert.True(t, parsed.CacheConfig.EnableCache, "job-spec value ignored; cresettings default wins")
+	assert.Equal(t, 5*time.Minute, parsed.CacheConfig.DefaultTTL, "job-spec value ignored; cresettings default wins")
+	assert.True(t, parsed.SessionConfig.EnableSessionPersistence, "job-spec value ignored; cresettings default wins")
+	assert.Equal(t, "Sticky-Session-A", parsed.SessionConfig.SessionHeaderName, "job-spec value ignored; cresettings default wins")
 }
 
 func TestApplyLimitSettings_UsesLimitsDefaultsWhenJobSpecUnset(t *testing.T) {
@@ -79,6 +82,8 @@ func TestApplyLimitSettings_UsesLimitsDefaultsWhenJobSpecUnset(t *testing.T) {
 func TestApplyLimitSettings_OverlaysRequestTimeouts(t *testing.T) {
 	t.Parallel()
 
+	// Even though the job-spec sets timeouts, they are ignored; the timeouts come from
+	// the limits settings (cresettings) resolved in applyLimitSettings.
 	parsed, err := framework.ParseConfig(`{"EnclaveRequestTimeoutSeconds": 45, "PublicKeyRequestTimeoutSeconds": 9}`)
 	require.NoError(t, err)
 
@@ -91,8 +96,8 @@ func TestApplyLimitSettings_OverlaysRequestTimeouts(t *testing.T) {
 
 	exec.ApplyLimitSettingsForTesting(context.Background(), parsed)
 
-	assert.Equal(t, 45*time.Second, parsed.EnclaveRequestTimeout, "deprecated job-spec override wins for enclave timeout")
-	assert.Equal(t, 9*time.Second, parsed.PublicKeyRequestTimeout, "deprecated job-spec override wins for public key timeout")
+	assert.Equal(t, 100*time.Millisecond, parsed.EnclaveRequestTimeout, "timeout comes from limits, not the job-spec")
+	assert.Equal(t, 100*time.Millisecond, parsed.PublicKeyRequestTimeout, "timeout comes from limits, not the job-spec")
 }
 
 func TestResolveRequestTimeout_ReadsLimitsPerCall(t *testing.T) {

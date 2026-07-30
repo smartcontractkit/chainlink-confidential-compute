@@ -154,6 +154,7 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
 	t.Setenv("STORAGE_SERVICE_URL", storageAddr)
 	t.Setenv("STORAGE_SERVICE_TLS", "false")
 	t.Setenv("STORAGE_KEY", engineTestStorageKeyHex)
+	t.Setenv("REQUIRE_BFT_QUORUM", "true")
 
 	// enclaveHostAddr resolves to loopback for fake enclaves (local processes)
 	// and the Nitro wg0 host IP (100.64.0.3) for real enclaves.

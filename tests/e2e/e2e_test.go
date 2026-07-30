@@ -34,6 +34,12 @@ import (
 	capabilitiespb "github.com/smartcontractkit/chainlink-common/pkg/capabilities/pb"
 	jsonrpc "github.com/smartcontractkit/chainlink-common/pkg/jsonrpc2"
 	gateway_common "github.com/smartcontractkit/chainlink-common/pkg/types/gateway"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
+	"github.com/smartcontractkit/chainlink-confidential-compute/tests"
+	creEnvironment "github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/environment"
+	creJob "github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/job"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	capabilities_registry_wrapper_v2 "github.com/smartcontractkit/chainlink-evm/gethwrappers/workflow/generated/capabilities_registry_wrapper_v2"
 	workflow_registry_v2_wrapper "github.com/smartcontractkit/chainlink-evm/gethwrappers/workflow/generated/workflow_registry_wrapper_v2"
 	"github.com/smartcontractkit/chainlink-protos/cre/go/values"
@@ -44,12 +50,6 @@ import (
 	libcrypto "github.com/smartcontractkit/chainlink/system-tests/lib/crypto"
 	"github.com/smartcontractkit/chainlink/v2/core/capabilities/vault/vaultutils"
 	chainlink_utils "github.com/smartcontractkit/chainlink/v2/core/utils"
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
-	"github.com/smartcontractkit/chainlink-confidential-compute/tests"
-	creEnvironment "github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/environment"
-	creJob "github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/job"
-	"github.com/smartcontractkit/chainlink-confidential-compute/types"
-	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"github.com/smartcontractkit/tdh2/go/tdh2/tdh2easy"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -1096,7 +1096,7 @@ func mustInitializeCapabilitySetup(
 		// workflow-don.toml is a 4-node DON with F=1. Pass don.F here;
 		// setEnclaveConfig derives the enclave's F = 2*don.F to match the
 		// relay-DON quorum (see the note there).
-		setEnclaveConfig(t, configURLs[i], p2pIDs, vaultPublicKey, 1, useLegacyEnclaves)
+		setEnclaveConfig(t, configURLs[i], p2pIDs, vaultPublicKey, uint32(len(workers)/3), useLegacyEnclaves)
 	}
 
 	return testEnv
@@ -1304,7 +1304,7 @@ func setEnclaveConfig(t *testing.T, configURL string, p2pIDs [][]byte, vaultPubl
 		Signers:         signers,
 		MasterPublicKey: pubKey,
 		T:               2*f + 1,
-		F:               f,
+		F:               2*f + 1,
 	})
 }
 
