@@ -83,7 +83,9 @@ RUN echo "refclock PHC /dev/ptp0 poll 0 offset 0 prefer" > /etc/chrony.conf && \
 # Create directory structure for WireGuard keys.
 RUN mkdir -p /etc/wireguard
 
-COPY enclave/nitro/wireguard-go-vsock /usr/bin/
+# TARGETARCH is set automatically by buildx (amd64 / arm64).
+ARG TARGETARCH
+COPY enclave/nitro/wireguard-go-vsock-${TARGETARCH} /usr/bin/wireguard-go-vsock
 COPY enclave/nitro/outbound-https/setup-enclave-networking.sh /usr/bin/
 
 RUN chmod +x /usr/bin/wireguard-go-vsock /usr/bin/setup-enclave-networking.sh

@@ -138,8 +138,8 @@ echo " - Private key: ${SK_ENCLAVE}"
 echo " - Public key:  ${PK_ENCLAVE}"
 echo
 
-# Make wireguard-go-vsock executable if it isn't
-chmod +x ${NITRO_PATH}/wireguard-go-vsock
+# Make the wireguard-go-vsock binary for this host's architecture executable
+chmod +x ${NITRO_PATH}/wireguard-go-vsock-$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
 
 # Build host application only if not skipping build
 if [ "$SKIP_IMAGE_BUILD" = "false" ]; then

@@ -31,10 +31,18 @@ jobs:
   build-image:
     needs: check-label
     if: needs.check-label.outputs.has-deploy-label == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout repository
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
@@ -60,17 +68,18 @@ jobs:
         with:
           context: .
           file: enclave/nitro/host/Dockerfile
-          outputs: type=docker,dest=/tmp/host-image.tar
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=docker,dest=/tmp/host-image-${{ matrix.arch }}.tar
           tags: enclave-host:latest
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=host-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=host-${{ matrix.arch }},ignore-error=true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: host-image
-          path: /tmp/host-image.tar
+          name: host-image-${{ matrix.arch }}
+          path: /tmp/host-image-${{ matrix.arch }}.tar
           retention-days: 1
 
   push-image:
@@ -90,16 +99,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download artifact
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
+
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: host-image
-          path: /tmp
-
-      - name: Load Docker image
-        run: |
-          docker load --input /tmp/host-image.tar
-          docker image ls -a
+          pattern: host-image-*
+          path: /tmp/artifacts
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@be2e7ad815e27b890489a89ce2717b0f9e26b56e
@@ -125,15 +132,12 @@ jobs:
             type=sha,prefix=host-sha-
             type=ref,event=tag,prefix=host-
 
-      - name: Tag and Push Docker image
-        run: |
-          echo "${{ steps.meta.outputs.tags }}" | while read -r tag; do
-            if [ -n "$tag" ]; then
-              echo "Tagging and pushing $tag"
-              docker tag enclave-host:latest "$tag"
-              docker push "$tag"
-            fi
-          done
+      - name: Push multi-arch Docker image
+        env:
+          LOCAL_IMAGE: enclave-host:latest
+          TARBALL_FMT: /tmp/artifacts/host-image-{arch}/host-image-{arch}.tar
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: .github/scripts/push-multiarch-image.sh
 
       - name: Save image details
         if: matrix.account == '312157985241'
@@ -142,3 +146,4 @@ jobs:
           FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)
           echo "### Docker Image" >> $GITHUB_STEP_SUMMARY
           echo "Pushed to: $FIRST_TAG (and other accounts)" >> $GITHUB_STEP_SUMMARY
+          echo "Architectures: linux/amd64, linux/arm64 (multi-arch manifest)" >> $GITHUB_STEP_SUMMARY
