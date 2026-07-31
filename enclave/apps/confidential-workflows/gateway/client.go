@@ -51,12 +51,22 @@ func NewGatewayClient(gatewayURLs string, att attestor.Attestor, opts ...Option)
 	c := &GatewayClient{
 		gatewayURLs: parseGatewayURLs(gatewayURLs),
 		attestor:    att,
-		httpClient:  &http.Client{Timeout: types.DefaultGatewayRequestTimeout},
+		httpClient: &http.Client{
+			Timeout:   types.DefaultGatewayRequestTimeout,
+			Transport: newTransport(),
+		},
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
 	return c
+}
+
+// disable connection reuse
+func newTransport() *http.Transport {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DisableKeepAlives = true
+	return tr
 }
 
 // parseGatewayURLs splits a comma-separated list, trimming whitespace and
