@@ -51,6 +51,17 @@ func TestNewGatewayClient_SetsTimeout(t *testing.T) {
 	}
 }
 
+func TestNewGatewayClient_DisablesKeepAlives(t *testing.T) {
+	client := NewGatewayClient("https://gateway.example", nil)
+	transport, ok := client.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("httpClient.Transport = %T, want *http.Transport", client.httpClient.Transport)
+	}
+	if !transport.DisableKeepAlives {
+		t.Error("DisableKeepAlives = false, want true")
+	}
+}
+
 func TestNewGatewayClient_WithTimeout(t *testing.T) {
 	client := NewGatewayClient("https://gateway.example", nil, WithTimeout(45*time.Second))
 	if client.httpClient.Timeout != 45*time.Second {

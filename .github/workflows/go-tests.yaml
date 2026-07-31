@@ -23,7 +23,7 @@ on:
 env:
   CHAINLINK_COMMIT_SHA: 2ab54efc0fd36af09def92fba496f3deab0bcf1f
   LEGACY_COMMIT_SHA: 7d70fcf65d8b5af102d8267b54d31ea163dea203 # initial commit, the commit pointing to whatever is capability gitref is deployed in Chainlink's plugins.private.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.private.yaml#L50.
-  LEGACY_ENCLAVE_RELEASE: 1.1.0 # The release version whose enclaves are currently deployed in production. Update this when deploying new enclaves.
+  LEGACY_ENCLAVE_RELEASE: 1.2.0 # The release version whose enclaves are currently deployed in production. Update this when deploying new enclaves.
   # Optional PCR override: when all three are set, the legacy-enclaves leg uses
   # these measurements directly instead of fetching them from the release build
   # logs. Leave blank to fetch from LEGACY_ENCLAVE_RELEASE.
@@ -693,12 +693,20 @@ jobs:
             fi
             echo "Found workflow run ID: $RUN_ID"
 
-            # Get the build-enclave-and-plugin job ID. The build is now a matrix
-            # across enclave apps, so match the confidential-http job (which builds
-            # the enclave the CI test connects to). Fall back to the pre-matrix
-            # single-job name for older releases.
-            JOB_ID=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}/jobs" \
-              --jq '.jobs[] | select(.name == "build-enclave-and-plugin" or (.name | startswith("build-enclave-and-plugin (confidential-http"))) | .id' | head -1)
+            # Get the build-enclave-and-plugin job ID. The build is a matrix over
+            # (arch, app), so match the amd64 confidential-http job — that builds
+            # the enclave the CI test connects to, and PCRs are arch-specific.
+            # Fall back to the pre-arch and pre-matrix job names for older releases.
+            JOB_ID=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+              --jq '.jobs[] | select(
+                      .name == "build-enclave-and-plugin"
+                      or (.name | startswith("build-enclave-and-plugin (amd64, confidential-http"))
+                      or (.name | startswith("build-enclave-and-plugin (confidential-http"))
+                    ) | .id' | head -1)
+            if [ -z "$JOB_ID" ]; then
+              echo "::error::Could not find a build-enclave-and-plugin job in run ${RUN_ID}"
+              exit 1
+            fi
             echo "Found job ID: $JOB_ID"
 
             # Download job logs and parse PCR measurements
