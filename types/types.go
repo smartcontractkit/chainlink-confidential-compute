@@ -451,4 +451,29 @@ type MemoryEstimateResponse struct {
 	// Go runtime, notably the wasmtime WASM linear memory, so it reflects the
 	// enclave's true footprint under load. 0 if unavailable (e.g. non-Linux).
 	RSSMB uint64 `json:"rssMB"`
+	// MaxConcurrentExecutions is stable for the enclave's lifetime, so it is safe
+	// for callers to read once and cache; InFlightExecutions changes constantly.
+	// The distinction matters for enclave selection: every DON node must pick the
+	// same enclave for a given requestID (see enclave-client/pool.go), so a
+	// selection input has to be identical for all observers. A configured or
+	// cached limit qualifies, live occupancy never does.
+	//
+	// MaxConcurrentExecutions is the limit the enclave actually admits to, i.e.
+	// the point past which it answers /requests with 429. The enclave derives it
+	// from the memory it can see once at startup (see
+	// enclave/apps/confidential-workflows/memlimit), so it is the one capacity
+	// input the host cannot compute for itself: the host knows how much memory it
+	// gave the enclave, but not what the enclave made of it. Reporting it lets the
+	// host route around a full enclave instead of discovering saturation from a
+	// rejected execution. 0 means unbounded, which is also what an app that does
+	// not limit executions reports.
+	MaxConcurrentExecutions int64 `json:"maxConcurrentExecutions"`
+	// InFlightExecutions is how many executions the enclave is running right now,
+	// counted whether or not a limit is set. The host counts its own post-quorum
+	// dispatches already (see the executions.inflight gauge it records around
+	// processBatch), so this is the enclave's ground truth to reconcile against —
+	// it catches a leaked slot, and it survives a host restart that resets the
+	// host's own counter while executions continue. This is a count of executions
+	// only; it says nothing about the workloads themselves.
+	InFlightExecutions int64 `json:"inFlightExecutions"`
 }

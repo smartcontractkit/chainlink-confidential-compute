@@ -11,6 +11,7 @@ import (
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/memlimit"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/server"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
@@ -79,7 +80,6 @@ func main() {
 	confApp := app.NewConfidentialWorkflowsApp(
 		sdkpb.TeeType_TEE_TYPE_AWS_NITRO, appLogger, nil,
 		app.WithRemoteDispatcherFactory(dispatcherFactory),
-		app.WithMaxConcurrentExecutions(limit.MaxConcurrent),
 	)
 
 	err = nitro.StartNitroEnclave(
@@ -91,6 +91,8 @@ func main() {
 		emitter.NewNoOpEmitter(),
 		vsockPort,
 		*allowReconfig,
+		// The server admits executions, so the memory-derived cap is applied there.
+		server.WithMaxConcurrentExecutions(limit.MaxConcurrent),
 	)
 	if err != nil {
 		logger.Fatalf("Failed to start Nitro enclave: %v", err)

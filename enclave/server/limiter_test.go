@@ -1,4 +1,4 @@
-package app
+package server
 
 import (
 	"sync"
@@ -14,6 +14,15 @@ func TestExecutionLimiter_Unbounded(t *testing.T) {
 	}
 	if got := l.capacity(); got != 0 {
 		t.Fatalf("capacity() = %d, want 0 for unbounded", got)
+	}
+	// Occupancy is reported on /memory for unbounded servers too, so it must count
+	// admitted executions rather than held slots (of which there are none here).
+	if got := l.inFlight(); got != 100 {
+		t.Fatalf("inFlight() = %d, want 100 for an unbounded limiter with 100 admitted", got)
+	}
+	l.release()
+	if got := l.inFlight(); got != 99 {
+		t.Fatalf("inFlight() after release = %d, want 99", got)
 	}
 }
 
@@ -37,6 +46,15 @@ func TestExecutionLimiter_Bounded(t *testing.T) {
 	}
 	if got := l.capacity(); got != 2 {
 		t.Fatalf("capacity() = %d, want 2", got)
+	}
+	// Occupancy is what the enclave reports to the host on /memory: both slots are
+	// held here, so the host must see a full enclave.
+	if got := l.inFlight(); got != 2 {
+		t.Fatalf("inFlight() = %d, want 2", got)
+	}
+	l.release()
+	if got := l.inFlight(); got != 1 {
+		t.Fatalf("inFlight() after release = %d, want 1", got)
 	}
 }
 

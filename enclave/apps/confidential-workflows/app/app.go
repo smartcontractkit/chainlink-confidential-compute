@@ -35,11 +35,6 @@ type confidentialWorkflowsApp struct {
 	requirementsHandler host.RequirementsHandler
 	tpe                 sdkpb.TeeType
 
-	// limiter bounds concurrent executions so a burst can't exhaust the fixed
-	// enclave memory and wedge the VM. Unbounded unless WithMaxConcurrentExecutions
-	// is set (the nitro entrypoint derives a limit from enclave memory).
-	limiter *executionLimiter
-
 	// executionTimeout bounds a single WASM run (nanoseconds; 0 = the WASM
 	// host's own default). Injected via InjectSettings, read on every Execute,
 	// so it is atomic rather than guarded by mu.
@@ -106,16 +101,6 @@ func WithStorageService(url string, tls bool) Option {
 	return func(a *confidentialWorkflowsApp) {
 		a.storageServiceURL = url
 		a.storageServiceTLS = tls
-	}
-}
-
-// WithMaxConcurrentExecutions bounds concurrent Execute calls to n; n <= 0 means
-// unbounded. The nitro entrypoint derives n from enclave memory so a burst of
-// executions can't exhaust the fixed enclave memory and wedge the VM. fake/local
-// runs and tests leave it unbounded.
-func WithMaxConcurrentExecutions(n int64) Option {
-	return func(a *confidentialWorkflowsApp) {
-		a.limiter = newExecutionLimiter(n)
 	}
 }
 
@@ -208,7 +193,6 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, _ types.
 		fetcher:     NewBinaryFetcher(lggr),
 		httpFetcher: httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
 		tpe:         tpe,
-		limiter:     newExecutionLimiter(0), // unbounded unless an option overrides
 	}
 	a.gracePeriod.Store(int64(types.DefaultWorkflowGracePeriod))
 	for _, opt := range opts {
@@ -220,17 +204,6 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, _ types.
 }
 
 func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, rawSignedRequests ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
-	// Bound concurrent executions so a burst can't exhaust the fixed enclave
-	// memory and wedge the VM. Fail fast when full rather than piling on.
-	if !a.limiter.tryAcquire() {
-		emitter.Emit("execution_rejected_at_capacity", map[string]any{"max_concurrent": a.limiter.capacity()})
-		return nil, &types.ExecuteError{
-			Error: "enclave at capacity: too many concurrent executions",
-			Code:  http.StatusTooManyRequests,
-		}
-	}
-	defer a.limiter.release()
-
 	if appID != types.AppIDConfidentialWorkflows {
 		return nil, &types.ExecuteError{
 			Error: fmt.Sprintf("invalid app ID: expected %s, got %s", types.AppIDConfidentialWorkflows, appID),
