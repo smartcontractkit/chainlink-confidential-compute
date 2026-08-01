@@ -80,7 +80,11 @@ echo "Starting fake enclave app (${APP}) with args: ${APP_ARGS}"
 PIDS+=($!)
 
 # Clean up every child process when this script exits.
-trap 'kill -TERM "${PIDS[@]}" 2>/dev/null || true' EXIT
+# INT and TERM as well as EXIT: bash does not run an EXIT trap when it dies on
+# an untrapped fatal signal, which is exactly how the harness stops this script.
+# Clear the trap before killing so it cannot re-enter, and wait for the children
+# so bash does not exit while they still hold their ports.
+trap 'trap - EXIT INT TERM; kill -TERM "${PIDS[@]}" 2>/dev/null || true; wait "${PIDS[@]}" 2>/dev/null || true' EXIT INT TERM
 
 # Wait for the enclave app to be listening on its loopback vsock port before
 # starting the host proxy, mirroring the real script's socat readiness probe.

@@ -43,6 +43,16 @@ func WithTimeout(d time.Duration) Option {
 	}
 }
 
+// WithHTTPClient replaces the transport used for gateway requests. The caller
+// owns timeout and connection-reuse policy on the supplied client.
+func WithHTTPClient(client *http.Client) Option {
+	return func(c *GatewayClient) {
+		if client != nil {
+			c.httpClient = client
+		}
+	}
+}
+
 // NewGatewayClient builds a client over one or more gateway endpoints.
 // gatewayURLs is a comma-separated list; SendRequest round-robins across the
 // entries and fails over to the next on a transport/proxy error. A single URL

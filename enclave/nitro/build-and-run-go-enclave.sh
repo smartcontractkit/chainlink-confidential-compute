@@ -22,7 +22,6 @@ fi
 
 # Default values - can be overridden by environment variables
 ENCLAVE_CID=${ENCLAVE_CID:-16}
-HOST_CID=${HOST_CID:-3}
 CPU_COUNT=${ENCLAVE_CPU_COUNT:-2}
 MEMORY_MIB=${ENCLAVE_MEMORY_MIB:-1024}
 # Total allocator pool - should be sum of all enclaves if running multiple
@@ -38,12 +37,11 @@ SKIP_ALLOCATOR_RESTART=${SKIP_ALLOCATOR_RESTART:-false}
 SKIP_IMAGE_BUILD=${SKIP_IMAGE_BUILD:-false}
 
 # Display build parameters
-echo "=== Building and running Go-based enclave with outbound HTTPS traffic ==="
+echo "=== Building and running Go-based enclave with VSOCK egress ==="
 echo "Image name: ${DOCKER_TAG}"
 echo "Output EIF: ${OUTPUT_EIF}"
 echo "Enclave name: ${ENCLAVE_NAME}"
 echo "Enclave CID: ${ENCLAVE_CID}"
-echo "Host CID: ${HOST_CID}"
 echo "CPU count: ${CPU_COUNT}"
 echo "Memory: ${MEMORY_MIB} MiB"
 echo "Host HTTP Port: ${HTTP_PORT}"
@@ -83,64 +81,6 @@ else
     echo
 fi
 
-# Check if wireguard-tools is installed, install if not
-if ! command -v wg &>/dev/null; then
-    echo "wireguard-tools is not installed. Installing now..."
-    sudo dnf install -y wireguard-tools
-    echo "wireguard-tools installed successfully."
-    echo
-fi
-
-# Prepare temporary directory for WireGuard keys
-WG_DIR="${NITRO_PATH}/.wireguard"
-mkdir -p "${WG_DIR}"
-
-# Each enclave gets its own key pair so the host can configure separate
-# WireGuard peers with distinct allowed-ips.  The host key is shared across
-# all enclaves (generated once, reused for subsequent enclaves).
-ENCLAVE_KEY_PREFIX="${WG_DIR}/enclave-${ENCLAVE_CID}"
-
-# Host key: generate once, reuse for every enclave
-if [[ -f "${WG_DIR}/host-private-key" ]]; then
-    echo "Using existing host WireGuard key..."
-    SK_HOST=$(cat "${WG_DIR}/host-private-key")
-else
-    echo "Generating new host WireGuard key..."
-    SK_HOST=$(wg genkey)
-    echo "$SK_HOST" > "${WG_DIR}/host-private-key"
-fi
-PK_HOST=$(echo $SK_HOST | wg pubkey)
-echo "$PK_HOST" > "${WG_DIR}/host-public-key"
-
-# Per-enclave key: unique per CID
-if [[ -f "${ENCLAVE_KEY_PREFIX}-private-key" ]]; then
-    echo "Using existing WireGuard key for enclave CID ${ENCLAVE_CID}..."
-    SK_ENCLAVE=$(cat "${ENCLAVE_KEY_PREFIX}-private-key")
-else
-    echo "Generating new WireGuard key for enclave CID ${ENCLAVE_CID}..."
-    SK_ENCLAVE=$(wg genkey)
-    echo "$SK_ENCLAVE" > "${ENCLAVE_KEY_PREFIX}-private-key"
-fi
-PK_ENCLAVE=$(echo $SK_ENCLAVE | wg pubkey)
-echo "$PK_ENCLAVE" > "${ENCLAVE_KEY_PREFIX}-public-key"
-
-# Write the per-enclave key files where the Dockerfile expects them so each
-# EIF gets the correct key pair baked in.
-cp "${ENCLAVE_KEY_PREFIX}-private-key" "${WG_DIR}/enclave-private-key"
-cp "${ENCLAVE_KEY_PREFIX}-public-key" "${WG_DIR}/enclave-public-key"
-
-echo "Host:"
-echo " - Private key: ${SK_HOST}"
-echo " - Public key:  ${PK_HOST}"
-echo
-echo "Enclave:"
-echo " - Private key: ${SK_ENCLAVE}"
-echo " - Public key:  ${PK_ENCLAVE}"
-echo
-
-# Make the wireguard-go-vsock binary for this host's architecture executable
-chmod +x ${NITRO_PATH}/wireguard-go-vsock-$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
-
 # Build host application only if not skipping build
 if [ "$SKIP_IMAGE_BUILD" = "false" ]; then
     echo "Building host application..."
@@ -155,50 +95,38 @@ else
     echo
 fi
 
-# Each enclave needs its own EIF because its unique WireGuard private key is
-# baked into the image.  We tag images per-CID to avoid clobbering.
-ENCLAVE_DOCKER_TAG="${DOCKER_TAG}-cid${ENCLAVE_CID}"
-ENCLAVE_EIF="go-enclave-outbound-cid${ENCLAVE_CID}.eif"
+# The EIF contains no CID-specific identity and can be reused for every enclave.
+ENCLAVE_DOCKER_TAG="${DOCKER_TAG}"
+ENCLAVE_EIF="${OUTPUT_EIF}"
 
-# Step 1: Build Docker image (always needed per-enclave for unique keys)
+# Step 1: Build the reusable Docker image.
 if [ "$SKIP_IMAGE_BUILD" = "false" ]; then
     echo "Building Docker image ${ENCLAVE_DOCKER_TAG} from ${DOCKERFILE}..."
     docker build --no-cache -f "${DOCKERFILE}" . -t ${ENCLAVE_DOCKER_TAG} \
-        --build-arg HOST_CID=${HOST_CID} \
-        --build-arg ENCLAVE_CID=${ENCLAVE_CID} \
         --build-arg APP_NAME=${APP} \
         --build-arg KEYPAIR_ROTATION="${KEYPAIR_ROTATION}" \
         --build-arg KEYPAIR_EXPIRATION="${KEYPAIR_EXPIRATION}" \
-        --build-arg GATEWAY_URL="${GATEWAY_URL:-}" \
-        --build-arg STORAGE_SERVICE_URL="${STORAGE_SERVICE_URL:-}" \
-        --build-arg STORAGE_SERVICE_TLS="${STORAGE_SERVICE_TLS:-}" \
         --build-arg ALLOW_RECONFIG="${ALLOW_RECONFIG}"
     echo "Docker image built successfully."
     echo
 else
-    # Even with SKIP_IMAGE_BUILD, we must rebuild if keys changed (new enclave)
     if [ ! -f "${ENCLAVE_PATH}/${ENCLAVE_EIF}" ]; then
-        echo "No EIF found for CID ${ENCLAVE_CID}, building Docker image..."
+        echo "No reusable EIF found, building Docker image..."
         docker build --no-cache -f "${DOCKERFILE}" . -t ${ENCLAVE_DOCKER_TAG} \
-            --build-arg HOST_CID=${HOST_CID} \
-            --build-arg ENCLAVE_CID=${ENCLAVE_CID} \
             --build-arg APP_NAME=${APP} \
             --build-arg KEYPAIR_ROTATION="${KEYPAIR_ROTATION}" \
             --build-arg KEYPAIR_EXPIRATION="${KEYPAIR_EXPIRATION}" \
-            --build-arg GATEWAY_URL="${GATEWAY_URL:-}" \
-            --build-arg STORAGE_SERVICE_URL="${STORAGE_SERVICE_URL:-}" \
-            --build-arg STORAGE_SERVICE_TLS="${STORAGE_SERVICE_TLS:-}" \
             --build-arg ALLOW_RECONFIG="${ALLOW_RECONFIG}"
         echo "Docker image built successfully."
     else
-        echo "Skipping Docker image build (existing EIF found for CID ${ENCLAVE_CID})..."
+        echo "Skipping Docker image build (reusing existing EIF)..."
     fi
     echo
 fi
 
 # Step 2: Convert Docker image to EIF (Enclave Image Format)
 if [ "$SKIP_IMAGE_BUILD" = "false" ] || [ ! -f "${ENCLAVE_PATH}/${ENCLAVE_EIF}" ]; then
-    echo "Building Enclave Image File (EIF) for CID ${ENCLAVE_CID}..."
+    echo "Building reusable Enclave Image File (EIF)..."
 
     BUILD_OUTPUT=$(nitro-cli build-enclave --docker-uri ${ENCLAVE_DOCKER_TAG}:latest --output-file ${ENCLAVE_PATH}/${ENCLAVE_EIF})
     echo "EIF file built successfully: ${ENCLAVE_PATH}/${ENCLAVE_EIF}"
@@ -207,32 +135,16 @@ if [ "$SKIP_IMAGE_BUILD" = "false" ] || [ ! -f "${ENCLAVE_PATH}/${ENCLAVE_EIF}" 
     echo "PCR measurements saved to: ${ENCLAVE_PATH}/${MEASUREMENTS_FILE}"
     echo
 else
-    echo "Skipping EIF build (using existing image for CID ${ENCLAVE_CID})..."
+    echo "Skipping EIF build (using existing reusable image)..."
     echo
 fi
 
-# Step 3: Set up host networking for the enclave.
-# Pass the per-enclave public key so the host can add it as a distinct peer.
-if [ "$SKIP_ALLOCATOR_RESTART" = "false" ]; then
-    echo "Setting up host networking for outbound connectivity..."
-    ENCLAVE_CID=${ENCLAVE_CID} HOST_CID=${HOST_CID} \
-        ENCLAVE_PUBLIC_KEY="${PK_ENCLAVE}" \
-        ${NITRO_PATH}/host/setup-host-networking.sh
-    echo
-else
-    echo "Setting up additional enclave networking (adding WireGuard peer)..."
-    SKIP_WIREGUARD_SETUP=true ENCLAVE_CID=${ENCLAVE_CID} HOST_CID=${HOST_CID} \
-        ENCLAVE_PUBLIC_KEY="${PK_ENCLAVE}" \
-        ${NITRO_PATH}/host/setup-host-networking.sh
-    echo
-fi
-
-# Step 4: Terminate any existing enclave with the same name
+# Step 3: Terminate any existing enclave with the same name.
 echo "Stopping any running enclave with name '${ENCLAVE_NAME}'..."
 nitro-cli terminate-enclave --enclave-name ${ENCLAVE_NAME} 2>/dev/null || true
 echo
 
-# Step 5: Run the enclave
+# Step 4: Run the enclave.
 echo "Starting enclave..."
 nitro-cli run-enclave \
     --cpu-count ${CPU_COUNT} \
@@ -265,7 +177,7 @@ done
 echo "Enclave is responsive on vsock."
 echo
 
-# Step 6: Kill any existing host server processes on the target ports
+# Step 5: Kill any existing host server processes on the target ports.
 echo "Checking for existing host server processes on ports ${HTTP_PORT} and ${CONFIG_HTTP_PORT}..."
 if lsof -i:${HTTP_PORT} -t >/dev/null 2>&1; then
     EXISTING_PIDS=$(lsof -i:${HTTP_PORT} -t)
@@ -310,5 +222,14 @@ echo
 echo "To terminate the enclave, run:"
 echo "nitro-cli terminate-enclave --enclave-name ${ENCLAVE_NAME}"
 echo
-echo "To stop the host server, run:"
-echo "kill ${HOST_SERVER_PID}"
+
+# Stay resident and own the host server's lifetime, as the fake script does.
+# Exiting here would orphan it: the caller signals this script, so a detached
+# host server would survive, keep VSOCK 5001 bound, and stop the next suite's
+# broker from starting. Port-based cleanup does not find it, because each suite
+# allocates fresh HTTP ports.
+# Clear the trap first so the kill below cannot re-enter it, then wait again:
+# returning from the handler without waiting would let bash exit while the host
+# server is still draining, orphaning it with VSOCK 5001 still bound.
+trap 'trap - EXIT INT TERM; kill -TERM "${HOST_SERVER_PID}" 2>/dev/null || true; wait "${HOST_SERVER_PID}" 2>/dev/null || true' EXIT INT TERM
+wait "${HOST_SERVER_PID}"

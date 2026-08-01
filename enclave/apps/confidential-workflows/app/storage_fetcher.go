@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	neturl "net/url"
 	"path"
@@ -17,8 +18,8 @@ import (
 	nodeauthgrpc "github.com/smartcontractkit/chainlink-common/pkg/nodeauth/grpc"
 	nodeauthjwt "github.com/smartcontractkit/chainlink-common/pkg/nodeauth/jwt"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
-	storage_service "github.com/smartcontractkit/chainlink-protos/storage-service/go"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	storage_service "github.com/smartcontractkit/chainlink-protos/storage-service/go"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -40,14 +41,43 @@ type RawFetcher interface {
 // that previously lived in the host-agent sidecar; it now runs in the TEE so
 // the fetch is authenticated by the enclave itself.
 type StorageFetcher struct {
-	conn       *grpc.ClientConn
-	client     storage_service.NodeServiceClient
-	jwtGen     nodeauthjwt.JWTGenerator
-	httpClient *http.Client
-	maxBytes   int64
-	timeout    time.Duration
-	lggr       logger.Logger
+	conn                      *grpc.ClientConn
+	client                    storage_service.NodeServiceClient
+	jwtGen                    nodeauthjwt.JWTGenerator
+	httpClient                *http.Client
+	maxBytes                  int64
+	timeout                   time.Duration
+	allowInsecureArtifactHTTP bool
+	lggr                      logger.Logger
 }
+
+type storageFetcherConfig struct {
+	dialContext               func(context.Context, string, string) (net.Conn, error)
+	httpClient                *http.Client
+	allowInsecureArtifactHTTP bool
+}
+
+// StorageFetcherOption configures enclave transports without changing the
+// storage service or artifact protocols.
+type StorageFetcherOption func(*storageFetcherConfig)
+
+func WithStorageDialer(dialContext func(context.Context, string, string) (net.Conn, error)) StorageFetcherOption {
+	return func(config *storageFetcherConfig) { config.dialContext = dialContext }
+}
+
+func WithStorageHTTPClient(client *http.Client) StorageFetcherOption {
+	return func(config *storageFetcherConfig) { config.httpClient = client }
+}
+
+// WithInsecureArtifactHTTPDownloadForTests permits plain-HTTP artifact URLs. It must
+// only be enabled by test entrypoints that also opt into insecure reconfiguration.
+func WithInsecureArtifactHTTPDownloadForTests() StorageFetcherOption {
+	return func(config *storageFetcherConfig) { config.allowInsecureArtifactHTTP = true }
+}
+
+// maxArtifactRedirects mirrors net/http's own ceiling, which only applies while
+// CheckRedirect is nil.
+const maxArtifactRedirects = 10
 
 var _ RawFetcher = (*StorageFetcher)(nil)
 
@@ -89,7 +119,7 @@ func newJWTGenerator(privKeyHex string) (nodeauthjwt.JWTGenerator, ed25519.Publi
 // NewStorageFetcher parses the ed25519 key, dials the storage service, and
 // prepares the JWT generator. It returns the derived public key so the caller
 // can log which identity is being used (the pubkey whitelisted by storage).
-func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes int64, timeout time.Duration, lggr logger.Logger) (*StorageFetcher, ed25519.PublicKey, error) {
+func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes int64, timeout time.Duration, lggr logger.Logger, opts ...StorageFetcherOption) (*StorageFetcher, ed25519.PublicKey, error) {
 	if storageURL == "" {
 		return nil, nil, fmt.Errorf("storage service url is required")
 	}
@@ -106,7 +136,26 @@ func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes 
 		creds = insecure.NewCredentials()
 	}
 
-	conn, err := grpc.NewClient(storageURL, grpc.WithTransportCredentials(creds))
+	config := storageFetcherConfig{httpClient: &http.Client{}}
+	for _, opt := range opts {
+		opt(&config)
+	}
+	grpcOptions := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
+	target := storageURL
+	if config.dialContext != nil {
+		target = "passthrough:///" + storageURL
+		grpcOptions = append(grpcOptions,
+			// Same pinned invariant as the HTTP transports: no proxy variable
+			// exists in the measured EIF environment, so refusing one here
+			// preserves pre-migration behaviour rather than changing it.
+			grpc.WithNoProxy(),
+			grpc.WithAuthority(storageURL),
+			grpc.WithContextDialer(func(ctx context.Context, address string) (net.Conn, error) {
+				return config.dialContext(ctx, "tcp", address)
+			}),
+		)
+	}
+	conn, err := grpc.NewClient(target, grpcOptions...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dialing storage service %q: %w", storageURL, err)
 	}
@@ -118,14 +167,36 @@ func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes 
 		timeout = types.DefaultBinaryFetchTimeout
 	}
 
+	artifactClient := *config.httpClient
+	previousRedirect := artifactClient.CheckRedirect
+	artifactClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := validateArtifactURL(req.URL, config.allowInsecureArtifactHTTP); err != nil {
+			return err
+		}
+		// The cap must precede any delegation: net/http applies its own
+		// ten-request ceiling only while CheckRedirect is nil, so installing this
+		// hook removed it, and returning a caller's policy first would leave a
+		// client that supplies one with no redirect bound at all. Without it a
+		// redirect loop is bounded only by the fetch timeout, holding an
+		// execution slot for its full duration.
+		if len(via) >= maxArtifactRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxArtifactRedirects)
+		}
+		if previousRedirect != nil {
+			return previousRedirect(req, via)
+		}
+		return nil
+	}
+
 	return &StorageFetcher{
-		conn:       conn,
-		client:     storage_service.NewNodeServiceClient(conn),
-		jwtGen:     jwtGen,
-		httpClient: &http.Client{},
-		maxBytes:   maxBytes,
-		timeout:    timeout,
-		lggr:       lggr,
+		conn:                      conn,
+		client:                    storage_service.NewNodeServiceClient(conn),
+		jwtGen:                    jwtGen,
+		httpClient:                &artifactClient,
+		maxBytes:                  maxBytes,
+		timeout:                   timeout,
+		allowInsecureArtifactHTTP: config.allowInsecureArtifactHTTP,
+		lggr:                      lggr,
 	}, pub, nil
 }
 
@@ -199,7 +270,14 @@ func (f *StorageFetcher) withJWT(ctx context.Context, req any) (context.Context,
 
 // download GETs the pre-signed URL and returns the body, size-limited.
 func (f *StorageFetcher) download(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	parsedURL, err := neturl.Parse(url)
+	if err != nil {
+		return nil, fmt.Errorf("parsing download URL: %w", err)
+	}
+	if err := validateArtifactURL(parsedURL, f.allowInsecureArtifactHTTP); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsedURL.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("building download request: %w", err)
 	}
@@ -234,6 +312,24 @@ func (f *StorageFetcher) download(ctx context.Context, url string) ([]byte, erro
 		return nil, fmt.Errorf("base64 decoding binary: %w", err)
 	}
 	return decoded, nil
+}
+
+func validateArtifactURL(url *neturl.URL, allowInsecureHTTP bool) error {
+	if url == nil || url.Hostname() == "" {
+		return fmt.Errorf("artifact download URL must use HTTPS")
+	}
+	// Stated positively: HTTPS always, or plain HTTP when a test entrypoint has
+	// allowed it. Same rule as before, split out because the negated form of it
+	// was hard to read.
+	schemeAllowed := strings.EqualFold(url.Scheme, "https") ||
+		(allowInsecureHTTP && strings.EqualFold(url.Scheme, "http"))
+	if !schemeAllowed {
+		return fmt.Errorf("artifact download URL must use HTTPS")
+	}
+	if url.User != nil {
+		return fmt.Errorf("artifact download URL must not contain credentials")
+	}
+	return nil
 }
 
 // Close releases the gRPC connection.

@@ -546,8 +546,21 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 					}
 				}
 				baseCID := 16
+				// Real Nitro gets one enclave per parent, matching production: a
+				// parent has exactly one AF_VSOCK listener on the egress port, so
+				// a second host process cannot start. The failover sub-test below
+				// is guarded on enclave count and stands itself down there until
+				// the supervisor can front several enclaves from one host process.
+				//
+				// The fake backend keeps two, since it namespaces each enclave
+				// process onto its own loopback port, so failover and config
+				// recovery stay covered somewhere.
 				httpPorts := []string{"8080", "8081"}
 				configHttpPorts := []string{"8082", "8083"}
+				if !tests.UseFakeEnclave() {
+					httpPorts = httpPorts[:1]
+					configHttpPorts = configHttpPorts[:1]
+				}
 
 				// Clean up any stale processes on ports before starting.
 				testLogger.Info().Msgf("Cleaning up stale processes on ports...")

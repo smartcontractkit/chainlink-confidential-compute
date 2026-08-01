@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,20 +55,24 @@ type confidentialWorkflowsApp struct {
 	// Nitro EIF is measured (PCR), so environment-specific endpoints can't be
 	// baked in; the storage endpoint, the ed25519 storage key, and the gateway
 	// URL all arrive at runtime. mu guards everything below.
-	mu                sync.Mutex
-	storageServiceURL string // startup default (fake/tests); an injected URL overrides
-	storageServiceTLS bool
-	storageFetcher    RawFetcher
-	dispatcher        RemoteDispatcher                                                // nil = local mode
-	dispatcherFactory func(gatewayURL string, timeout time.Duration) RemoteDispatcher // builds dispatcher on first GatewayURL injection
-	lastConfig        types.EnclaveConfig
-	haveConfig        bool
+	mu                        sync.Mutex
+	storageServiceURL         string // startup default (fake/tests); an injected URL overrides
+	storageServiceTLS         bool
+	storageFetcher            RawFetcher
+	storageFactory            StorageFetcherFactory
+	allowInsecureArtifactHTTP bool
+	dispatcher                RemoteDispatcher                                                         // nil = local mode
+	dispatcherFactory         func(gatewayURL string, timeout time.Duration) (RemoteDispatcher, error) // builds dispatcher on first GatewayURL injection
+	lastConfig                types.EnclaveConfig
+	haveConfig                bool
 }
 
 var _ types.EnclaveApp = (*confidentialWorkflowsApp)(nil)
 
 // Option configures optional behavior for the confidential workflows app.
 type Option func(*confidentialWorkflowsApp)
+
+type StorageFetcherFactory func(storageURL string, tls bool, privateKey string, maxBytes int64, timeout time.Duration, lggr logger.Logger) (RawFetcher, ed25519.PublicKey, error)
 
 // WithRemoteDispatcher enables remote dynamic secrets and remote capability
 // dispatch with a dispatcher built up-front. Used by tests that already know the
@@ -84,7 +89,7 @@ func WithRemoteDispatcher(d RemoteDispatcher) Option {
 // InjectSettings). The measured EIF can't bake the gateway URL, so the
 // nitro/fake mains pass a factory here and the dispatcher is created when the
 // host injects the URL. A non-positive timeout means the caller's own default.
-func WithRemoteDispatcherFactory(f func(gatewayURL string, timeout time.Duration) RemoteDispatcher) Option {
+func WithRemoteDispatcherFactory(f func(gatewayURL string, timeout time.Duration) (RemoteDispatcher, error)) Option {
 	return func(a *confidentialWorkflowsApp) {
 		a.dispatcherFactory = f
 	}
@@ -106,6 +111,25 @@ func WithStorageService(url string, tls bool) Option {
 	return func(a *confidentialWorkflowsApp) {
 		a.storageServiceURL = url
 		a.storageServiceTLS = tls
+	}
+}
+
+// WithStorageFetcherFactory supplies Nitro-specific HTTP and gRPC transports
+// when storage credentials arrive through runtime settings.
+func WithStorageFetcherFactory(factory StorageFetcherFactory) Option {
+	return func(a *confidentialWorkflowsApp) {
+		a.storageFactory = factory
+	}
+}
+
+// WithInsecureArtifactHTTPForTests relaxes artifact transport to plain HTTP for
+// local fixtures. This is the only way to relax it: there is deliberately no
+// injected setting, so the untrusted host cannot reach it. Entrypoints gate this
+// on --allow-reconfig, which is measured into the PCR, so a production EIF
+// cannot have it.
+func WithInsecureArtifactHTTPForTests() Option {
+	return func(a *confidentialWorkflowsApp) {
+		a.allowInsecureArtifactHTTP = true
 	}
 }
 
@@ -153,7 +177,7 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	a.mu.Unlock()
 
 	if req.StorageKey != "" && url != "" {
-		fetcher, pub, err := NewStorageFetcher(url, tls, req.StorageKey, req.MaxBinarySize, req.BinaryFetchTimeout, a.logger)
+		fetcher, pub, err := a.storageFactory(url, tls, req.StorageKey, req.MaxBinarySize, req.BinaryFetchTimeout, a.logger)
 		if err != nil {
 			return fmt.Errorf("building storage fetcher: %w", err)
 		}
@@ -172,7 +196,11 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	if req.GatewayURL != "" {
 		a.mu.Lock()
 		if a.dispatcher == nil && a.dispatcherFactory != nil {
-			d := a.dispatcherFactory(req.GatewayURL, req.GatewayRequestTimeout)
+			d, err := a.dispatcherFactory(req.GatewayURL, req.GatewayRequestTimeout)
+			if err != nil {
+				a.mu.Unlock()
+				return fmt.Errorf("building remote dispatcher: %w", err)
+			}
 			if a.haveConfig {
 				// Config may have arrived before credentials; apply it now so the
 				// freshly built dispatcher has the vault's MasterPublicKey/T.
@@ -209,6 +237,16 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, _ types.
 		httpFetcher: httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
 		tpe:         tpe,
 		limiter:     newExecutionLimiter(0), // unbounded unless an option overrides
+	}
+	// Assigned after the literal, and reading a.allowInsecureArtifactHTTP when it
+	// runs rather than when it is built, because the options that could set it
+	// are applied below and the factory is not called until settings arrive.
+	a.storageFactory = func(storageURL string, tls bool, privateKey string, maxBytes int64, timeout time.Duration, lggr logger.Logger) (RawFetcher, ed25519.PublicKey, error) {
+		var fetcherOptions []StorageFetcherOption
+		if a.allowInsecureArtifactHTTP {
+			fetcherOptions = append(fetcherOptions, WithInsecureArtifactHTTPDownloadForTests())
+		}
+		return NewStorageFetcher(storageURL, tls, privateKey, maxBytes, timeout, lggr, fetcherOptions...)
 	}
 	a.gracePeriod.Store(int64(types.DefaultWorkflowGracePeriod))
 	for _, opt := range opts {

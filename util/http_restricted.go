@@ -4,12 +4,19 @@
 package util
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
+	"net"
 	"net/http"
 
 	"github.com/doyensec/safeurl"
 )
+
+// networkPolicyBlockedError is implemented by dialer errors that rejected a
+// destination under enclave network policy. Declaring the behaviour here keeps
+// util importable by modules that do not link the Nitro VSOCK transport.
+type networkPolicyBlockedError interface{ NetworkPolicyBlocked() bool }
 
 // disableRedirects prevents the HTTP client from following any redirects.
 func disableRedirects(*http.Request, []*http.Request) error {
@@ -17,11 +24,11 @@ func disableRedirects(*http.Request, []*http.Request) error {
 }
 
 // newSafeurlClient builds a safeurl-based HTTP client that enforces:
-// - HTTPS only (any port)
+// - HTTPS only on ports 80 and 443
 // - No redirects
 // - Private-network blocking (loopback, RFC 1918, CGNAT, link-local, etc.)
 // An optional tls.Config can be supplied for custom CA certificates.
-func newSafeurlClient(tlsConfig *tls.Config) *safeurl.WrappedClient {
+func newSafeurlClient(tlsConfig *tls.Config, dialContext func(context.Context, string, string) (net.Conn, error)) *safeurl.WrappedClient {
 	builder := safeurl.GetConfigBuilder().
 		SetAllowedSchemes("https").
 		SetCheckRedirect(disableRedirects)
@@ -36,21 +43,47 @@ func newSafeurlClient(tlsConfig *tls.Config) *safeurl.WrappedClient {
 	// The client is shared across workflows, so connection reuse would carry
 	// TCP/TLS and server-side connection state across workflow boundaries.
 	transport.DisableKeepAlives = true
+	if dialContext != nil {
+		// The tunnel dialer owns DNS and private-address enforcement. Keep the
+		// safeurl wrapper for scheme, credential, host, and redirect checks.
+		//
+		// Proxy = nil rather than ProxyFromEnvironment so no environment
+		// variable can insert a second hop in front of the tunnel. The invariant
+		// the plan asks to be pinned: neither EIF Dockerfile sets HTTP_PROXY,
+		// HTTPS_PROXY or NO_PROXY, the enclave VM inherits nothing from the pod,
+		// and no injected setting carries one -- so this changes no behaviour
+		// today and stops a future environment change from silently reinstating
+		// proxying that the pre-migration path would also not have had.
+		transport.Proxy = nil
+		transport.DialContext = dialContext
+	}
 	return client
 }
 
 // NewRestrictedHTTPClient returns an HTTP client that blocks connections to
-// private/local IP addresses, allows only HTTPS (any port), and disables
+// private/local IP addresses, allows only HTTPS on ports 80 and 443, and disables
 // redirects. SSRF protection is provided by doyensec/safeurl.
 func NewRestrictedHTTPClient() *safeurl.WrappedClient {
-	return newSafeurlClient(nil)
+	return newSafeurlClient(nil, nil)
 }
 
 // NewRestrictedHTTPClientWithTLS returns a restricted HTTP client configured
 // with a custom TLS configuration (e.g. a custom root CA). It enforces the
 // same SSRF protections as NewRestrictedHTTPClient.
 func NewRestrictedHTTPClientWithTLS(tlsConfig *tls.Config) *safeurl.WrappedClient {
-	return newSafeurlClient(tlsConfig)
+	return newSafeurlClient(tlsConfig, nil)
+}
+
+// NewRestrictedHTTPClientWithDialer preserves the restricted URL policy while
+// routing connections through an enclave-controlled validated dialer.
+func NewRestrictedHTTPClientWithDialer(dialContext func(context.Context, string, string) (net.Conn, error)) *safeurl.WrappedClient {
+	return newSafeurlClient(nil, dialContext)
+}
+
+// NewRestrictedHTTPClientWithTLSAndDialer is the custom-root equivalent of
+// NewRestrictedHTTPClientWithDialer.
+func NewRestrictedHTTPClientWithTLSAndDialer(tlsConfig *tls.Config, dialContext func(context.Context, string, string) (net.Conn, error)) *safeurl.WrappedClient {
+	return newSafeurlClient(tlsConfig, dialContext)
 }
 
 // NewUnrestrictedClient returns a plain HTTP client with no transport
@@ -75,6 +108,7 @@ func IsRequestBlockedError(err error) bool {
 		ipErr     *safeurl.AllowedIPError
 		ipv6Err   *safeurl.IPv6BlockedError
 		credErr   *safeurl.SendingCredentialsBlockedError
+		policyErr networkPolicyBlockedError
 	)
 	return errors.As(err, &schemeErr) ||
 		errors.As(err, &portErr) ||
@@ -82,5 +116,6 @@ func IsRequestBlockedError(err error) bool {
 		errors.As(err, &invHost) ||
 		errors.As(err, &ipErr) ||
 		errors.As(err, &ipv6Err) ||
-		errors.As(err, &credErr)
+		errors.As(err, &credErr) ||
+		(errors.As(err, &policyErr) && policyErr.NetworkPolicyBlocked())
 }

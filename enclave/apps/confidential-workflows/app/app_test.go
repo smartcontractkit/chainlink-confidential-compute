@@ -470,9 +470,9 @@ func TestInjectSettings_Timeouts(t *testing.T) {
 	newApp := func() (*confidentialWorkflowsApp, *time.Duration) {
 		var got time.Duration
 		a := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil,
-			WithRemoteDispatcherFactory(func(_ string, timeout time.Duration) RemoteDispatcher {
+			WithRemoteDispatcherFactory(func(_ string, timeout time.Duration) (RemoteDispatcher, error) {
 				got = timeout
-				return &testRemoteDispatcher{}
+				return &testRemoteDispatcher{}, nil
 			}),
 		).(*confidentialWorkflowsApp)
 		return a, &got
@@ -501,6 +501,35 @@ func TestInjectSettings_Timeouts(t *testing.T) {
 		inject(t, a, types.WorkflowSettings{GatewayURL: "https://gateway.example.com"})
 		assert.Zero(t, *got)
 	})
+}
+
+// The entrypoint option is the only way to relax artifact transport -- there is
+// no injected setting, so nothing the untrusted host sends can reach it. That
+// makes the option's wiring load-bearing: validateArtifactURL's own tests pass
+// the flag directly, so they would not notice the option ceasing to reach the
+// fetcher. Pin it here instead.
+func TestInsecureArtifactHTTPComesOnlyFromTheEntrypoint(t *testing.T) {
+	raw, err := json.Marshal(types.WorkflowSettings{
+		StorageKey:        testStorageKeyHex,
+		StorageServiceURL: "127.0.0.1:1",
+	})
+	require.NoError(t, err)
+
+	fetcherFor := func(opts ...Option) *StorageFetcher {
+		a := NewConfidentialWorkflowsApp(
+			sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil, opts...,
+		).(*confidentialWorkflowsApp)
+		require.NoError(t, a.InjectSettings(raw))
+		t.Cleanup(func() { require.NoError(t, a.storageFetcher.Close()) })
+		fetcher, ok := a.storageFetcher.(*StorageFetcher)
+		require.True(t, ok)
+		return fetcher
+	}
+
+	require.False(t, fetcherFor().allowInsecureArtifactHTTP,
+		"a production entrypoint must require HTTPS artifacts")
+	require.True(t, fetcherFor(WithInsecureArtifactHTTPForTests()).allowInsecureArtifactHTTP,
+		"the test entrypoint option must reach the fetcher")
 }
 
 // testRemoteDispatcher is a stub that returns pre-configured secrets and
