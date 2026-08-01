@@ -635,19 +635,14 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Prevent multiple concurrent requests with the same hash from being processed, which could cause replay attacks and double execution.
-	s.reqsLock.RLock()
-	if _, exists := s.inProgressReqs.Get(hash); exists {
-		s.reqsLock.RUnlock()
+	// Checking and claiming in one atomic step: a separate Get-then-Set let two
+	// identical batches both observe absence and both execute, which is a replay
+	// only the timing spared us. GetOrSet gives the claim to the first writer.
+	// Free the request hash from the in-progress cache when the request is done processing, even if there are errors, to allow retries.
+	if _, loaded := s.inProgressReqs.GetOrSet(hash, struct{}{}, nil); loaded {
 		responseEmitter.WriteErrorResponse(w, "request is already being processed", http.StatusConflict)
 		return
 	}
-	s.reqsLock.RUnlock()
-
-	// Mark this request hash as in-progress to prevent concurrent processing of the same request.
-	// Free the request hash from the in-progress cache when the request is done processing, even if there are errors, to allow retries.
-	s.reqsLock.Lock()
-	s.inProgressReqs.Set(hash, struct{}{}, nil)
-	s.reqsLock.Unlock()
 	defer func() {
 		s.reqsLock.Lock()
 		s.inProgressReqs.Delete(hash)

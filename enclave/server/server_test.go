@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -773,6 +774,108 @@ func TestHandleExecute_AtCapacity(t *testing.T) {
 	require.NoError(t, err)
 	defer util.SafeClose(retried)
 	assert.Equal(t, http.StatusOK, retried.StatusCode, "a batch rejected at capacity must succeed on retry")
+}
+
+// Two identical batches arriving together must not both execute: the in-progress
+// claim is the replay guard, and a check-then-set let both pass. Exactly one runs;
+// the other gets 409.
+func TestHandleExecute_ConcurrentDuplicatesExecuteOnce(t *testing.T) {
+	t.Parallel()
+
+	var executions atomic.Int64
+	mockApp := newMockEnclaveApp()
+	mockApp.executeFunc = func([32]byte, string, []byte, map[string][]byte, types.Emitter) ([]byte, *types.ExecuteError) {
+		executions.Add(1)
+		return []byte("done"), nil
+	}
+	serverURL := setupTestServerWithMockApp(t, mockApp)
+	client := &http.Client{}
+
+	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	testConfig := types.EnclaveConfig{
+		Signers:         [][]byte{pubKey},
+		MasterPublicKey: []byte("master-public-key"),
+		T:               1,
+		F:               0,
+	}
+	configBytes, err := json.Marshal(testConfig)
+	require.NoError(t, err)
+	configBody, err := json.Marshal(types.ConfigRequest{Config: configBytes})
+	require.NoError(t, err)
+	configReq, err := http.NewRequest(http.MethodPost, serverURL+"/config", bytes.NewReader(configBody))
+	require.NoError(t, err)
+	configReq.Header.Set("Content-Type", "application/json")
+	configResp, err := client.Do(configReq)
+	require.NoError(t, err)
+	util.SafeClose(configResp)
+	require.Equal(t, http.StatusOK, configResp.StatusCode)
+
+	pkResp, err := client.Get(serverURL + "/publicKeys")
+	require.NoError(t, err)
+	var pkBody types.PublicKeyResponse
+	err = json.NewDecoder(pkResp.Body).Decode(&pkBody)
+	util.SafeClose(pkResp)
+	require.NoError(t, err)
+	require.NotEmpty(t, pkBody.PublicKeys)
+
+	computeReq := types.ComputeRequest{
+		RequestID:                 sha256.Sum256([]byte("concurrent-duplicate")),
+		PublicData:                []byte("{}"),
+		MasterPublicKey:           testConfig.MasterPublicKey,
+		EnclaveEphemeralPublicKey: pkBody.PublicKeys[0],
+		AppID:                     "test-app",
+		Version:                   "1.0.0",
+	}
+	hash := computeReq.Hash()
+	prefixed := types.MakePeerIDSignatureDomainSeparatedPayload(util.GetConfidentialComputePayloadPrefix(), hash[:])
+	batch, err := json.Marshal([]types.SignedComputeRequest{{
+		ComputeRequest: computeReq,
+		Signature:      ed25519.Sign(privKey, prefixed[:]),
+	}})
+	require.NoError(t, err)
+
+	// Fire both at once and count how many reached the app.
+	const attempts = 2
+	codes := make(chan int, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, err := http.NewRequest(http.MethodPost, serverURL+"/requests", bytes.NewReader(batch))
+			if err != nil {
+				codes <- 0
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err != nil {
+				codes <- 0
+				return
+			}
+			util.SafeClose(resp)
+			codes <- resp.StatusCode
+		}()
+	}
+	wg.Wait()
+	close(codes)
+
+	var ok, conflict, other int
+	for code := range codes {
+		switch code {
+		case http.StatusOK:
+			ok++
+		case http.StatusConflict:
+			conflict++
+		default:
+			other++
+		}
+	}
+	assert.Equal(t, int64(1), executions.Load(), "the same batch must reach the app exactly once")
+	assert.Equal(t, 1, ok)
+	assert.Equal(t, 1, conflict)
+	assert.Zero(t, other)
 }
 
 // configureTestServer POSTs a minimal non-zero config so the server will serve
