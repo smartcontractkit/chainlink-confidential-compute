@@ -54,8 +54,8 @@ import (
 
 // deferredGatewayProxy is a reverse proxy on a fixed port that returns 502
 // until SetTarget is called with the real gateway URL. This solves the
-// chicken-and-egg problem: the enclave's EIF must bake in the gateway URL at
-// build time, but the real URL is only known after the CRE env starts.
+// chicken-and-egg problem: GATEWAY_URL must be fixed before the enclave starts,
+// but the real URL is only known after the CRE env comes up.
 type deferredGatewayProxy struct {
 	mu     sync.RWMutex
 	target *url.URL
@@ -128,13 +128,9 @@ func (p *deferredGatewayProxy) Close() {
 // authenticate to the fake storage service (the fake does not verify the JWT).
 const engineTestStorageKeyHex = "0000000000000000000000000000000000000000000000000000000000000001"
 
-// enclaveHostAddr is the address the enclave reaches host-local test servers at:
-// loopback for fake enclaves (local processes), the wg0 host IP for real Nitro.
+// SOCKS resolves enclaveHostAddr in the parent namespace.
 func enclaveHostAddr() string {
-	if tests.UseFakeEnclave() {
-		return "localhost"
-	}
-	return "100.64.0.3"
+	return "127.0.0.1"
 }
 
 func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
@@ -156,12 +152,11 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
 	// can go into the settings the host injects over vsock at startup.
 	storageAddr, storageSvc := startFakeStorageService(t, enclaveHostAddr())
 	t.Setenv("REQUIRE_BFT_QUORUM", "true")
+	t.Setenv("OUTBOUND_ALLOW_LOCAL_FOR_TESTS", "true")
 
 	// The whole runtime configuration reaches the enclave as one opaque JSON
 	// payload (ENCLAVE_SETTINGS): the host forwards it verbatim and the enclave
 	// app requires the storage endpoint, storage key and gateway URL.
-	// enclaveHostAddr resolves to loopback for fake enclaves (local processes)
-	// and the Nitro wg0 host IP (100.64.0.3) for real enclaves.
 	host := enclaveHostAddr()
 	t.Setenv("ENCLAVE_SETTINGS", fmt.Sprintf(
 		`{"storageKey":%q,"storageServiceUrl":%q,"storageServiceTls":false,"gatewayUrl":%q}`,
@@ -391,10 +386,6 @@ func (f *fakeStorageService) DownloadArtifact(_ context.Context, req *storage_se
 	return &storage_service.DownloadArtifactResponse{Url: u}, nil
 }
 
-// startFakeStorageService starts a gRPC NodeService bound to 0.0.0.0 (so the
-// enclave can reach it over wg0 in nitro) and returns the address the enclave
-// dials it at (enclaveHost:port) plus the service, so the test can set the
-// artifact URL once the WASM server is up.
 func startFakeStorageService(t *testing.T, enclaveHost string) (string, *fakeStorageService) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "0.0.0.0:0")
@@ -460,9 +451,7 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// 3. Set up CRE environment with ConfidentialRelay feature and MOCK_SECRET.
 	// Use real PCR measurements from built EIF. Relay attestation validation
 	// falls back to the default AWS Nitro root CA.
-	// Each enclave has different PCR values (WireGuard keys baked per CID),
-	// so collect all valid measurements. The relay handler accepts a JSON
-	// array of PCR objects and tries each until one matches.
+	// Reusable EIFs share PCR values across CIDs.
 	var pcrsJSON string
 	if tests.UseFakeEnclave() {
 		// Fake enclaves emit a sentinel attestation document instead of real
@@ -566,9 +555,6 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	testLogger.Info().Msgf("Engine-test config served at %s", configURL)
 
 	// Point the fake storage service at the (base64) WASM the enclave will fetch.
-	// The WASM server binds 0.0.0.0, so the enclave reaches the same port at its
-	// enclave-reachable host (wg0 IP for nitro, loopback for fake); swap only the
-	// host of wasmURL (which uses the Docker-reachable host IP).
 	wasmParsed, perr := url.Parse(wasmURL)
 	require.NoError(t, perr, "parsing engine-test WASM URL")
 	storageSvc.setURL(fmt.Sprintf("http://%s:%s%s", enclaveHostAddr(), wasmParsed.Port(), wasmParsed.Path))

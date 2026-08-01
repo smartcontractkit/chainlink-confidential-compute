@@ -49,6 +49,35 @@ func makeExecution(t *testing.T, workflowID, binaryURL string, binaryHash []byte
 	}
 }
 
+func TestNewConfidentialWorkflowsAppRequiresProductionTransports(t *testing.T) {
+	valid := Config{
+		HTTPFetcher: httpfetch.NewFetcherWithClient(httpfetch.DefaultPolicy(), util.NewUnrestrictedClient()),
+		StorageFetcherFactory: storageFetcherFactory(func() types.HTTPClient {
+			return util.NewUnrestrictedClient()
+		}),
+		RemoteDispatcherFactory: func(string, time.Duration) (RemoteDispatcher, error) {
+			return &testRemoteDispatcher{}, nil
+		},
+	}
+
+	tests := map[string]func(*Config){
+		"HTTP fetcher":              func(c *Config) { c.HTTPFetcher = nil },
+		"storage fetcher factory":   func(c *Config) { c.StorageFetcherFactory = nil },
+		"remote dispatcher factory": func(c *Config) { c.RemoteDispatcherFactory = nil },
+	}
+	for name, remove := range tests {
+		t.Run(name, func(t *testing.T) {
+			config := valid
+			remove(&config)
+			_, err := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), config)
+			require.Error(t, err)
+		})
+	}
+
+	_, err := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), valid)
+	require.NoError(t, err)
+}
+
 func TestExecute_HelloWasm(t *testing.T) {
 	// Build the test WASM binary, brotli-compress it, and serve over HTTP.
 	raw := buildTestWasm(t, "hello")
@@ -222,7 +251,7 @@ func TestExecute_HttpCallWasm_EmitsCapabilityMetric(t *testing.T) {
 }
 
 func TestExecute_InvalidAppID(t *testing.T) {
-	app := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil)
+	app := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t))
 	_, execErr := app.Execute([32]byte{}, "wrong-app-id", nil, nil, emitter.NewNoOpEmitter())
 	require.NotNil(t, execErr)
 	assert.Equal(t, http.StatusBadRequest, execErr.Code)
@@ -230,7 +259,7 @@ func TestExecute_InvalidAppID(t *testing.T) {
 }
 
 func TestExecute_InvalidProto(t *testing.T) {
-	app := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil)
+	app := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t))
 	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, []byte("not a proto"), nil, emitter.NewNoOpEmitter())
 	require.NotNil(t, execErr)
 	assert.Equal(t, http.StatusBadRequest, execErr.Code)
@@ -238,7 +267,7 @@ func TestExecute_InvalidProto(t *testing.T) {
 }
 
 func TestExecute_MissingWorkflowID(t *testing.T) {
-	app := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil)
+	app := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t))
 	execution := &confworkflowtypes.WorkflowExecution{
 		BinaryUrl: "https://storage.example.com/binary.wasm",
 		SdkExecuteRequest: &sdkpb.ExecuteRequest{
@@ -255,7 +284,7 @@ func TestExecute_MissingWorkflowID(t *testing.T) {
 }
 
 func TestExecute_MissingBinaryURL(t *testing.T) {
-	app := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil)
+	app := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t))
 	execution := &confworkflowtypes.WorkflowExecution{
 		WorkflowId: "wf-123",
 		SdkExecuteRequest: &sdkpb.ExecuteRequest{
@@ -272,7 +301,7 @@ func TestExecute_MissingBinaryURL(t *testing.T) {
 }
 
 func TestExecute_MissingExecuteRequest(t *testing.T) {
-	app := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil)
+	app := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t))
 	execution := &confworkflowtypes.WorkflowExecution{
 		WorkflowId: "wf-123",
 		BinaryUrl:  "https://storage.example.com/binary.wasm",
@@ -307,7 +336,7 @@ func TestExecute_WasmExecutionFailure(t *testing.T) {
 func TestExecute_FetchFailure(t *testing.T) {
 	// No credentials injected: the storage fetcher is never built, so the binary
 	// fetch fails fast with a BadGateway.
-	app := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil, WithStorageService("127.0.0.1:1", false))
+	app := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), WithStorageService("127.0.0.1:1", false))
 
 	execution := makeExecution(t, "wf-123", testLocator, make([]byte, 32))
 	data, err := proto.Marshal(execution)
@@ -467,10 +496,10 @@ func TestExecute_GracePeriod(t *testing.T) {
 func TestInjectSettings_Timeouts(t *testing.T) {
 	newApp := func() (*confidentialWorkflowsApp, *time.Duration) {
 		var got time.Duration
-		a := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil,
-			WithRemoteDispatcherFactory(func(_ string, timeout time.Duration) RemoteDispatcher {
+		a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t),
+			WithRemoteDispatcherFactory(func(_ string, timeout time.Duration) (RemoteDispatcher, error) {
 				got = timeout
-				return &testRemoteDispatcher{}
+				return &testRemoteDispatcher{}, nil
 			}),
 		).(*confidentialWorkflowsApp)
 		return a, &got
@@ -509,8 +538,8 @@ func TestInjectSettings_Timeouts(t *testing.T) {
 // the enclave stays unconfigured instead of running half-configured until an
 // execution trips over the gap.
 func TestInjectSettings_RequiredFields(t *testing.T) {
-	a := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil,
-		WithRemoteDispatcherFactory(func(string, time.Duration) RemoteDispatcher { return &testRemoteDispatcher{} }),
+	a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t),
+		WithRemoteDispatcherFactory(func(string, time.Duration) (RemoteDispatcher, error) { return &testRemoteDispatcher{}, nil }),
 	).(*confidentialWorkflowsApp)
 
 	err := a.InjectSettings([]byte(`{"requestTimeout":"80s"}`))
@@ -530,7 +559,7 @@ func TestInjectSettings_RequiredFields(t *testing.T) {
 // nanoseconds still parse, and an unparsable duration fails the injection.
 func TestInjectSettings_DurationForms(t *testing.T) {
 	newApp := func() *confidentialWorkflowsApp {
-		return NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil).(*confidentialWorkflowsApp)
+		return NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t)).(*confidentialWorkflowsApp)
 	}
 	payload := func(execTimeout, gracePeriod string) []byte {
 		return []byte(fmt.Sprintf(
@@ -557,6 +586,37 @@ func TestInjectSettings_DurationForms(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "80 seconds")
 	})
+}
+
+func TestInsecureArtifactHTTPComesOnlyFromTheEntrypoint(t *testing.T) {
+	httpServer := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(rw, "d2FzbQ==") // base64("wasm")
+	}))
+	t.Cleanup(httpServer.Close)
+
+	raw, err := json.Marshal(WorkflowSettings{
+		StorageKey:        testStorageKeyHex,
+		StorageServiceURL: "127.0.0.1:1",
+		GatewayURL:        testGatewayURL,
+	})
+	require.NoError(t, err)
+
+	download := func(opts ...Option) ([]byte, error) {
+		a := NewTestConfidentialWorkflowsApp(
+			sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), opts...,
+		).(*confidentialWorkflowsApp)
+		require.NoError(t, a.InjectSettings(raw))
+		t.Cleanup(func() { require.NoError(t, a.storageFetcher.Close()) })
+		fetcher, ok := a.storageFetcher.(*StorageFetcher)
+		require.True(t, ok)
+		return fetcher.download(context.Background(), httpServer.URL)
+	}
+
+	_, err = download()
+	require.Error(t, err, "the default test client must require HTTPS artifacts")
+	got, err := download(WithInsecureArtifactHTTPForTests())
+	require.NoError(t, err)
+	require.Equal(t, []byte("wasm"), got)
 }
 
 // testRemoteDispatcher is a stub that returns pre-configured secrets and

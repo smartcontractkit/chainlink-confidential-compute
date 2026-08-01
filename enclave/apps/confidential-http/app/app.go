@@ -34,16 +34,29 @@ type httpEnclaveApp struct {
 
 var _ types.EnclaveApp = (*httpEnclaveApp)(nil)
 
-func NewHTTPEnclaveApp(httpClient types.HTTPClient) types.EnclaveApp {
+type Option func(*httpEnclaveApp)
+
+// WithTLSClientFactory preserves the default client's transport policy for custom roots.
+func WithTLSClientFactory(factory func(*tls.Config) types.HTTPClient) Option {
+	return func(app *httpEnclaveApp) {
+		app.newTLSClient = factory
+	}
+}
+
+func NewHTTPEnclaveApp(httpClient types.HTTPClient, opts ...Option) types.EnclaveApp {
 	if httpClient == nil {
 		httpClient = util.NewRestrictedHTTPClient()
 	}
-	return &httpEnclaveApp{
+	app := &httpEnclaveApp{
 		httpClient: httpClient,
 		newTLSClient: func(tlsCfg *tls.Config) types.HTTPClient {
 			return util.NewRestrictedHTTPClientWithTLS(tlsCfg)
 		},
 	}
+	for _, opt := range opts {
+		opt(app)
+	}
+	return app
 }
 
 func (a *httpEnclaveApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, _ ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {

@@ -16,11 +16,6 @@ FROM golang:1.26-bookworm AS builder
 # fails fast with "go.mod requires go >= X" if the base lags the go directive.
 ENV GOTOOLCHAIN=auto
 
-ARG HOST_CID=3
-ARG ENCLAVE_CID=16
-ENV HOST_CID=$HOST_CID
-ENV ENCLAVE_CID=$ENCLAVE_CID
-
 WORKDIR /app
 
 # Copy root module.
@@ -44,30 +39,13 @@ RUN cd enclave/apps/${APP_NAME} && \
 
 FROM amazonlinux:latest
 
-ARG HOST_CID=3
-ARG ENCLAVE_CID=16
-ENV HOST_CID=$HOST_CID
-ENV ENCLAVE_CID=$ENCLAVE_CID
-
 # The gateway and storage endpoints are not baked in here: the host injects them
 # over vsock at runtime (ENCLAVE_SETTINGS), so one measured EIF serves every
 # environment.
 
-# Enclave DNS resolver (empty falls back to the AWS VPC resolver 169.254.169.253
-# in setup-enclave-networking.sh)
-ARG DNS_RESOLVER=""
-ENV DNS_RESOLVER=$DNS_RESOLVER
-
-# Install required packages for networking and time synchronization.
 RUN dnf upgrade -y && \
     dnf install -y \
-    hostname \
-    iputils \
     iproute \
-    wireguard-tools \
-    bind-utils \
-    procps-ng \
-    curl-minimal \
     ca-certificates \
     chrony && \
     dnf clean all
@@ -76,19 +54,6 @@ RUN dnf upgrade -y && \
 RUN echo "refclock PHC /dev/ptp0 poll 0 offset 0 prefer" > /etc/chrony.conf && \
     echo "makestep 1.0 3" >> /etc/chrony.conf
 
-# Create directory structure for WireGuard keys.
-RUN mkdir -p /etc/wireguard
-
-# TARGETARCH is set automatically by buildx (amd64 / arm64).
-ARG TARGETARCH
-COPY enclave/nitro/wireguard-go-vsock-${TARGETARCH} /usr/bin/wireguard-go-vsock
-COPY enclave/nitro/outbound-https/setup-enclave-networking.sh /usr/bin/
-
-RUN chmod +x /usr/bin/wireguard-go-vsock /usr/bin/setup-enclave-networking.sh
-
-COPY enclave/nitro/.wireguard/host-public-key /etc/wireguard/
-COPY enclave/nitro/.wireguard/enclave-private-key /etc/wireguard/
-
 COPY --from=builder /enclave-app /usr/bin/
 
 ARG ALLOW_RECONFIG=
@@ -96,6 +61,8 @@ ENV ALLOW_RECONFIG=$ALLOW_RECONFIG
 
 # Create startup script that initializes chrony and then runs the enclave app.
 RUN echo '#!/bin/sh' > /start.sh && \
+    echo 'ip addr replace 127.0.0.1/8 dev lo' >> /start.sh && \
+    echo 'ip link set dev lo up' >> /start.sh && \
     echo 'chronyd' >> /start.sh && \
     echo 'chronyc wait syncing' >> /start.sh && \
     echo 'ARGS=""' >> /start.sh && \

@@ -11,6 +11,7 @@ import (
 	"log"
 	"log/slog"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/host/proxy-server"
 	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/vsock"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -63,6 +65,8 @@ var (
 	idleTimeout = flag.Duration("idle-timeout", 2*time.Minute, "Max duration to keep idle keep-alive connections open")
 	// maxHeaderBytes caps the accepted request header size (1 MiB).
 	maxHeaderBytes = flag.Int("max-header-bytes", 1<<20, "Max size of request headers in bytes (default 1 MiB)")
+
+	outboundAllowLocalForTests = flag.Bool("outbound-allow-local-for-tests", os.Getenv("OUTBOUND_ALLOW_LOCAL_FOR_TESTS") == "true", "Allow outbound connections to local addresses (insecure, for testing only). Reads OUTBOUND_ALLOW_LOCAL_FOR_TESTS.")
 )
 
 // `hostServer` provides an untrusted proxy for AWS Nitro Enclaves.
@@ -908,6 +912,9 @@ func main() {
 	if *shutdownTimeout <= 0 {
 		log.Fatalf("shutdown-timeout (%v) must be greater than zero", *shutdownTimeout)
 	}
+	if *enclaveCID <= 0 || uint64(*enclaveCID) > math.MaxUint32 {
+		log.Fatalf("enclave-cid (%d) must be between 1 and %d", *enclaveCID, uint64(math.MaxUint32))
+	}
 
 	if *requireBFTQuorum {
 		lggr.Infow("BFT quorum required: batch threshold is 2f+1", "requireBFTQuorum", true)
@@ -934,6 +941,19 @@ func main() {
 		closeCancel()
 		log.Fatalf("failed to initialize host metrics: %v", err)
 	}
+	outboundBroker, err := proxyserver.New(*outboundAllowLocalForTests)
+	if err != nil {
+		log.Fatalf("failed to construct outbound proxy: %v", err)
+	}
+	outboundListener, err := vsock.ListenAt(vsock.CIDAny, types.ProxyPort, nil)
+	if err != nil {
+		log.Fatalf("failed to listen for enclave outbound traffic: %v", err)
+	}
+	outboundErr := make(chan error, 1)
+	go func() {
+		outboundErr <- outboundBroker.Serve(outboundListener)
+	}()
+	lggr.Infow("started enclave outbound proxy", "port", types.ProxyPort)
 
 	// Start servers. Optionally handle the config endpoint on a different port.
 	host := NewHostServer(ctx, nil)
@@ -1011,9 +1031,12 @@ func main() {
 		}
 	}
 
-	// Wait for shutdown signal
-	sig := <-sigCh
-	lggr.Infow("received shutdown signal", "signal", sig.String())
+	select {
+	case sig := <-sigCh:
+		lggr.Infow("received shutdown signal", "signal", sig.String())
+	case proxyErr := <-outboundErr:
+		lggr.Errorw("outbound proxy stopped unexpectedly", "error", proxyErr)
+	}
 
 	// Cancel context to stop all background goroutines (like quorum timeout handlers)
 	cancel()
@@ -1031,6 +1054,7 @@ func main() {
 	if err := mainServer.Shutdown(shutdownCtx); err != nil {
 		lggr.Errorw("main server shutdown error", "error", err)
 	}
+	_ = outboundListener.Close()
 	// Give telemetry its own timeout budget
 	flushCtx, flushCancel := context.WithTimeout(context.Background(), *shutdownTimeout)
 	defer flushCancel()

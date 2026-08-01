@@ -43,7 +43,7 @@ For the `/requests` endpoint, the app uses the standard `ComputeRequest` struct.
 ### Networking
 The host program contained in `enclave/nitro/host/host.go` acts as an untrusted proxy for the enclave. It communicates with the enclave over [vsock](https://man7.org/linux/man-pages/man7/vsock.7.html); in order to accept a user request, it parses the requet from the user, then constructs its own HTTP request it sends over the vsock channel to the enclave. 
 
-The host program is also responsible for routing outbound requests from the enclave. In order to do this, it uses [wireguard](https://pkg.go.dev/github.com/seedcx/wireguard-go-vsock#section-readme) to provide a network interface for the enclave that can be easily configured to forward traffic out to the intended IP. Most networking logic is contained in `../../host/setup-host-networking.sh` and `/outbound-https` Since packets are forwarded without any other interaction, TLS sessions are established between the enclave and the destination IP of the outbound request. Consequently, data transmitted over the TLS session is not visible to the untrusted proxy (host), such that secrets can remain private. 
+The host program also runs a SOCKS5 proxy over vsock for enclave outbound TCP connections. The host resolves one IPv4 address and applies the request profile before connecting. It never terminates TLS, so HTTPS traffic remains encrypted end to end between the enclave and destination.
 
 The enclave must maintain a set of root certificates in order to safely communicate with the outside internet. These are copied from the host system and built into the enclave in the  `Dockerfile`.
 

@@ -84,8 +84,9 @@ confidential-compute/
 │   ├── fake/                     # Fake enclave runtime: runs the stack as local processes.
 │   ├── vsock/                    # vsock abstraction; emulates vsock over loopback TCP.
 │   ├── nitro/                    # AWS Nitro-specific environment code.
-│   │   ├── host/                 # Untrusted proxy for inbound network traffic.
-│   │   └── outbound-https/       # Untrusted proxy for outbound network traffic.
+│   │   ├── host/                 # Parent host for inbound traffic and outbound tunnels.
+│   │   │   └── proxy-server/ # Parent-side VSOCK-to-TCP relay.
+│   │   └── proxy-client/ # Enclave-side policy-aware VSOCK egress dialer.
 │   ├── server/                   # Trusted enclave server that dispatches requests to an app.
 │   └── services/                 # Generic services available to enclave applications.
 │       ├── attestor/             # Generates remote attestations.
@@ -222,7 +223,7 @@ make e2e-local-conf-http ENCLAVE_TYPE=NITRO        # TestConfidentialHTTPE2E
 make e2e-local-conf-workflows ENCLAVE_TYPE=NITRO   # TestConfidentialWorkflowsEngineE2E
 ```
 
-These targets clear stale Nitro state (leftover enclaves, `wireguard-go-vsock` orphans, cached EIF/PCR artifacts) automatically before each run. To run that cleanup on its own:
+These targets clear stale Nitro state (leftover enclaves and cached EIF/PCR artifacts) automatically before each run. To run that cleanup on its own:
 
 ```bash
 make clean-e2e-nitro
@@ -246,8 +247,6 @@ The enclave build process is publicly verifiable so users can trust what runs in
 # Verify measurements
 ./enclave/nitro/build-or-verify-enclave.sh --docker-uri [DOCKER_IMAGE] --output-file [EIF_NAME] --measurements-file [MEASUREMENTS_FILE]
 ```
-
-We also use the `verify-wireguard-go-vsock` GitHub workflow to verify the source of the `wireguard-go-vsock` binary, which handles networking inside our AWS Nitro Enclaves.
 
 ## Using the Enclave E2E Test Helpers From Another Repository
 

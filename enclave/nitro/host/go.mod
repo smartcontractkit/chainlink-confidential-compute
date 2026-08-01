@@ -7,6 +7,7 @@ require (
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260804191526-b7a850ae7648
 	github.com/stretchr/testify v1.11.1
+	github.com/things-go/go-socks5 v0.1.1
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.43.0
 	go.opentelemetry.io/otel/metric v1.43.0

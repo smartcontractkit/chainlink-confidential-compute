@@ -94,7 +94,7 @@ func TestStorageFetcher_SendsBareArtifactID(t *testing.T) {
 	locator := "https://storage.cre.stage.external.griddle.sh/artifacts/" + id + "/binary.wasm"
 	rawBinary := []byte("wasm-bytes")
 
-	httpSrv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+	httpSrv := httptest.NewTLSServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		_, _ = rw.Write([]byte(base64.StdEncoding.EncodeToString(rawBinary)))
 	}))
 	t.Cleanup(httpSrv.Close)
@@ -107,7 +107,9 @@ func TestStorageFetcher_SendsBareArtifactID(t *testing.T) {
 	go func() { _ = grpcSrv.Serve(lis) }()
 	t.Cleanup(grpcSrv.Stop)
 
-	f, _, err := NewStorageFetcher(lis.Addr().String(), false, testStorageKeyHex, 0, 5*time.Second, logger.Test(t))
+	f, _, err := NewStorageFetcher(
+		lis.Addr().String(), false, testStorageKeyHex, 0, 5*time.Second, logger.Test(t), httpSrv.Client(),
+	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = f.Close() })
 
@@ -119,4 +121,12 @@ func TestStorageFetcher_SendsBareArtifactID(t *testing.T) {
 	require.NotNil(t, req)
 	require.Equal(t, id, req.GetId(), "enclave must send the bare artifact id, not the full URL")
 	require.Equal(t, storage_service.ArtifactType_ARTIFACT_TYPE_BINARY, req.GetType())
+}
+
+func TestNewStorageFetcherRequiresArtifactHTTPClient(t *testing.T) {
+	f, _, err := NewStorageFetcher(
+		"127.0.0.1:1", false, testStorageKeyHex, 0, time.Second, logger.Test(t), nil,
+	)
+	require.Nil(t, f)
+	require.EqualError(t, err, "artifact HTTP client is required")
 }

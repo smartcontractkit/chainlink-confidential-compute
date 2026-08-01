@@ -6,7 +6,6 @@ import (
 	"time"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
-	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/app"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/fake/runner"
@@ -15,6 +14,7 @@ import (
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
 	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 )
 
 // This is the fake counterpart of environments/nitro/main.go: it wires the same
@@ -69,17 +69,21 @@ func main() {
 	// Runtime config is injected by the host over vsock (see host
 	// injectSettings -> app.InjectSettings); the factory builds the remote
 	// dispatcher once the gateway URL arrives.
-	dispatcherFactory := func(gatewayURL string, timeout time.Duration) app.RemoteDispatcher {
+	dispatcherFactory := func(gatewayURL string, timeout time.Duration) (app.RemoteDispatcher, error) {
 		if timeout <= 0 {
 			timeout = *gatewayTimeout
 		}
 		client := gateway.NewGatewayClient(gatewayURL, att, gateway.WithTimeout(timeout))
 		verifier := signatureverifier.NewEd25519SignatureVerifier()
-		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier)
+		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier), nil
 	}
 
+	appOptions := []app.Option{app.WithRemoteDispatcherFactory(dispatcherFactory)}
+	if *allowReconfig {
+		appOptions = append(appOptions, app.WithInsecureArtifactHTTPForTests())
+	}
 	err = runner.StartFakeEnclave(
-		app.NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, appLogger, nil, app.WithRemoteDispatcherFactory(dispatcherFactory)),
+		app.NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, appLogger, appOptions...),
 		att,
 		kc,
 		comb,
