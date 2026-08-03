@@ -51,7 +51,11 @@
 
   env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":false}}", CL_CRE_SETTINGS_DEFAULT = "{\"RemoteExecutableWorkflowDONBindingEnabled\":\"true\",\"PerWorkflow\":{\"ConfidentialWorkflows\":{\"Enabled\":\"true\"}}}" }
   supported_evm_chains = [1337, 2337]
-  capabilities = ["consensus", "confidential-workflows", "confidential-relay", "cron", "http-action", "http-trigger", "don-time"]
+  # evm-1337 registers the EVM read/write capability for the local chain, which the
+  # engine test's confidential workflow needs to write its report on-chain. Chain
+  # selector 3379446385462418246 (geth-testnet, chain id 1337) is already in the
+  # cresettings ChainAllowed default allowlist, so no extra CL_CRE_SETTINGS is needed.
+  capabilities = ["consensus", "confidential-workflows", "confidential-relay", "cron", "http-action", "http-trigger", "don-time", "evm-1337"]
   exposes_remote_capabilities = true
   registry_based_launch_allowlist = ["cron-trigger@1.0.0"]
 

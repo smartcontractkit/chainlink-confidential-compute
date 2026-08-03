@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -21,14 +23,17 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/rs/zerolog"
 	storage_service "github.com/smartcontractkit/chainlink-protos/storage-service/go"
 	ns "github.com/smartcontractkit/chainlink-testing-framework/framework/components/simple_node_set"
+	"github.com/smartcontractkit/chainlink-testing-framework/seth"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/smartcontractkit/chainlink/core/scripts/cre/environment/examples/contracts/permissionless_feeds_consumer"
 	keystone_changeset "github.com/smartcontractkit/chainlink/deployment/keystone/changeset"
 	crelib "github.com/smartcontractkit/chainlink/system-tests/lib/cre"
 	crecontracts "github.com/smartcontractkit/chainlink/system-tests/lib/cre/contracts"
@@ -336,11 +341,14 @@ func initCWEngineTestServers(configJSON string) (wasmURL string, configURL strin
 // syncer -> ConfidentialModule -> confidential-workflows capability -> enclave ->
 // WASM (Subscribe + Trigger) -> GetSecret (remote dispatch to VaultDON) +
 // http.SendRequest with ConsensusMedianAggregation (intercepted locally by the
-// enclave: http-actions + consensus/Simple both handled in-process).
+// enclave: http-actions + consensus/Simple both handled in-process) +
+// ReportFromDon/evm.WriteReport (routed back OUT of the enclave to the DONs, since
+// report signing and chain writes are consensus-bound).
 //
 // Success signals:
 //   - "engine-test-secret" + the expected secret value in workflow-DON logs.
 //   - "engine-test-http" + status=200 in workflow-DON logs.
+//   - the reported price readable via getPrice on the deployed consumer contract.
 //
 // Echo target: https://postman-echo.com/post. The EIF-baked DefaultPolicy
 // (https over 443, safeurl privateNetworks blocking) passes public TLS.
@@ -540,8 +548,17 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 		"failed to inject VaultPublicKey/Threshold into vault@1.0.0 capability config")
 	testLogger.Info().Msg("Injected VaultPublicKey + Threshold into vault@1.0.0 capability config")
 
+	// 4c. Deploy the report receiver the workflow writes to. PermissionlessFeedsConsumer
+	// has no access control on onReport and exposes getPrice, so the test can assert
+	// the write landed on-chain rather than trusting a log line.
+	consumerAddr := deployFeedsConsumer(t, sethClientFor(t, testEnv), testLogger)
+	chainSelector := testEnv.CreEnvironment.Blockchains[0].ChainSelector() //nolint:staticcheck // mirrors system-tests usage
+
 	// 5. Compile engine-test WASM, serve binary + config, and copy to Docker containers.
-	configJSON := fmt.Sprintf(`{"echo_url":%q}`, echoURL)
+	configJSON := fmt.Sprintf(
+		`{"echo_url":%q,"consumer_address":%q,"chain_selector":%d,"feed_id":%q,"price":%d}`,
+		echoURL, consumerAddr.Hex(), chainSelector, engineTestFeedID, engineTestPrice,
+	)
 	wasmURL, configURL, artifactDir, _, initErr := initCWEngineTestServers(configJSON)
 	require.NoError(t, initErr, "failed to initialize engine-test WASM server")
 	testLogger.Info().Msgf("Engine-test WASM binary served at %s", wasmURL)
@@ -617,6 +634,14 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// (e.g. if the cursor logic changed to skip the first URL).
 	require.Positive(t, deadGwProxy.Hits(), "dead gateway proxy was never hit; round-robin failover was not exercised")
 
+	// 7b. The engine log above only proves the WASM returned without error. Read the
+	// consumer contract back to prove the report was actually signed by the DON
+	// (consensus.Report via ReportFromDon) and delivered on-chain by the forwarder
+	// (evm.WriteReport via UsingTheDons) — the two legs a TEE handler has to route
+	// out of the enclave. A stale/zero value here means the write leg silently
+	// no-op'd even though the workflow reported success.
+	assertFeedReportWritten(t, sethClientFor(t, testEnv), consumerAddr, testLogger, 2*time.Minute)
+
 	// 8. The workflow has now loaded and executed inside the enclaves (WASM runtime
 	//    + binary resident, requests processed). The reported memory usage should
 	//    differ from the pre-deploy baseline, exercising the /memory endpoint end
@@ -629,7 +654,102 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// 85MB across both enclaves. Flag if we start consuming substantially more.
 	require.Less(t, memAfter, uint64(100), "total enclave memory should stay under 100MB; a large jump may indicate a leak or regression")
 
-	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception validated")
+	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write validated")
+}
+
+// engineTestFeedID / engineTestPrice are the feed the confidential workflow reports
+// on-chain. The price is an arbitrary fixed sentinel so the read-back is an exact
+// equality check rather than a "changed from zero" heuristic.
+const (
+	engineTestFeedID = "0x018bfe8840000000000000000000000000000000000000000000000000000000"
+	engineTestPrice  = uint64(4242424242)
+)
+
+// sethClientFor returns the funded seth client for the test's EVM chain.
+func sethClientFor(t *testing.T, testEnv *ttypes.TestEnvironment) *seth.Client {
+	t.Helper()
+	require.IsType(t, &evm.Blockchain{}, testEnv.CreEnvironment.Blockchains[0], "expected EVM blockchain")
+	return testEnv.CreEnvironment.Blockchains[0].(*evm.Blockchain).SethClient
+}
+
+// deployFeedsConsumer deploys PermissionlessFeedsConsumer, the report receiver the
+// confidential workflow writes to. Its onReport is unauthenticated, so no forwarder
+// allowlisting is needed for the DON's write to land.
+func deployFeedsConsumer(t *testing.T, sethClient *seth.Client, testLogger zerolog.Logger) common.Address {
+	t.Helper()
+
+	consABI, abiErr := permissionless_feeds_consumer.PermissionlessFeedsConsumerMetaData.GetAbi()
+	require.NoError(t, abiErr, "failed to get PermissionlessFeedsConsumer ABI")
+
+	data, deployErr := sethClient.DeployContract(
+		sethClient.NewTXOpts(),
+		"PermissionlessFeedsConsumer",
+		*consABI,
+		common.FromHex(permissionless_feeds_consumer.PermissionlessFeedsConsumerMetaData.Bin),
+	)
+	require.NoError(t, deployErr, "failed to deploy PermissionlessFeedsConsumer")
+	testLogger.Info().Msgf("Deployed PermissionlessFeedsConsumer at %s", data.Address.Hex())
+	return data.Address
+}
+
+// assertFeedReportWritten polls getPrice(feedID) until the workflow's report shows up
+// with the exact price the WASM was configured to write, then checks the stored
+// timestamp is sane. The workflow's cron fires every 30s and the forwarder needs a
+// block or two, so this polls rather than reading once.
+func assertFeedReportWritten(
+	t *testing.T,
+	sethClient *seth.Client,
+	consumerAddr common.Address,
+	testLogger zerolog.Logger,
+	timeout time.Duration,
+) {
+	t.Helper()
+
+	consumer, err := permissionless_feeds_consumer.NewPermissionlessFeedsConsumer(consumerAddr, sethClient.Client)
+	require.NoError(t, err, "failed to bind PermissionlessFeedsConsumer at %s", consumerAddr.Hex())
+
+	feedID, err := parseEngineTestFeedID()
+	require.NoError(t, err, "failed to parse engine test feed id")
+
+	want := new(big.Int).SetUint64(engineTestPrice)
+	deadline := time.Now().Add(timeout)
+	var lastPrice *big.Int
+	var lastTimestamp uint32
+	for {
+		price, timestamp, callErr := consumer.GetPrice(&bind.CallOpts{Context: t.Context()}, feedID)
+		if callErr == nil {
+			lastPrice, lastTimestamp = price, timestamp
+			if price != nil && price.Cmp(want) == 0 {
+				testLogger.Info().
+					Str("price", price.String()).
+					Uint32("timestamp", timestamp).
+					Str("consumer", consumerAddr.Hex()).
+					Msg("Chain write verified on-chain: DON-signed report from TEE handler landed in the consumer")
+				require.Positive(t, timestamp, "stored feed timestamp should be non-zero")
+				return
+			}
+		} else {
+			testLogger.Info().Msgf("getPrice call failed, retrying: %v", callErr)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for feed report at %s: got price=%v timestamp=%d, want price=%s",
+				timeout, consumerAddr.Hex(), lastPrice, lastTimestamp, want)
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func parseEngineTestFeedID() ([32]byte, error) {
+	var id [32]byte
+	b, err := hex.DecodeString(strings.TrimPrefix(engineTestFeedID, "0x"))
+	if err != nil {
+		return id, err
+	}
+	if len(b) != 32 {
+		return id, fmt.Errorf("feed id decoded to %d bytes, want 32", len(b))
+	}
+	copy(id[:], b)
+	return id, nil
 }
 
 // enclaveUsedMemoryMB queries an enclave's /memory endpoint and returns the

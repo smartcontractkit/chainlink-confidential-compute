@@ -1,6 +1,6 @@
 module github.com/smartcontractkit/chainlink-confidential-compute/tests
 
-go 1.26.4
+go 1.26.5
 
 replace github.com/smartcontractkit/chainlink-confidential-compute => ../
 
@@ -14,7 +14,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/pkg/errors v0.9.1
 	github.com/rs/zerolog v1.35.1
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260727165036-9952de44dbab
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260730174352-0e76f47c2be5
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
 	github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-00010101000000-000000000000
 	github.com/smartcontractkit/chainlink-evm/gethwrappers v0.0.0-20260713161920-de075095648b
@@ -22,10 +22,11 @@ require (
 	github.com/smartcontractkit/chainlink-protos/job-distributor v0.20.1-0.20260701185448-696c075849ea
 	github.com/smartcontractkit/chainlink-protos/storage-service v0.3.0
 	github.com/smartcontractkit/chainlink-testing-framework/framework v0.16.6-0.20260708113039-95f97b2d25e9
-	github.com/smartcontractkit/chainlink/core/scripts v0.0.0-20260729125528-2ab54efc0fd3
-	github.com/smartcontractkit/chainlink/deployment v0.0.0-20260729125528-2ab54efc0fd3
-	github.com/smartcontractkit/chainlink/system-tests/lib v0.0.0-20260729125528-2ab54efc0fd3
-	github.com/smartcontractkit/chainlink/system-tests/tests v0.0.0-20260729125528-2ab54efc0fd3
+	github.com/smartcontractkit/chainlink-testing-framework/seth v1.51.5
+	github.com/smartcontractkit/chainlink/core/scripts v0.0.0-20260803160837-f0bdec175384
+	github.com/smartcontractkit/chainlink/deployment v0.0.0-20260803160837-f0bdec175384
+	github.com/smartcontractkit/chainlink/system-tests/lib v0.0.0-20260803160837-f0bdec175384
+	github.com/smartcontractkit/chainlink/system-tests/tests v0.0.0-20260803160837-f0bdec175384
 	github.com/smartcontractkit/chainlink/v2 v2.32.0
 	github.com/smartcontractkit/tdh2/go/tdh2 v0.0.0-20251120172354-e8ec0386b06c
 	github.com/stretchr/testify v1.11.1
@@ -442,12 +443,12 @@ require (
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/skratchdot/open-golang v0.0.0-20200116055534-eef842397966 // indirect
 	github.com/smartcontractkit/ccip-owner-contracts v0.1.0 // indirect
-	github.com/smartcontractkit/chain-selectors v1.0.106 // indirect
+	github.com/smartcontractkit/chain-selectors v1.0.107 // indirect
 	github.com/smartcontractkit/chainlink-aptos v0.0.0-20260708114855-e953eeb028a7 // indirect
 	github.com/smartcontractkit/chainlink-aptos/codec v0.0.0-20260716230027-bd85997bc03c // indirect
 	github.com/smartcontractkit/chainlink-automation v0.8.1 // indirect
 	github.com/smartcontractkit/chainlink-canton v0.0.0-20260615233851-4e78e7c23a58 // indirect
-	github.com/smartcontractkit/chainlink-ccip v0.1.1-solana.0.20260715130435-1e32cea69af1 // indirect
+	github.com/smartcontractkit/chainlink-ccip v0.1.1-solana.0.20260730150638-e7b61c05cec1 // indirect
 	github.com/smartcontractkit/chainlink-ccip/chains/evm v0.0.0-20260624154507-ea7ff77a0ddb // indirect
 	github.com/smartcontractkit/chainlink-ccip/chains/solana v0.0.0-20260624154507-ea7ff77a0ddb // indirect
 	github.com/smartcontractkit/chainlink-ccip/chains/solana/gobindings v0.0.0-20260624154507-ea7ff77a0ddb // indirect
@@ -487,7 +488,6 @@ require (
 	github.com/smartcontractkit/chainlink-testing-framework/framework/components/fake v0.15.0 // indirect
 	github.com/smartcontractkit/chainlink-testing-framework/lib v1.54.9 // indirect
 	github.com/smartcontractkit/chainlink-testing-framework/parrot v0.6.2 // indirect
-	github.com/smartcontractkit/chainlink-testing-framework/seth v1.51.5 // indirect
 	github.com/smartcontractkit/chainlink-ton v1.0.5-0.20260629213843-c52e07523035 // indirect
 	github.com/smartcontractkit/chainlink-ton/cciplib v0.1.1-0.20260716214810-db5ecc877490 // indirect
 	github.com/smartcontractkit/chainlink-tron/relayer v0.0.11-0.20260408092456-3c6369888d4a // indirect
@@ -670,50 +670,50 @@ exclude github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/httpa
 // really big dependency we don't need
 exclude go.starlark.net v0.0.0-20230525235612-a134d8f9ddca
 
-replace github.com/smartcontractkit/chainlink/v2 => github.com/smartcontractkit/chainlink/v2 v2.29.1-cre-beta.0.0.20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/v2 => github.com/smartcontractkit/chainlink/v2 v2.29.1-cre-beta.0.0.20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/core/scripts => github.com/smartcontractkit/chainlink/core/scripts v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/core/scripts => github.com/smartcontractkit/chainlink/core/scripts v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/deployment => github.com/smartcontractkit/chainlink/deployment v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/deployment => github.com/smartcontractkit/chainlink/deployment v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/lib => github.com/smartcontractkit/chainlink/system-tests/lib v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/lib => github.com/smartcontractkit/chainlink/system-tests/lib v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests => github.com/smartcontractkit/chainlink/system-tests/tests v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests => github.com/smartcontractkit/chainlink/system-tests/tests v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/evm/evmread => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/evm/evmread v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/evm/evmread => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/evm/evmread v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/evm/logtrigger => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/evm/logtrigger v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/evm/logtrigger => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/evm/logtrigger v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/httpaction => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/httpaction v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/httpaction => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/httpaction v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/aptos/aptosread => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/aptos/aptosread v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/aptos/aptosread => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/aptos/aptosread v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/aptos/aptoswrite => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/aptos/aptoswrite v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/aptos/aptoswrite => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/aptos/aptoswrite v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/aptos/aptoswriteroundtrip => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/aptos/aptoswriteroundtrip v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/aptos/aptoswriteroundtrip => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/aptos/aptoswriteroundtrip v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/consensus => github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/consensus v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/consensus => github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/consensus v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/evm/evmread-negative => github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/evm/evmread-negative v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/evm/evmread-negative => github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/evm/evmread-negative v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/evm/evmwrite-negative => github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/evm/evmwrite-negative v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/evm/evmwrite-negative => github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/evm/evmwrite-negative v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/evm/logtrigger-negative => github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/evm/logtrigger-negative v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/evm/logtrigger-negative => github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/evm/logtrigger-negative v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/http => github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/http v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/http => github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/http v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/httpaction-negative => github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/httpaction-negative v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/httpaction-negative => github.com/smartcontractkit/chainlink/system-tests/tests/regression/cre/httpaction-negative v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/vaultsecret => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/vaultsecret v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/vaultsecret => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/vaultsecret v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/solana/solwrite => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/solana/solwrite v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/solana/solwrite => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/solana/solwrite v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/solana/solread => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/solana/solread v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/solana/solread => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/solana/solread v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/solana/sollogtrigger => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/solana/sollogtrigger v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/solana/sollogtrigger => github.com/smartcontractkit/chainlink/system-tests/tests/smoke/cre/solana/sollogtrigger v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/core/scripts/cre/environment/examples/workflows/cron => github.com/smartcontractkit/chainlink/core/scripts/cre/environment/examples/workflows/cron v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/core/scripts/cre/environment/examples/workflows/cron => github.com/smartcontractkit/chainlink/core/scripts/cre/environment/examples/workflows/cron v0.0.0-20260803160837-f0bdec175384
 
-replace github.com/smartcontractkit/chainlink/core/scripts/cre/environment/examples/workflows/proof-of-reserve/cron-based => github.com/smartcontractkit/chainlink/core/scripts/cre/environment/examples/workflows/proof-of-reserve/cron-based v0.0.0-20260729125528-2ab54efc0fd3
+replace github.com/smartcontractkit/chainlink/core/scripts/cre/environment/examples/workflows/proof-of-reserve/cron-based => github.com/smartcontractkit/chainlink/core/scripts/cre/environment/examples/workflows/proof-of-reserve/cron-based v0.0.0-20260803160837-f0bdec175384
 
 exclude github.com/smartcontractkit/chainlink-ccip/chains/evm/deployment v0.0.0-20260317185256-d5f7db87ae70
