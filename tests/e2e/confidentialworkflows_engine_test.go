@@ -900,6 +900,7 @@ func deployConfidentialWorkflowForEngine(
 		0, // donID unused for v2
 		testEnv.Dons.MustWorkflowDON().DonFamily,
 		"engine-test-confidential",
+		creworkflow.DefaultWorkflowTag,
 		binaryURL,
 		configURLPtr,
 		nil, // no secrets URL
