@@ -1,6 +1,7 @@
 package server
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -34,4 +35,29 @@ func TestResponseEmitter_ErrorResponseCarriesMetricEvents(t *testing.T) {
 	// WriteErrorResponse appends its own request_completed event and must carry
 	// the full ordered list (2 capability_execution + 1 request_completed).
 	require.Len(t, e.GetMetricEvents(), 2)
+}
+
+func TestResponseEmitter_ConcurrentEmit(t *testing.T) {
+	const (
+		parallelCalls = 30 // chainlink-common's default per-execution pending-call limit
+		eventsPerCall = 3  // capability_started, capability_execution, capability_finished
+	)
+
+	e := NewResponseEmitter()
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(parallelCalls)
+	for call := range parallelCalls {
+		go func() {
+			defer wg.Done()
+			<-start
+			e.Emit("capability_started", map[string]any{"step_ref": call})
+			e.Emit("capability_execution", map[string]any{"step_ref": call})
+			e.Emit("capability_finished", map[string]any{"step_ref": call})
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	assert.Len(t, e.GetMetricEvents(), parallelCalls*eventsPerCall)
 }
