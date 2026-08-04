@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/andybalholm/brotli v1.1.1
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260730174352-0e76f47c2be5
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260804011106-1b75a4f4e625
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260622152157-c8e129347b8b
 	github.com/smartcontractkit/chainlink-protos/storage-service v0.3.0

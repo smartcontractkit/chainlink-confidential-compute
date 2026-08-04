@@ -21,7 +21,7 @@ on:
     # Nightly real-enclave run at 07:00 UTC.
     - cron: '0 7 * * *'
 env:
-  CHAINLINK_COMMIT_SHA: 3226267c70f234be030c417cee49efdb4bf3edfc
+  CHAINLINK_COMMIT_SHA: c3297d92145dda0a6751ab6709e0719623bf0835
   LEGACY_COMMIT_SHA: 7d70fcf65d8b5af102d8267b54d31ea163dea203 # initial commit, the commit pointing to whatever is capability gitref is deployed in Chainlink's plugins.private.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.private.yaml#L50.
   LEGACY_ENCLAVE_RELEASE: 1.2.0 # The release version whose enclaves are currently deployed in production. Update this when deploying new enclaves.
   # Optional PCR override: when all three are set, the legacy-enclaves leg uses

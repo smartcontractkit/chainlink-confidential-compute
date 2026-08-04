@@ -10,7 +10,7 @@ replace github.com/smartcontractkit/chainlink-confidential-compute => ../../../.
 
 require (
 	github.com/smartcontractkit/capabilities/libs v0.0.0-20260223172632-a716db2e04a0
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260730174352-0e76f47c2be5
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260804011106-1b75a4f4e625
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20260422000908-67af9e15fe65
 	github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework v0.0.0-20260422000908-67af9e15fe65
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260622152157-c8e129347b8b
