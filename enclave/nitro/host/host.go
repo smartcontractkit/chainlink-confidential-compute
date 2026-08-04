@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/signal"
 	"slices"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -45,27 +44,13 @@ var (
 	// requireBFTQuorum raises the batch quorum threshold from f+1 (one honest
 	// node) to 2f+1 (a BFT supermajority). Reads REQUIRE_BFT_QUORUM.
 	requireBFTQuorum = flag.Bool("require-bft-quorum", os.Getenv("REQUIRE_BFT_QUORUM") == "true", "require a 2f+1 BFT quorum instead of f+1. Reads REQUIRE_BFT_QUORUM.")
-	storageKey       = flag.String("storage-key", os.Getenv("STORAGE_KEY"), "hex ed25519 CRE storage-service key to inject into the enclave over vsock (from a K8s secret). Reads STORAGE_KEY.")
-	storageSvcURL    = flag.String("storage-service-url", os.Getenv("STORAGE_SERVICE_URL"), "CRE storage-service gRPC address (host:port) to inject into the enclave. Reads STORAGE_SERVICE_URL.")
-	storageSvcTLS    = flag.Bool("storage-service-tls", os.Getenv("STORAGE_SERVICE_TLS") != "false", "whether the enclave should use TLS for the storage-service connection. Reads STORAGE_SERVICE_TLS (default true).")
-	gatewayURL       = flag.String("gateway-url", os.Getenv("GATEWAY_URL"), "Gateway URL(s) for remote dispatch to inject into the enclave. Comma-separated for round-robin failover across multiple gateways. Empty leaves the enclave local-only. Reads GATEWAY_URL.")
 
-	maxBinarySize      = flag.Int64("max-binary-size", envInt64("MAX_BINARY_SIZE"), "max workflow-binary size in bytes the enclave accepts from storage. 0 uses the enclave default. Reads MAX_BINARY_SIZE.")
-	binaryFetchTimeout = flag.Duration("binary-fetch-timeout", envDuration("BINARY_FETCH_TIMEOUT"), "per-fetch timeout for downloading a workflow binary (e.g. 90s). 0 uses the enclave default. Reads BINARY_FETCH_TIMEOUT.")
-	maxCacheBytes      = flag.Int64("max-cache-bytes", envInt64("MAX_CACHE_BYTES"), "size bound in bytes of the enclave's verified-binary LRU cache. 0 uses the enclave default. Reads MAX_CACHE_BYTES.")
-
-	requestTimeout   = flag.Duration("request-timeout", envDuration("REQUEST_TIMEOUT"), "global request timeout inside the enclave, applied to outbound HTTP a workflow makes without its own timeout (e.g. 80s). 0 uses the enclave default. Reads REQUEST_TIMEOUT.")
-	gatewayTimeout   = flag.Duration("gateway-timeout", envDuration("GATEWAY_TIMEOUT"), "HTTP client timeout for enclave->gateway requests (secrets + capabilities), e.g. 75s. Should not exceed --request-timeout. 0 uses the enclave default. Reads GATEWAY_TIMEOUT.")
-	executionTimeout = flag.Duration("execution-timeout", envDuration("EXECUTION_TIMEOUT"), "wall-clock bound on a single workflow execution in the enclave (e.g. 80s), capping how long a runaway workflow holds an execution slot. 0 uses the WASM host default of 10m. Reads EXECUTION_TIMEOUT.")
-	// workflowGracePeriod delays the start of every validated execution. Negative
-	// disables the wait; 0 leaves the enclave default (2s) in place.
-	workflowGracePeriod = flag.Duration("workflow-grace-period", envDuration("WORKFLOW_GRACE_PERIOD"), "how long each workflow execution waits before it starts running (e.g. 2s). Negative disables the wait; 0 uses the enclave default. Reads WORKFLOW_GRACE_PERIOD.")
-
-	// settingsJSON, when set, overrides all the individual settings flags above:
-	// the host forwards this raw JSON to the enclave verbatim instead of building
-	// the payload from the typed flags. The enclave app owns the schema. Empty
-	// falls back to the individual flags. Reads ENCLAVE_SETTINGS (a JSON object).
-	settingsJSON = flag.String("settings", os.Getenv("ENCLAVE_SETTINGS"), "raw JSON settings to inject into the enclave over vsock, forwarded verbatim. Overrides the individual settings flags when set. Reads ENCLAVE_SETTINGS.")
+	// settingsJSON is the runtime settings payload the host injects into the
+	// enclave over vsock, forwarded verbatim. It is opaque to the host: the
+	// enclave app owns the schema and validates it. Endpoints, tunables and the
+	// storage key all travel in here, since a measured EIF can't bake them in.
+	// Empty means nothing is injected. Reads ENCLAVE_SETTINGS (a JSON object).
+	settingsJSON = flag.String("settings", os.Getenv("ENCLAVE_SETTINGS"), "JSON settings object to inject into the enclave over vsock, forwarded verbatim. The enclave app owns the schema. Reads ENCLAVE_SETTINGS.")
 
 	// readHeaderTimeout bounds how long a client may take to send request headers.
 	readHeaderTimeout = flag.Duration("read-header-timeout", 30*time.Second, "Max duration allowed to read request headers")
@@ -79,27 +64,6 @@ var (
 	// maxHeaderBytes caps the accepted request header size (1 MiB).
 	maxHeaderBytes = flag.Int("max-header-bytes", 1<<20, "Max size of request headers in bytes (default 1 MiB)")
 )
-
-// envInt64 returns the int64 value of an env var, or 0 if unset or unparsable.
-func envInt64(key string) int64 {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			return n
-		}
-	}
-	return 0
-}
-
-// envDuration returns the time.Duration value of an env var (e.g. "90s"), or 0
-// if unset or unparsable.
-func envDuration(key string) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-	}
-	return 0
-}
 
 // `hostServer` provides an untrusted proxy for AWS Nitro Enclaves.
 // It blocks incoming requests until a threshold of identical requests are reached,
@@ -997,46 +961,23 @@ func main() {
 		}
 	}()
 
-	// Inject runtime config + settings into the enclave over vsock: the storage
-	// endpoint + key (workflow-binary fetch) and the gateway URL (remote
-	// dispatch). These can't be baked into the measured EIF, so the host supplies
-	// them at runtime. The raw --settings JSON, when set, is forwarded verbatim
-	// and overrides the individual flags; otherwise the payload is built from
-	// them. Skipped only if nothing is configured.
+	// Inject the runtime settings into the enclave over vsock: endpoints, tunables
+	// and the storage key, none of which can be baked into the measured EIF. The
+	// payload is opaque here and forwarded verbatim; the enclave app owns the
+	// schema and rejects an incomplete one. The host only checks it is a JSON
+	// object, so a malformed payload is caught before the round trip.
 	// TODO: re-inject on enclave restart.
-	var payload []byte
-	if *settingsJSON != "" {
-		payload = []byte(*settingsJSON)
-	} else {
-		settings := types.WorkflowSettings{
-			StorageKey:            *storageKey,
-			StorageServiceURL:     *storageSvcURL,
-			StorageServiceTLS:     *storageSvcTLS,
-			GatewayURL:            *gatewayURL,
-			MaxBinarySize:         *maxBinarySize,
-			BinaryFetchTimeout:    *binaryFetchTimeout,
-			MaxCacheBytes:         *maxCacheBytes,
-			RequestTimeout:        *requestTimeout,
-			GatewayRequestTimeout: *gatewayTimeout,
-			ExecutionTimeout:      *executionTimeout,
-			WorkflowGracePeriod:   *workflowGracePeriod,
+	if payload := []byte(*settingsJSON); len(payload) > 0 {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &obj); err != nil {
+			slog.Error("enclave settings are not a JSON object, skipping injection", "error", err)
+		} else {
+			go func() {
+				if err := host.injectSettings(ctx, payload); err != nil {
+					slog.Error("failed to inject settings into enclave", "error", err)
+				}
+			}()
 		}
-		if settings.StorageKey != "" || settings.StorageServiceURL != "" || settings.GatewayURL != "" ||
-			settings.MaxBinarySize != 0 || settings.BinaryFetchTimeout != 0 || settings.MaxCacheBytes != 0 ||
-			settings.RequestTimeout != 0 || settings.GatewayRequestTimeout != 0 || settings.ExecutionTimeout != 0 ||
-			settings.WorkflowGracePeriod != 0 {
-			var err error
-			if payload, err = json.Marshal(settings); err != nil {
-				slog.Error("failed to marshal enclave settings", "error", err)
-			}
-		}
-	}
-	if len(payload) > 0 {
-		go func() {
-			if err := host.injectSettings(ctx, payload); err != nil {
-				slog.Error("failed to inject settings into enclave", "error", err)
-			}
-		}()
 	}
 
 	// Wait for shutdown signal
