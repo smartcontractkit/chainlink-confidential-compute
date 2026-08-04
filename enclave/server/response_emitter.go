@@ -2,8 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"maps"
 	"math"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -16,6 +18,7 @@ const durationBucketSeconds = 0.01
 // ResponseEmitter collects metrics to be included in the response payload
 // instead of emitting them via OTel.
 type ResponseEmitter struct {
+	mu      sync.RWMutex
 	metrics []types.MetricEvent
 	// Captured at construction so WriteErrorResponse can report the total request
 	// duration on error, not just on the success path.
@@ -33,9 +36,13 @@ func NewResponseEmitter() *ResponseEmitter {
 }
 
 func (e *ResponseEmitter) Emit(event string, details map[string]any) {
+	details = roundDurations(maps.Clone(details))
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.metrics = append(e.metrics, types.MetricEvent{
 		Event:   event,
-		Details: roundDurations(details),
+		Details: details,
 	})
 }
 
@@ -59,16 +66,29 @@ func roundDurations(details map[string]any) map[string]any {
 // Duplicate event names collapse to the last occurrence; use GetMetricEvents
 // when per-occurrence counts matter (e.g. repeated capability calls).
 func (e *ResponseEmitter) GetMetrics() map[string]any {
-	result := make(map[string]any)
-	for _, m := range e.metrics {
-		result[m.Event] = m.Details
-	}
-	return result
+	metrics, _ := e.Snapshot()
+	return metrics
 }
 
 // GetMetricEvents returns every collected event in order, preserving duplicates.
 func (e *ResponseEmitter) GetMetricEvents() []types.MetricEvent {
-	return e.metrics
+	_, events := e.Snapshot()
+	return events
+}
+
+// Snapshot returns consistent map and ordered representations of all events.
+func (e *ResponseEmitter) Snapshot() (map[string]any, []types.MetricEvent) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	metrics := make(map[string]any)
+	events := make([]types.MetricEvent, len(e.metrics))
+	for i, event := range e.metrics {
+		details := maps.Clone(event.Details)
+		events[i] = types.MetricEvent{Event: event.Event, Details: details}
+		metrics[event.Event] = details
+	}
+	return metrics, events
 }
 
 // WriteErrorResponse writes a JSON error response that includes the accumulated
@@ -87,10 +107,11 @@ func (e *ResponseEmitter) WriteErrorResponse(w http.ResponseWriter, msg string, 
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
+	metrics, metricEvents := e.Snapshot()
 	resp := types.EnclaveErrorResponse{
 		Error:        msg,
-		Metrics:      e.GetMetrics(),
-		MetricEvents: e.GetMetricEvents(),
+		Metrics:      metrics,
+		MetricEvents: metricEvents,
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
