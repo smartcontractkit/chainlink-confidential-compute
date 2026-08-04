@@ -25,6 +25,11 @@ const testStorageKeyHex = "00000000000000000000000000000000000000000000000000000
 // fake storage service ignores it and serves the configured binary.
 const testLocator = "test-artifact-id"
 
+// testGatewayURL satisfies the required gatewayUrl setting. Tests that exercise
+// remote dispatch supply their own dispatcher (WithRemoteDispatcher) or factory,
+// so nothing dials this.
+const testGatewayURL = "http://gateway.invalid"
+
 // fakeStorage is a minimal in-process CRE storage service for tests: its
 // DownloadArtifact returns a pre-signed URL that serves the raw binary bytes.
 type fakeStorage struct {
@@ -60,16 +65,39 @@ func startFakeStorage(t *testing.T, rawBinary []byte) string {
 }
 
 // newStorageBackedApp builds an app wired to a fake storage service serving
-// rawBinary, with the test storage credentials injected. Returns the app and the
-// locator to place in WorkflowExecution.BinaryUrl.
+// rawBinary, with the test settings injected. Returns the app and the locator to
+// place in WorkflowExecution.BinaryUrl.
 func newStorageBackedApp(t *testing.T, rawBinary []byte, opts ...Option) (types.EnclaveApp, string) {
+	t.Helper()
+	return newStorageBackedAppWithSettings(t, rawBinary, nil, opts...)
+}
+
+// newStorageBackedAppWithSettings is newStorageBackedApp with the injected
+// settings tweaked by mutate. Tests go through mutate rather than injecting a
+// second payload of their own: the app requires a complete payload on every
+// injection, so a tunable has to travel with the storage credentials.
+func newStorageBackedAppWithSettings(t *testing.T, rawBinary []byte, mutate func(*WorkflowSettings), opts ...Option) (types.EnclaveApp, string) {
 	t.Helper()
 
 	addr := startFakeStorage(t, rawBinary)
 	allOpts := append([]Option{WithStorageService(addr, false)}, opts...)
 	a := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil, allOpts...)
-	raw, err := json.Marshal(types.WorkflowSettings{StorageKey: testStorageKeyHex})
+	settings := testSettings(addr)
+	if mutate != nil {
+		mutate(&settings)
+	}
+	raw, err := json.Marshal(settings)
 	require.NoError(t, err)
 	require.NoError(t, a.(*confidentialWorkflowsApp).InjectSettings(raw))
 	return a, testLocator
+}
+
+// testSettings is a complete settings payload pointing at the fake storage
+// service at addr, satisfying the fields the app requires.
+func testSettings(addr string) WorkflowSettings {
+	return WorkflowSettings{
+		StorageKey:        testStorageKeyHex,
+		StorageServiceURL: addr,
+		GatewayURL:        testGatewayURL,
+	}
 }

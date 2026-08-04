@@ -113,8 +113,8 @@ func (p *deferredGatewayProxy) Close() {
 // ---- Nitro enclave startup for engine ----
 
 // startNitroEnclavesForEngine starts two deferred gateway proxies (a dead one
-// on :9998 and the real one on :9999), sets GATEWAY_URL to the comma-separated
-// pair so the EIF bakes it in, then builds and starts Nitro enclaves for the
+// on :9998 and the real one on :9999), puts the comma-separated pair in the
+// settings the host injects, then builds and starts Nitro enclaves for the
 // confidential-workflows app. The dead-first ordering forces the enclave's
 // round-robin client to fail over on its first gateway call.
 
@@ -138,7 +138,7 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
 	t.Helper()
 	// Two gateway front-proxies to exercise the enclave's round-robin failover.
 	// deadProxy (:9998) never gets a target, so it always returns 502; proxy
-	// (:9999) is pointed at the real gateway once the CRE env is up. GATEWAY_URL
+	// (:9999) is pointed at the real gateway once the CRE env is up. gatewayUrl
 	// lists the dead one FIRST, so each enclave's cursor starts there: the first
 	// gateway call hits the 502 and must fail over to the healthy proxy. If
 	// failover regresses, that first call fails and the workflow errors out.
@@ -147,19 +147,20 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
 
 	// Stand up the fake CRE storage service the enclave fetches the workflow
 	// binary from. Its artifact URL is set later, once the WASM server is up
-	// (see initCWEngineTestServers), but the gRPC address must be known now so
-	// STORAGE_SERVICE_URL can be baked into the EIF. STORAGE_KEY is injected by
-	// the host into the enclave over vsock at startup.
+	// (see initCWEngineTestServers), but the gRPC address must be known now so it
+	// can go into the settings the host injects over vsock at startup.
 	storageAddr, storageSvc := startFakeStorageService(t, enclaveHostAddr())
-	t.Setenv("STORAGE_SERVICE_URL", storageAddr)
-	t.Setenv("STORAGE_SERVICE_TLS", "false")
-	t.Setenv("STORAGE_KEY", engineTestStorageKeyHex)
 	t.Setenv("REQUIRE_BFT_QUORUM", "true")
 
+	// The whole runtime configuration reaches the enclave as one opaque JSON
+	// payload (ENCLAVE_SETTINGS): the host forwards it verbatim and the enclave
+	// app requires the storage endpoint, storage key and gateway URL.
 	// enclaveHostAddr resolves to loopback for fake enclaves (local processes)
 	// and the Nitro wg0 host IP (100.64.0.3) for real enclaves.
 	host := enclaveHostAddr()
-	t.Setenv("GATEWAY_URL", fmt.Sprintf("http://%s:9998,http://%s:9999", host, host))
+	t.Setenv("ENCLAVE_SETTINGS", fmt.Sprintf(
+		`{"storageKey":%q,"storageServiceUrl":%q,"storageServiceTls":false,"gatewayUrl":%q}`,
+		engineTestStorageKeyHex, storageAddr, fmt.Sprintf("http://%s:9998,http://%s:9999", host, host)))
 	if !tests.UseFakeEnclave() {
 		// confidential-workflows EIF is larger than confidential-http (wasmtime/CGO),
 		// so it needs more memory per enclave (~1148 MiB minimum).
@@ -426,9 +427,9 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	echoURL := "https://postman-echo.com/post"
 
 	// 2. Start Nitro enclaves for the confidential-workflows app. This also
-	//    stands up the fake CRE storage service (STORAGE_SERVICE_URL) and sets
-	//    STORAGE_KEY; storageSvc's artifact URL is populated once the WASM
-	//    server is up (below).
+	//    stands up the fake CRE storage service and puts its endpoint and the
+	//    storage key in ENCLAVE_SETTINGS; storageSvc's artifact URL is populated
+	//    once the WASM server is up (below).
 	enclaves, configURLs, gwProxy, deadGwProxy, storageSvc, enclaveCleanup := startNitroEnclavesForEngine(t, testLogger)
 	defer enclaveCleanup()
 	defer gwProxy.Close()

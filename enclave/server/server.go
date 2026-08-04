@@ -383,7 +383,8 @@ func (s *enclaveServer) handleSetConfig(w http.ResponseWriter, r *http.Request) 
 // key the enclave uses to authenticate workflow-binary fetches plus endpoints
 // and fetcher tunables; the app holds them in memory and rebuilds its storage
 // fetcher. Nothing lands in the measured image, so values can change without
-// re-measuring the enclave.
+// re-measuring the enclave. The app validates the payload and may reject it,
+// which leaves the enclave running but unconfigured.
 func (s *enclaveServer) handleInjectSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, fmt.Sprintf("method not allowed: %v", r.Method), http.StatusMethodNotAllowed)
@@ -412,6 +413,10 @@ func (s *enclaveServer) handleInjectSettings(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err := c.InjectSettings(json.RawMessage(body)); err != nil {
+		// A rejected payload leaves the app unconfigured, so it serves nothing
+		// useful until a valid one arrives: log it here as well, since the only
+		// other record is the host's own log of the failed POST.
+		s.logger.Printf("settings injection rejected: %v", err)
 		http.Error(w, fmt.Sprintf("injecting settings: %v", err), http.StatusInternalServerError)
 		return
 	}
