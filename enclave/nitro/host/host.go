@@ -1056,7 +1056,10 @@ func main() {
 	if err := mainServer.Shutdown(shutdownCtx); err != nil {
 		lggr.Errorw("main server shutdown error", "error", err)
 	}
-	if err := telemetry.close(shutdownCtx); err != nil {
+	// Give telemetry its own timeout budget
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), *shutdownTimeout)
+	defer flushCancel()
+	if err := telemetry.close(flushCtx); err != nil {
 		lggr.Errorw("telemetry shutdown error", "error", err)
 	}
 
