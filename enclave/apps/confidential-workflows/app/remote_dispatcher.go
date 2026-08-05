@@ -407,10 +407,10 @@ func (d *remoteDispatcher) decryptSecret(kp keychain.Keypair, entry confidential
 // original bundle so the caller can recover the chosen result, and a rendering
 // of its fields for the quorum diagnostics.
 //
-// sigHash and groupHash differ only for results carrying per-node ordering that
-// canonicalCapabilityPayload normalizes away. The node signed the result exactly
-// as it sent it, so its signature must be verified against sigHash; groupHash is
-// what decides which responses count as agreeing with each other.
+// sigHash and groupHash differ only for results carrying per-node content that
+// canonicalCapabilityPayload excludes. The node signed the result exactly as it
+// sent it, so its signature must be verified against sigHash; groupHash is what
+// decides which responses count as agreeing with each other.
 type relayEntry struct {
 	sigHash   [32]byte
 	groupHash [32]byte
@@ -457,7 +457,7 @@ func (d *remoteDispatcher) capabilityEntries(
 				desc += fmt.Sprintf(" canonical=unhashable(%v)", err)
 			} else {
 				groupHash = h
-				desc += " canonical=sortedReportSigs"
+				desc += " canonical=reportSigsExcluded"
 			}
 		}
 
@@ -511,7 +511,9 @@ func (d *remoteDispatcher) secretsEntries(
 // node signed it — while grouping uses relayEntry.groupHash, the hash of the
 // canonical form (see canonicalCapabilityPayload). Canonicalization only decides
 // which responses count as agreeing, never whether one is authentic, so it cannot
-// admit a result no in-set signer stood behind.
+// admit a result no in-set signer stood behind. What it does mean is that the F+1
+// signers attest the canonical form: for a consensus report, the report body rather
+// than the report's own attributed signatures, which the Forwarder verifies onchain.
 //
 // Verification is tolerant: invalid or foreign signatures are skipped, not fatal,
 // so noise a faulty node stuffs into the bundle cannot deny service. A faulty node
@@ -536,7 +538,8 @@ func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize int, sk
 	required := int(cfg.F) + 1
 
 	// group hash -> set of valid distinct signer fingerprints, plus the first
-	// bundle index that contributed a valid signature for that hash.
+	// bundle index that contributed a valid signature for that hash. Any response
+	// in the winning group is equally valid, so the first one is returned.
 	signersByHash := make(map[[32]byte]map[[32]byte]struct{})
 	firstIdxByHash := make(map[[32]byte]int)
 	validSignatures := 0
@@ -617,6 +620,7 @@ func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize int, sk
 		"path", path,
 		"required", required,
 		"validSigners", winners[0].count,
+		"chosenIdx", firstIdxByHash[winners[0].hash],
 		"rawBundleSize", rawBundleSize,
 		"hashableEntries", len(entries),
 		"unhashable", len(skipped),
