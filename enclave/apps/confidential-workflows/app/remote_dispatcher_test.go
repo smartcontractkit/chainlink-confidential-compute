@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -513,6 +514,97 @@ func TestCallCapability_ForgedResultCannotWin(t *testing.T) {
 	require.Equal(t, "true-value", gotValue.GetValue())
 }
 
+// A consensus report arrives from each relay node with the report's attributed
+// OCR signatures in that node's own collection order, so the raw payloads never
+// hash alike. Grouping on the canonical form (signatures sorted) must still reach
+// quorum, and the returned report must carry the full signature set.
+func TestCallCapability_ReportSignatureOrderIgnoredForQuorum(t *testing.T) {
+	signers := newRelaySigners(t, 3) // F=1 -> need 2 valid distinct signers
+	orders := [][]uint32{{1, 2, 3}, {3, 1, 2}, {2, 3, 1}}
+
+	srv := httptest.NewServer(jsonRPCHandler(t, func(_ string, params json.RawMessage) (any, error) {
+		var p confidentialrelay.CapabilityRequestParams
+		require.NoError(t, json.Unmarshal(params, &p))
+		resps := make([]confidentialrelay.SignedCapabilityResponseResult, len(signers))
+		for i, s := range signers {
+			// Same logical report, per-node signature ordering.
+			resps[i] = oneSignedResponse(t, capResultWithReport(t, 42, orders[i]), p, s)
+		}
+		return confidentialrelay.SignedCapabilityResponseBundle{Responses: resps}, nil
+	}))
+	defer srv.Close()
+
+	d := NewRemoteDispatcher(
+		gateway.NewGatewayClient(srv.URL, nil),
+		nil,
+		relayDONConfig(signers, 1),
+		logger.Test(t),
+		nil, nil,
+		signatureverifier.NewEd25519SignatureVerifier(),
+	)
+	resp, err := d.CallCapability(context.Background(), "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
+		Id:         "consensus@1.0.0-alpha",
+		Method:     "Report",
+		CallbackId: 17,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp.GetPayload())
+
+	var report sdkpb.ReportResponse
+	require.NoError(t, anypb.UnmarshalTo(resp.GetPayload(), &report, proto.UnmarshalOptions{}))
+	assert.Equal(t, uint64(42), report.GetSeqNr())
+	gotIDs := make([]uint32, 0, len(report.GetSigs()))
+	for _, s := range report.GetSigs() {
+		gotIDs = append(gotIDs, s.GetSignerId())
+	}
+	assert.ElementsMatch(t, []uint32{1, 2, 3}, gotIDs, "the winning report must keep its full signature set")
+}
+
+// Sorting the report signatures only fixes ordering. When the nodes disagree on
+// the report itself the quorum error must name the fields that differ, since that
+// error is what surfaces in the workflow's logs.
+func TestCallCapability_QuorumErrorReportsFields(t *testing.T) {
+	signers := newRelaySigners(t, 3)
+	seqNrs := []uint64{41, 42, 43} // genuine disagreement: one distinct result each
+
+	srv := httptest.NewServer(jsonRPCHandler(t, func(_ string, params json.RawMessage) (any, error) {
+		var p confidentialrelay.CapabilityRequestParams
+		require.NoError(t, json.Unmarshal(params, &p))
+		resps := make([]confidentialrelay.SignedCapabilityResponseResult, len(signers))
+		for i, s := range signers {
+			resps[i] = oneSignedResponse(t, capResultWithReport(t, seqNrs[i], []uint32{1, 2}), p, s)
+		}
+		return confidentialrelay.SignedCapabilityResponseBundle{Responses: resps}, nil
+	}))
+	defer srv.Close()
+
+	d := NewRemoteDispatcher(
+		gateway.NewGatewayClient(srv.URL, nil),
+		nil,
+		relayDONConfig(signers, 2), // need 3 valid distinct signers on one result
+		logger.Test(t),
+		nil, nil,
+		signatureverifier.NewEd25519SignatureVerifier(),
+	)
+	_, err := d.CallCapability(context.Background(), "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
+		Id:         "consensus@1.0.0-alpha",
+		Method:     "Report",
+		CallbackId: 17,
+	})
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "no relay-DON result reached quorum")
+	assert.Contains(t, msg, "3 distinct results")
+	assert.Contains(t, msg, "signers by result:")
+	assert.Contains(t, msg, "ReportResponse")
+	assert.Contains(t, msg, "canonical=sortedReportSigs")
+	assert.Contains(t, msg, "signature=valid")
+	for _, seqNr := range seqNrs {
+		assert.Contains(t, msg, fmt.Sprintf("seqNr=%d", seqNr), "every node's seqNr must be visible in the error")
+	}
+	assert.Contains(t, msg, "sigs=2[1/", "signature IDs must be visible so membership divergence is diagnosable")
+}
+
 // --- Relay signer helpers ---
 
 type relaySigner struct {
@@ -586,6 +678,32 @@ func oneSignedResponse(
 	hash, err := result.Hash(params)
 	require.NoError(t, err)
 	return confidentialrelay.SignedCapabilityResponseResult{Result: result, Signature: signer.sign(hash)}
+}
+
+// capResultWithReport builds a CapabilityResponseResult wrapping a consensus
+// ReportResponse whose attributed signatures appear in the given signer-ID order,
+// mirroring one relay node's view of the report.
+func capResultWithReport(t *testing.T, seqNr uint64, signerIDs []uint32) confidentialrelay.CapabilityResponseResult {
+	t.Helper()
+	sigs := make([]*sdkpb.AttributedSignature, 0, len(signerIDs))
+	for _, id := range signerIDs {
+		sigs = append(sigs, &sdkpb.AttributedSignature{
+			SignerId:  id,
+			Signature: []byte{byte(id), 0xAA, 0xBB},
+		})
+	}
+	anyVal, err := anypb.New(&sdkpb.ReportResponse{
+		ConfigDigest:  []byte("config-digest"),
+		SeqNr:         seqNr,
+		ReportContext: []byte("report-context"),
+		RawReport:     []byte("raw-report"),
+		Sigs:          sigs,
+	})
+	require.NoError(t, err)
+	resp := &sdkpb.CapabilityResponse{Response: &sdkpb.CapabilityResponse_Payload{Payload: anyVal}}
+	b, err := proto.Marshal(resp)
+	require.NoError(t, err)
+	return confidentialrelay.CapabilityResponseResult{Payload: base64.StdEncoding.EncodeToString(b)}
 }
 
 // capResultWithString builds a CapabilityResponseResult whose Payload is a valid
