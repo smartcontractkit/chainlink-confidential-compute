@@ -1,12 +1,10 @@
 package app
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialrelay"
@@ -23,16 +21,18 @@ const maxDiagFieldLen = 160
 const maxDiagLen = 4096
 
 // canonicalCapabilityPayload returns the payload rewritten into the form used for
-// quorum grouping, along with a note describing the rewrite. changed is false for
-// payloads that need no rewrite, in which case the returned payload is empty.
+// quorum grouping. changed is false for payloads that need no rewrite, in which
+// case the returned payload is empty.
 //
-// Only consensus report payloads are rewritten. A relay node collects the report's
-// attributed OCR signatures itself, so the same logical report arrives from each
-// node with the signatures in that node's collection order and the raw payloads
-// never hash alike. Sorting them yields one hash per logical report.
+// Only consensus report payloads are rewritten, and the rewrite drops the report's
+// attributed OCR signatures. A relay node collects those itself, so the same
+// logical report arrives from each node carrying a different subset in a different
+// order and the raw payloads never hash alike. Excluding them leaves the report
+// body — config digest, sequence number, report context, raw report — as what the
+// nodes are polled for agreement on.
 //
-// Grouping on this form is safe because the signature is still verified against
-// the hash of the result exactly as the node sent it: canonicalization only
+// Grouping on this form is safe because the relay signature is still verified
+// against the hash of the result exactly as the node sent it: canonicalization only
 // decides which responses are counted as agreeing, never whether a response is
 // authentic.
 func canonicalCapabilityPayload(payload string) (canonical string, changed bool, err error) {
@@ -53,7 +53,7 @@ func canonicalCapabilityPayload(payload string) (canonical string, changed bool,
 	if err := inner.UnmarshalTo(report); err != nil {
 		return "", false, fmt.Errorf("unmarshalling report response: %w", err)
 	}
-	sortAttributedSignatures(report.Sigs)
+	report.Sigs = nil
 
 	wrapped := &anypb.Any{}
 	if err := anypb.MarshalFrom(wrapped, report, proto.MarshalOptions{Deterministic: true}); err != nil {
@@ -65,18 +65,6 @@ func canonicalCapabilityPayload(payload string) (canonical string, changed bool,
 		return "", false, fmt.Errorf("marshalling capability response: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(outBytes), true, nil
-}
-
-// sortAttributedSignatures orders report signatures by signer ID, then by
-// signature bytes, so an identical set of signatures always serializes
-// identically regardless of the order the relay node collected them in.
-func sortAttributedSignatures(sigs []*sdkpb.AttributedSignature) {
-	sort.SliceStable(sigs, func(i, j int) bool {
-		if sigs[i].GetSignerId() != sigs[j].GetSignerId() {
-			return sigs[i].GetSignerId() < sigs[j].GetSignerId()
-		}
-		return bytes.Compare(sigs[i].GetSignature(), sigs[j].GetSignature()) < 0
-	})
 }
 
 // describeCapabilityResult renders one relay capability response for the quorum

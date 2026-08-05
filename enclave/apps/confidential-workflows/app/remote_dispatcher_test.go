@@ -514,21 +514,23 @@ func TestCallCapability_ForgedResultCannotWin(t *testing.T) {
 	require.Equal(t, "true-value", gotValue.GetValue())
 }
 
-// A consensus report arrives from each relay node with the report's attributed
-// OCR signatures in that node's own collection order, so the raw payloads never
-// hash alike. Grouping on the canonical form (signatures sorted) must still reach
-// quorum, and the returned report must carry the full signature set.
-func TestCallCapability_ReportSignatureOrderIgnoredForQuorum(t *testing.T) {
+// A consensus report arrives from each relay node carrying whichever attributed
+// OCR signatures that node collected, in its own order, so the raw payloads never
+// hash alike. Quorum is decided on the report body with those signatures excluded,
+// so nodes that agree on the report reach quorum however their signature sets
+// differ.
+func TestCallCapability_ReportSignaturesIgnoredForQuorum(t *testing.T) {
 	signers := newRelaySigners(t, 3) // F=1 -> need 2 valid distinct signers
-	orders := [][]uint32{{1, 2, 3}, {3, 1, 2}, {2, 3, 1}}
+	// Same logical report; disjoint signature sets, differing in both membership
+	// and order, plus one node that had collected none yet.
+	sigSets := [][]uint32{{3, 1}, {2, 3, 1}, nil}
 
 	srv := httptest.NewServer(jsonRPCHandler(t, func(_ string, params json.RawMessage) (any, error) {
 		var p confidentialrelay.CapabilityRequestParams
 		require.NoError(t, json.Unmarshal(params, &p))
 		resps := make([]confidentialrelay.SignedCapabilityResponseResult, len(signers))
 		for i, s := range signers {
-			// Same logical report, per-node signature ordering.
-			resps[i] = oneSignedResponse(t, capResultWithReport(t, 42, orders[i]), p, s)
+			resps[i] = oneSignedResponse(t, capResultWithReport(t, 42, sigSets[i]), p, s)
 		}
 		return confidentialrelay.SignedCapabilityResponseBundle{Responses: resps}, nil
 	}))
@@ -550,19 +552,22 @@ func TestCallCapability_ReportSignatureOrderIgnoredForQuorum(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp.GetPayload())
 
+	// The report body the nodes agreed on is returned intact, signatures and all:
+	// canonicalization applies to the grouping hash, never to what is handed back.
 	var report sdkpb.ReportResponse
 	require.NoError(t, anypb.UnmarshalTo(resp.GetPayload(), &report, proto.UnmarshalOptions{}))
 	assert.Equal(t, uint64(42), report.GetSeqNr())
+	assert.Equal(t, []byte("raw-report"), report.GetRawReport())
 	gotIDs := make([]uint32, 0, len(report.GetSigs()))
 	for _, s := range report.GetSigs() {
 		gotIDs = append(gotIDs, s.GetSignerId())
 	}
-	assert.ElementsMatch(t, []uint32{1, 2, 3}, gotIDs, "the winning report must keep its full signature set")
+	assert.ElementsMatch(t, sigSets[0], gotIDs, "the first agreeing response is returned, with its own signature set")
 }
 
-// Sorting the report signatures only fixes ordering. When the nodes disagree on
-// the report itself the quorum error must name the fields that differ, since that
-// error is what surfaces in the workflow's logs.
+// Excluding the report signatures does not paper over disagreement on the report
+// itself. When the nodes differ on the body, the quorum error must name the fields
+// that differ, since that error is what surfaces in the workflow's logs.
 func TestCallCapability_QuorumErrorReportsFields(t *testing.T) {
 	signers := newRelaySigners(t, 3)
 	seqNrs := []uint64{41, 42, 43} // genuine disagreement: one distinct result each
@@ -597,7 +602,7 @@ func TestCallCapability_QuorumErrorReportsFields(t *testing.T) {
 	assert.Contains(t, msg, "3 distinct results")
 	assert.Contains(t, msg, "signers by result:")
 	assert.Contains(t, msg, "ReportResponse")
-	assert.Contains(t, msg, "canonical=sortedReportSigs")
+	assert.Contains(t, msg, "canonical=reportSigsExcluded")
 	assert.Contains(t, msg, "signature=valid")
 	for _, seqNr := range seqNrs {
 		assert.Contains(t, msg, fmt.Sprintf("seqNr=%d", seqNr), "every node's seqNr must be visible in the error")
