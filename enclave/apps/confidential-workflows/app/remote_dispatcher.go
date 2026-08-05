@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialrelay"
@@ -149,18 +150,8 @@ func (d *remoteDispatcher) CallCapability(ctx context.Context, workflowID string
 	}
 
 	d.logger.Debugw("[remoteDispatcher] received capability response bundle", "rawBundleSize", len(bundle.Responses))
-	entries := make([]relayEntry, 0, len(bundle.Responses))
-	unhashable := 0
-	for i, r := range bundle.Responses {
-		h, hErr := r.Result.Hash(params)
-		if hErr != nil {
-			unhashable++
-			d.logger.Debugw("[remoteDispatcher] skipping relay response with unhashable result", "path", "CallCapability", "idx", i, "err", hErr)
-			continue
-		}
-		entries = append(entries, relayEntry{hash: h, signature: r.Signature, idx: i})
-	}
-	idx, err := d.selectQuorumResult("CallCapability", len(bundle.Responses), unhashable, entries, cfg)
+	entries, skipped := d.capabilityEntries(bundle, params)
+	idx, err := d.selectQuorumResult("CallCapability", len(bundle.Responses), skipped, entries, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("verifying capability response: %w", err)
 	}
@@ -279,18 +270,8 @@ func (d *remoteDispatcher) GetSecrets(ctx context.Context, workflowID string, re
 	}
 
 	d.logger.Debugw("[remoteDispatcher] received secrets response bundle", "rawBundleSize", len(bundle.Responses))
-	entries := make([]relayEntry, 0, len(bundle.Responses))
-	unhashable := 0
-	for i, r := range bundle.Responses {
-		h, hErr := r.Result.Hash(params)
-		if hErr != nil {
-			unhashable++
-			d.logger.Debugw("[remoteDispatcher] skipping relay response with unhashable result", "path", "GetSecrets", "idx", i, "err", hErr)
-			continue
-		}
-		entries = append(entries, relayEntry{hash: h, signature: r.Signature, idx: i})
-	}
-	idx, err := d.selectQuorumResult("GetSecrets", len(bundle.Responses), unhashable, entries, cfg)
+	entries, skipped := d.secretsEntries(bundle, params)
+	idx, err := d.selectQuorumResult("GetSecrets", len(bundle.Responses), skipped, entries, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("verifying secrets response: %w", err)
 	}
@@ -421,13 +402,102 @@ func (d *remoteDispatcher) decryptSecret(kp keychain.Keypair, entry confidential
 	return d.combiner.AggregateShares(ciphertext, shares, masterPK, threshold)
 }
 
-// relayEntry is one decoded per-node response from the gateway bundle: the
-// canonical hash of its logical result, the node's single signature, and its
-// index in the original bundle so the caller can recover the chosen result.
+// relayEntry is one decoded per-node response from the gateway bundle: the two
+// hashes of its logical result, the node's single signature, its index in the
+// original bundle so the caller can recover the chosen result, and a rendering
+// of its fields for the quorum diagnostics.
+//
+// sigHash and groupHash differ only for results carrying per-node content that
+// canonicalCapabilityPayload excludes. The node signed the result exactly as it
+// sent it, so its signature must be verified against sigHash; groupHash is what
+// decides which responses count as agreeing with each other.
 type relayEntry struct {
-	hash      [32]byte
+	sigHash   [32]byte
+	groupHash [32]byte
 	signature confidentialrelay.RelayResponseSignature
+	desc      string
 	idx       int
+}
+
+// diag renders this entry and the outcome of verifying it for a quorum error.
+func (e relayEntry) diag(outcome string) string {
+	return fmt.Sprintf("[idx=%d group=%s sigHash=%s %s %s]", e.idx, shortHash(e.groupHash), shortHash(e.sigHash), outcome, e.desc)
+}
+
+// capabilityEntries decodes a capability response bundle into quorum entries,
+// returning diagnostics for any response whose hash could not be computed at all
+// (a response that fails params.Validate, which no signature can rescue).
+func (d *remoteDispatcher) capabilityEntries(
+	bundle confidentialrelay.SignedCapabilityResponseBundle,
+	params confidentialrelay.CapabilityRequestParams,
+) ([]relayEntry, []string) {
+	entries := make([]relayEntry, 0, len(bundle.Responses))
+	var skipped []string
+	for i, r := range bundle.Responses {
+		desc := describeCapabilityResult(r.Result)
+		sigHash, err := r.Result.Hash(params)
+		if err != nil {
+			d.logger.Debugw("[remoteDispatcher] skipping relay response with unhashable result", "path", "CallCapability", "idx", i, "err", err)
+			skipped = append(skipped, fmt.Sprintf("[idx=%d unhashable=%v %s]", i, err, desc))
+			continue
+		}
+
+		groupHash := sigHash
+		canonical, changed, err := canonicalCapabilityPayload(r.Result.Payload)
+		switch {
+		case err != nil:
+			d.logger.Debugw("[remoteDispatcher] canonicalizing relay result failed", "path", "CallCapability", "idx", i, "err", err)
+			desc += fmt.Sprintf(" canonical=failed(%v)", err)
+		case changed:
+			canonicalResult := r.Result
+			canonicalResult.Payload = canonical
+			h, err := canonicalResult.Hash(params)
+			if err != nil {
+				d.logger.Debugw("[remoteDispatcher] hashing canonicalized relay result failed", "path", "CallCapability", "idx", i, "err", err)
+				desc += fmt.Sprintf(" canonical=unhashable(%v)", err)
+			} else {
+				groupHash = h
+				desc += " canonical=reportSigsExcluded"
+			}
+		}
+
+		entries = append(entries, relayEntry{
+			sigHash:   sigHash,
+			groupHash: groupHash,
+			signature: r.Signature,
+			desc:      desc,
+			idx:       i,
+		})
+	}
+	return entries, skipped
+}
+
+// secretsEntries decodes a secrets response bundle into quorum entries. A secrets
+// result has no per-node ordering to normalize, so it groups on the hash the node
+// signed.
+func (d *remoteDispatcher) secretsEntries(
+	bundle confidentialrelay.SignedSecretsResponseBundle,
+	params confidentialrelay.SecretsRequestParams,
+) ([]relayEntry, []string) {
+	entries := make([]relayEntry, 0, len(bundle.Responses))
+	var skipped []string
+	for i, r := range bundle.Responses {
+		desc := describeSecretsResult(r.Result)
+		h, err := r.Result.Hash(params)
+		if err != nil {
+			d.logger.Debugw("[remoteDispatcher] skipping relay response with unhashable result", "path", "GetSecrets", "idx", i, "err", err)
+			skipped = append(skipped, fmt.Sprintf("[idx=%d unhashable=%v %s]", i, err, desc))
+			continue
+		}
+		entries = append(entries, relayEntry{
+			sigHash:   h,
+			groupHash: h,
+			signature: r.Signature,
+			desc:      desc,
+			idx:       i,
+		})
+	}
+	return entries, skipped
 }
 
 // selectQuorumResult is the trust anchor on the gateway->enclave hop. The gateway
@@ -436,6 +506,14 @@ type relayEntry struct {
 // node. The enclave is what decides. We verify each response's signature against
 // the relay-DON signer set, group the valid signers by response hash, and return
 // the index of a response whose hash is backed by F+1 valid distinct signers.
+//
+// Signatures are verified against relayEntry.sigHash — the result exactly as the
+// node signed it — while grouping uses relayEntry.groupHash, the hash of the
+// canonical form (see canonicalCapabilityPayload). Canonicalization only decides
+// which responses count as agreeing, never whether one is authentic, so it cannot
+// admit a result no in-set signer stood behind. What it does mean is that the F+1
+// signers attest the canonical form: for a consensus report, the report body rather
+// than the report's own attributed signatures, which the Forwarder verifies onchain.
 //
 // Verification is tolerant: invalid or foreign signatures are skipped, not fatal,
 // so noise a faulty node stuffs into the bundle cannot deny service. A faulty node
@@ -448,7 +526,7 @@ type relayEntry struct {
 // used to verify workflow-DON->enclave requests. The deployment invariant is that
 // the workflow DON and the relay DON are the same DON wearing two hats. If that
 // ever changes, this is the spot to introduce a separate RelayDON signer set.
-func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize, unhashable int, entries []relayEntry, cfg types.EnclaveConfig) (int, error) {
+func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize int, skipped []string, entries []relayEntry, cfg types.EnclaveConfig) (int, error) {
 	if d.verifier == nil {
 		d.logger.Errorw("[remoteDispatcher] relay-DON signature verification failed", "path", path, "reason", "verifier not configured")
 		return 0, fmt.Errorf("relay signature verifier not configured")
@@ -459,27 +537,31 @@ func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize, unhash
 	}
 	required := int(cfg.F) + 1
 
-	// hash -> set of valid distinct signer fingerprints, plus the first bundle
-	// index that contributed a valid signature for that hash.
+	// group hash -> set of valid distinct signer fingerprints, plus the first
+	// bundle index that contributed a valid signature for that hash. Any response
+	// in the winning group is equally valid, so the first one is returned.
 	signersByHash := make(map[[32]byte]map[[32]byte]struct{})
 	firstIdxByHash := make(map[[32]byte]int)
 	validSignatures := 0
 	invalidSignatures := 0
+	diags := make([]string, 0, len(entries))
 	for _, e := range entries {
-		prefixed := confidentialrelay.RelayResponseSignaturePayload(e.hash)
+		prefixed := confidentialrelay.RelayResponseSignaturePayload(e.sigHash)
 		signer, err := d.verifier.VerifySignature(prefixed, e.signature.Signature, cfg.Signers)
 		if err != nil {
 			// Untrusted gateway / faulty node noise. Skip, do not fail.
 			invalidSignatures++
 			d.logger.Debugw("[remoteDispatcher] skipping invalid or foreign relay signature", "path", path, "idx", e.idx, "err", err)
+			diags = append(diags, e.diag(fmt.Sprintf("signature=invalid(%v) claimedSigner=%s", err, shortBytes(e.signature.Signer))))
 			continue
 		}
 		validSignatures++
-		set, ok := signersByHash[e.hash]
+		diags = append(diags, e.diag("signature=valid signer="+shortBytes(signer)))
+		set, ok := signersByHash[e.groupHash]
 		if !ok {
 			set = make(map[[32]byte]struct{})
-			signersByHash[e.hash] = set
-			firstIdxByHash[e.hash] = e.idx
+			signersByHash[e.groupHash] = set
+			firstIdxByHash[e.groupHash] = e.idx
 		}
 		set[sha256.Sum256(signer)] = struct{}{}
 	}
@@ -492,7 +574,9 @@ func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize, unhash
 	}
 	var winners []qualified
 	maxValidForAnyResult := 0
+	tally := make([]string, 0, len(signersByHash))
 	for h, set := range signersByHash {
+		tally = append(tally, fmt.Sprintf("%s=%d", shortHash(h), len(set)))
 		if len(set) > maxValidForAnyResult {
 			maxValidForAnyResult = len(set)
 		}
@@ -500,19 +584,31 @@ func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize, unhash
 			winners = append(winners, qualified{hash: h, count: len(set)})
 		}
 	}
+	sort.Strings(tally)
 	if len(winners) == 0 {
+		// The per-entry detail is carried in the error as well as the log: the
+		// error is what surfaces in the workflow's own logs, which is often the
+		// only place a failure is observed.
+		results := strings.Join(tally, " ")
+		entryDetail := truncate(strings.Join(diags, " "), maxDiagLen)
+		skippedDetail := truncate(strings.Join(skipped, " "), maxDiagLen)
 		d.logger.Errorw("[remoteDispatcher] relay-DON quorum not reached",
 			"path", path,
 			"required", required,
 			"rawBundleSize", rawBundleSize,
 			"hashableEntries", len(entries),
-			"unhashable", unhashable,
+			"unhashable", len(skipped),
 			"validSignatures", validSignatures,
 			"invalidSignatures", invalidSignatures,
 			"distinctResults", len(signersByHash),
 			"maxValidForAnyResult", maxValidForAnyResult,
+			"signersByResult", results,
+			"entries", entryDetail,
+			"skippedEntries", skippedDetail,
 		)
-		return 0, fmt.Errorf("no relay-DON result reached quorum: need %d valid distinct signers (raw bundle %d, hashable %d, %d valid signatures, %d invalid, max %d for any single result)", required, rawBundleSize, len(entries), validSignatures, invalidSignatures, maxValidForAnyResult)
+		return 0, fmt.Errorf("no relay-DON result reached quorum: need %d valid distinct signers (raw bundle %d, hashable %d, %d valid signatures, %d invalid, %d distinct results, max %d for any single result); signers by result: %s; entries: %s; skipped: %s",
+			required, rawBundleSize, len(entries), validSignatures, invalidSignatures, len(signersByHash), maxValidForAnyResult,
+			results, entryDetail, skippedDetail)
 	}
 	sort.Slice(winners, func(i, j int) bool {
 		if winners[i].count != winners[j].count {
@@ -524,13 +620,15 @@ func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize, unhash
 		"path", path,
 		"required", required,
 		"validSigners", winners[0].count,
+		"chosenIdx", firstIdxByHash[winners[0].hash],
 		"rawBundleSize", rawBundleSize,
 		"hashableEntries", len(entries),
-		"unhashable", unhashable,
+		"unhashable", len(skipped),
 		"validSignatures", validSignatures,
 		"invalidSignatures", invalidSignatures,
 		"distinctResults", len(signersByHash),
 		"maxValidForAnyResult", maxValidForAnyResult,
+		"signersByResult", strings.Join(tally, " "),
 	)
 	return firstIdxByHash[winners[0].hash], nil
 }

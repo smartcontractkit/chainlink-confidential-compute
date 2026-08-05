@@ -12,6 +12,8 @@ github.com/go-viper/mapstructure/v2 v2.4.0 h1:EBsztssimR/CONLSZZ04E8qAkxNYq4Qp9L
 github.com/go-viper/mapstructure/v2 v2.4.0/go.mod h1:oJDH3BJKyqBA2TXFhDsKDGDTlndYOZ6rGS0BRZIxGhM=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
+github.com/google/gofuzz v1.2.0 h1:xRy4A+RhZaiKjJ1bPfwQ8sedCA+YS2YcCHW6ec7JMi0=
+github.com/google/gofuzz v1.2.0/go.mod h1:dBl0BpW6vV/+mYPU4Po3pmUjxk6FQPldtuIdl/M65Eg=
 github.com/holiman/uint256 v1.3.2 h1:a9EgMPSC1AAaj1SZL5zIQD3WbwTuHrMGOerLjGmM/TA=
 github.com/holiman/uint256 v1.3.2/go.mod h1:EOMSn4q6Nyt9P6efbI3bueV4e1b3dGlUCXeiRV4ng7E=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
@@ -28,6 +30,8 @@ github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260504161322-7061fb
 github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260504161322-7061fbfd5189/go.mod h1:Jqt53s27Tr0jDl8mdBXg1xhu6F8Fci8JOuq43tgHOM8=
 github.com/smartcontractkit/cre-sdk-go v1.7.1-0.20260504162314-fbfac1c36bec h1:2+umTSp4yKFCXwL0EQnUns4T58ar3MMqEt4IgaKGaGw=
 github.com/smartcontractkit/cre-sdk-go v1.7.1-0.20260504162314-fbfac1c36bec/go.mod h1:UHFB1yffuwFEAjInNtFJnKhLoCiud1Vj7OIdU3X45Oo=
+github.com/smartcontractkit/cre-sdk-go/capabilities/blockchain/evm v1.0.0-beta.0 h1:t2bzRHnqkyxvcrJKSsKPmCGLMjGO97ESgrtLCnTIEQw=
+github.com/smartcontractkit/cre-sdk-go/capabilities/blockchain/evm v1.0.0-beta.0/go.mod h1:VVJ4mvA7wOU1Ic5b/vTaBMHEUysyxd0gdPPXkAu8CmY=
 github.com/smartcontractkit/cre-sdk-go/capabilities/networking/http v1.3.1-0.20260504162314-fbfac1c36bec h1:kI0ztRukhdYHOjhuioOH3asJIDgB+4BZxXtMeIuW6q4=
 github.com/smartcontractkit/cre-sdk-go/capabilities/networking/http v1.3.1-0.20260504162314-fbfac1c36bec/go.mod h1:nMbi32+ChPiQQS4Rk/HEFeDZ3SFtY5YUPR9bgPoNZdI=
 github.com/smartcontractkit/cre-sdk-go/capabilities/scheduler/cron v1.3.1-0.20260504162314-fbfac1c36bec h1:K5c66SeYJ9Psa14SkShBjmXiST5UctigQIxDsREoGt0=

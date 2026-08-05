@@ -3,8 +3,10 @@ module github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/test
 go 1.25.3
 
 require (
+	github.com/ethereum/go-ethereum v1.17.2
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260504161322-7061fbfd5189
 	github.com/smartcontractkit/cre-sdk-go v1.7.1-0.20260504162314-fbfac1c36bec
+	github.com/smartcontractkit/cre-sdk-go/capabilities/blockchain/evm v1.0.0-beta.0
 	github.com/smartcontractkit/cre-sdk-go/capabilities/networking/http v1.3.1-0.20260504162314-fbfac1c36bec
 	github.com/smartcontractkit/cre-sdk-go/capabilities/scheduler/cron v1.3.1-0.20260504162314-fbfac1c36bec
 )
@@ -13,7 +15,6 @@ require (
 	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
-	github.com/ethereum/go-ethereum v1.17.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect

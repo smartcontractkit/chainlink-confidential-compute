@@ -21,7 +21,7 @@ on:
     # Nightly real-enclave run at 07:00 UTC.
     - cron: '0 7 * * *'
 env:
-  CHAINLINK_COMMIT_SHA: 2ab54efc0fd36af09def92fba496f3deab0bcf1f
+  CHAINLINK_COMMIT_SHA: 25990b2724f8b8398f846adeb77f615112330a16
   LEGACY_COMMIT_SHA: 7d70fcf65d8b5af102d8267b54d31ea163dea203 # initial commit, the commit pointing to whatever is capability gitref is deployed in Chainlink's plugins.private.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.private.yaml#L50.
   LEGACY_ENCLAVE_RELEASE: 1.2.0 # The release version whose enclaves are currently deployed in production. Update this when deploying new enclaves.
   # Optional PCR override: when all three are set, the legacy-enclaves leg uses
@@ -169,7 +169,7 @@ jobs:
           echo "GOSUMDB=sum.golang.org" >> $GITHUB_ENV
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.4'
+          go-version: '1.26.5'
           cache: false
 
       # Explicit cache (not setup-go's built-in) so restore-keys gives a partial
@@ -334,7 +334,7 @@ jobs:
       - uses: actions/setup-go@v6
         if: steps.cache.outputs.chip_ingress_hit != 'true' || steps.cache.outputs.chip_config_hit != 'true'
         with:
-          go-version: '1.26.4'
+          go-version: '1.26.5'
           cache: false
 
       # ---- chainlink ----
@@ -565,7 +565,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.4'
+          go-version: '1.26.5'
           cache: false
 
       # Only cache on the ephemeral hosted (fake-enclave) runners. The self-hosted
