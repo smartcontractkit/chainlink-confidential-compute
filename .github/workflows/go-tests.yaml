@@ -1110,8 +1110,6 @@ jobs:
           for port in 8080 8081 8082 8083; do
             lsof -ti:$port | xargs -r kill -9 2>/dev/null || true
           done
-          # Kill any orphaned wireguard-go-vsock processes
-          sudo pkill -f wireguard-go-vsock 2>/dev/null || true
           echo "Nitro enclaves and port cleanup completed."
       # The real-enclave variants run on the persistent self-hosted Nitro box, so
       # Docker state survives between runs. Keep only the local CRE images the

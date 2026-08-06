@@ -51,8 +51,23 @@ func startNitroEnclaves(t *testing.T, app App, logger zerolog.Logger) ([]types.E
 	rootDir, err := util.GetRepoRoot()
 	require.NoError(t, err)
 	baseCID := 16
-	httpPorts := allocateNitroTestPorts(t, 2)
-	configHttpPorts := allocateNitroTestPorts(t, 2)
+	// Real Nitro gets one enclave per parent, matching production: one pod, one
+	// host process, one enclave VM. Several enclaves under one parent only ever
+	// simulated several DON nodes on one machine, and that does not survive the
+	// host owning a parent-scoped resource -- a parent has exactly one AF_VSOCK
+	// listener on the egress port. Restoring it there needs the supervisor: one
+	// host process fronting several enclaves behind one address.
+	//
+	// The fake backend keeps two, because it gives each enclave process its own
+	// parent namespace and loopback port, so two pairs genuinely coexist. That
+	// keeps multi-endpoint routing, failover and config recovery covered
+	// somewhere rather than nowhere.
+	enclaveCount := 2
+	if !tests.UseFakeEnclave() {
+		enclaveCount = 1
+	}
+	httpPorts := allocateNitroTestPorts(t, enclaveCount)
+	configHttpPorts := allocateNitroTestPorts(t, enclaveCount)
 	logger.Info().Msgf(
 		"Allocated Nitro test ports for %s: host=%v config=%v",
 		app.Name,

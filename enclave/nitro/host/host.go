@@ -5,23 +5,27 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"log/slog"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/outboundproxy"
 	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/vsock"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -78,7 +82,40 @@ var (
 	idleTimeout = flag.Duration("idle-timeout", 2*time.Minute, "Max duration to keep idle keep-alive connections open")
 	// maxHeaderBytes caps the accepted request header size (1 MiB).
 	maxHeaderBytes = flag.Int("max-header-bytes", 1<<20, "Max size of request headers in bytes (default 1 MiB)")
+
+	outboundMaxSessions        = flag.Int("outbound-max-sessions", defaultOutboundMaxSessions, "Maximum accepted outbound VSOCK sessions")
+	outboundMaxSessionsPerCID  = flag.Int("outbound-max-sessions-per-cid", defaultOutboundMaxSessionsPerCID, "Maximum accepted outbound VSOCK sessions per enclave CID")
+	outboundMaxDNS             = flag.Int("outbound-max-dns", defaultOutboundMaxDNS, "Maximum concurrent outbound DNS lookups")
+	outboundMaxDNSPerCID       = flag.Int("outbound-max-dns-per-cid", defaultOutboundMaxDNSPerCID, "Maximum concurrent outbound DNS lookups per enclave CID")
+	outboundMaxTunnels         = flag.Int("outbound-max-tunnels", defaultOutboundMaxTunnels, "Maximum active outbound TCP tunnels")
+	outboundMaxTunnelsPerCID   = flag.Int("outbound-max-tunnels-per-cid", defaultOutboundMaxTunnelsPerCID, "Maximum active outbound TCP tunnels per enclave CID")
+	outboundRejectionHeadroom  = flag.Int("outbound-rejection-headroom", defaultOutboundRejectionHeadroom, "Connections beyond --outbound-max-sessions that may be held open only to answer with a typed rejection")
+	outboundHalfCloseLinger    = flag.Duration("outbound-half-close-linger", defaultOutboundHalfCloseLinger, "How long a tunnel may make no progress: bounds a half-closed tunnel awaiting its peer, and a write to a peer that has stopped reading")
+	outboundAllowLocalForTests = flag.Bool("outbound-allow-local-for-tests", os.Getenv("OUTBOUND_ALLOW_LOCAL_FOR_TESTS") == "true", "allow outbound proxy connections to parent-local destinations (insecure, for testing only). Reads OUTBOUND_ALLOW_LOCAL_FOR_TESTS.")
+	// A parent has exactly one AF_VSOCK listener on the egress port, so a host
+	// serving several children admits all of their CIDs through one broker.
+	outboundCIDs = flag.String("outbound-cids", os.Getenv("OUTBOUND_CIDS"), "comma-separated enclave CIDs the egress broker admits. Empty uses --enclave-cid. Reads OUTBOUND_CIDS.")
 )
+
+// parseOutboundCIDs returns the CIDs the broker admits, defaulting to the CID of
+// the enclave this host process owns.
+func parseOutboundCIDs(list string, defaultCID int) ([]uint32, error) {
+	if strings.TrimSpace(list) == "" {
+		if defaultCID <= 0 {
+			return nil, fmt.Errorf("enclave CID %d is not valid", defaultCID)
+		}
+		return []uint32{uint32(defaultCID)}, nil //nolint:gosec // bounds checked above
+	}
+	var cids []uint32
+	for _, field := range strings.Split(list, ",") {
+		parsed, err := strconv.ParseUint(strings.TrimSpace(field), 10, 32)
+		if err != nil || parsed == 0 {
+			return nil, fmt.Errorf("invalid outbound CID %q", field)
+		}
+		cids = append(cids, uint32(parsed))
+	}
+	return cids, nil
+}
 
 // envInt64 returns the int64 value of an env var, or 0 if unset or unparsable.
 func envInt64(key string) int64 {
@@ -913,6 +950,9 @@ func main() {
 	if *shutdownTimeout <= 0 {
 		log.Fatalf("shutdown-timeout (%v) must be greater than zero", *shutdownTimeout)
 	}
+	if *enclaveCID <= 0 || uint64(*enclaveCID) > math.MaxUint32 {
+		log.Fatalf("enclave-cid (%d) must be between 1 and %d", *enclaveCID, uint64(math.MaxUint32))
+	}
 
 	if *requireBFTQuorum {
 		lggr.Infow("BFT quorum required: batch threshold is 2f+1", "requireBFTQuorum", true)
@@ -939,6 +979,63 @@ func main() {
 		closeCancel()
 		log.Fatalf("failed to initialize host metrics: %v", err)
 	}
+	outboundMetrics, err := newOutboundProxyMetrics(telemetry.meter)
+	if err != nil {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), *shutdownTimeout)
+		_ = telemetry.close(closeCtx)
+		closeCancel()
+		log.Fatalf("failed to initialize outbound proxy metrics: %v", err)
+	}
+	outboundConfig, err := defaultOutboundProxyConfig(lggr.Named("outbound_proxy"), outboundMetrics)
+	if err != nil {
+		// The parent-local deny set is a security boundary, so refuse to start
+		// without it rather than serving egress with it silently empty.
+		log.Fatalf("failed to build outbound proxy config: %v", err)
+	}
+	outboundConfig.MaxSessions = *outboundMaxSessions
+	outboundConfig.MaxSessionsPerCID = *outboundMaxSessionsPerCID
+	outboundConfig.MaxDNS = *outboundMaxDNS
+	outboundConfig.MaxDNSPerCID = *outboundMaxDNSPerCID
+	outboundConfig.MaxTunnels = *outboundMaxTunnels
+	outboundConfig.MaxTunnelsPerCID = *outboundMaxTunnelsPerCID
+	outboundConfig.RejectionHeadroom = *outboundRejectionHeadroom
+	outboundConfig.HalfCloseLinger = *outboundHalfCloseLinger
+	outboundConfig.AllowLocalDestinationsForTests = *outboundAllowLocalForTests
+	if vsock.IsFake() {
+		outboundConfig.FallbackCID = uint32(*enclaveCID) //nolint:gosec // validated by VSOCK dial below
+	}
+	admittedCIDs, err := parseOutboundCIDs(*outboundCIDs, *enclaveCID)
+	if err != nil {
+		log.Fatalf("invalid outbound proxy CID list: %v", err)
+	}
+	if err := validateOutboundFileDescriptorLimit(outboundConfig); err != nil {
+		log.Fatalf("invalid outbound proxy file-descriptor budget: %v", err)
+	}
+	outboundBroker, err := newOutboundProxy(outboundConfig)
+	if err != nil {
+		log.Fatalf("failed to construct outbound proxy: %v", err)
+	}
+	for _, cid := range admittedCIDs {
+		if err := outboundBroker.RegisterChild(cid); err != nil {
+			log.Fatalf("failed to register enclave CID with outbound proxy: %v", err)
+		}
+	}
+	// A parent has exactly one AF_VSOCK listener on this port. Binding is
+	// therefore fatal on failure and every host process serves egress: there is
+	// no way to stand a second host process next to this one on the same parent.
+	// Bind the wildcard local CID rather than the parent CID enclaves dial: the
+	// parent must not have to discover its own CID, which is the only part of the
+	// listen path that would need /dev/vsock.
+	outboundListener, err := vsock.ListenAt(vsock.CIDAny, outboundproxy.Port, nil)
+	if err != nil {
+		log.Fatalf("failed to listen for enclave outbound traffic: %v", err)
+	}
+	outboundResults, err := outboundBroker.Start(outboundListener)
+	if err != nil {
+		_ = outboundListener.Close()
+		log.Fatalf("failed to start enclave outbound proxy: %v", err)
+	}
+	lggr.Infow("started enclave outbound proxy", "port", outboundproxy.Port, "enclaveCIDs", admittedCIDs)
 
 	// Start servers. Optionally handle the config endpoint on a different port.
 	host := NewHostServer(ctx, nil)
@@ -1036,9 +1133,13 @@ func main() {
 		}()
 	}
 
-	// Wait for shutdown signal
-	sig := <-sigCh
-	lggr.Infow("received shutdown signal", "signal", sig.String())
+	// Wait for shutdown signal or a required broker failure.
+	select {
+	case sig := <-sigCh:
+		lggr.Infow("received shutdown signal", "signal", sig.String())
+	case proxyErr := <-outboundResults:
+		lggr.Errorw("outbound proxy stopped unexpectedly", "error", proxyErr)
+	}
 
 	// Cancel context to stop all background goroutines (like quorum timeout handlers)
 	cancel()
@@ -1056,6 +1157,13 @@ func main() {
 	if err := mainServer.Shutdown(shutdownCtx); err != nil {
 		lggr.Errorw("main server shutdown error", "error", err)
 	}
+	// Egress is drained on the shared shutdown budget, before telemetry, so a
+	// tunnel still closing cannot outlive the flush that would record it.
+	if outboundBroker != nil {
+		if err := outboundBroker.Drain(shutdownCtx); err != nil {
+			lggr.Errorw("outbound proxy drain error", "error", err)
+		}
+	}
 	// Give telemetry its own timeout budget
 	flushCtx, flushCancel := context.WithTimeout(context.Background(), *shutdownTimeout)
 	defer flushCancel()
@@ -1064,4 +1172,24 @@ func main() {
 	}
 
 	lggr.Infow("graceful shutdown complete")
+}
+
+// validateOutboundFileDescriptorLimit reads the budget from the config the
+// broker will actually run with, so the two cannot drift.
+func validateOutboundFileDescriptorLimit(config outboundProxyConfig) error {
+	if config.MaxSessions <= 0 || config.MaxTunnels <= 0 || config.RejectionHeadroom <= 0 {
+		return errors.New("session, tunnel and rejection-headroom limits must be positive")
+	}
+	var limit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &limit); err != nil {
+		return fmt.Errorf("read RLIMIT_NOFILE: %w", err)
+	}
+	const hostHeadroom = 128
+	// Rejected sessions are held open only long enough to answer, but they still
+	// consume descriptors, so budget for them too.
+	required := uint64(config.MaxSessions + config.RejectionHeadroom + config.MaxTunnels + hostHeadroom) //nolint:gosec // positive limits are validated by newOutboundProxy
+	if limit.Cur < required {
+		return fmt.Errorf("soft limit %d is below required %d", limit.Cur, required)
+	}
+	return nil
 }

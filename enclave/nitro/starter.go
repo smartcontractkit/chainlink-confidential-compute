@@ -11,7 +11,6 @@ import (
 	"log"
 
 	"github.com/hf/nsm"
-	outboundhttps "github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/outbound-https"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/server"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/attestor"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
@@ -49,12 +48,6 @@ func StartNitroEnclave(
 ) error {
 	if *vsockPort > math.MaxUint32 {
 		logger.Fatalf("Invalid port")
-	}
-
-	// Set up outbound HTTPS connectivity.
-	ok := outboundhttps.SetupConnectivity()
-	if !ok {
-		return fmt.Errorf("failed to set up outbound HTTPS connectivity")
 	}
 
 	// Verify PTP clock synchronization.

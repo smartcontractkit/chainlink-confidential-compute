@@ -10,9 +10,9 @@ import (
 	"testing"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	storage_service "github.com/smartcontractkit/chainlink-protos/storage-service/go"
-	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 )
@@ -66,7 +66,7 @@ func newStorageBackedApp(t *testing.T, rawBinary []byte, opts ...Option) (types.
 	t.Helper()
 
 	addr := startFakeStorage(t, rawBinary)
-	allOpts := append([]Option{WithStorageService(addr, false)}, opts...)
+	allOpts := append([]Option{WithStorageService(addr, false), WithInsecureArtifactHTTPForTests()}, opts...)
 	a := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil, allOpts...)
 	raw, err := json.Marshal(types.WorkflowSettings{StorageKey: testStorageKeyHex})
 	require.NoError(t, err)

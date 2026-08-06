@@ -40,6 +40,10 @@ import "time"
 //     starts running. Zero falls back to DefaultWorkflowGracePeriod; a negative
 //     value disables the wait.
 //
+// Artifact transport is deliberately absent: HTTPS is required, and the only
+// way to relax it is a test EIF started with --allow-reconfig, which is measured
+// into the PCR. Nothing the untrusted host injects here can weaken it.
+//
 // TODO: this type lives here only so the host can build the payload from its
 // individual settings flags. Once those flags are deprecated in favor of the
 // host forwarding raw --settings JSON verbatim, the host no longer needs the

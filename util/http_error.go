@@ -10,6 +10,12 @@ import (
 	"syscall"
 )
 
+// outboundUnavailableError is implemented by transport errors reporting that the
+// enclave's egress broker is out of capacity or draining. Declaring the
+// behaviour here keeps util importable by modules that do not link the Nitro
+// VSOCK transport (e.g. enclave/config-tracker).
+type outboundUnavailableError interface{ OutboundUnavailable() bool }
+
 // OutboundHTTPError is a synthetic HTTP response returned for an outbound
 // request failure that should surface to the caller as an HTTP status rather
 // than an enclave/capability error: a client-side or transient-upstream fault.
@@ -45,6 +51,10 @@ func ClassifyOutboundHTTPError(err error) *OutboundHTTPError {
 	}
 	if IsRequestBlockedError(err) {
 		return &OutboundHTTPError{StatusCode: http.StatusBadRequest, Body: "upstream request blocked by enclave network policy"}
+	}
+	var unavailable outboundUnavailableError
+	if errors.As(err, &unavailable) && unavailable.OutboundUnavailable() {
+		return &OutboundHTTPError{StatusCode: http.StatusServiceUnavailable, Body: "enclave outbound proxy is temporarily unavailable"}
 	}
 	if errors.Is(err, syscall.ECONNREFUSED) {
 		return &OutboundHTTPError{StatusCode: http.StatusBadGateway, Body: "upstream connection refused"}

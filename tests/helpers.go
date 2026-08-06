@@ -10,12 +10,14 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -28,11 +30,11 @@ import (
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/ethclient/simulated"
 	"github.com/ethereum/go-ethereum/node"
-	"github.com/smartcontractkit/chainlink-evm/gethwrappers/workflow/generated/capabilities_registry_wrapper_v2"
 	enclaveclient "github.com/smartcontractkit/chainlink-confidential-compute/enclave-client"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/workflow/generated/capabilities_registry_wrapper_v2"
 	"github.com/smartcontractkit/tdh2/go/tdh2/tdh2easy"
 	"github.com/stretchr/testify/require"
 )
@@ -504,9 +506,75 @@ func getHTTPClient(certPath string) (*http.Client, error) {
 	}, nil
 }
 
-// KillProcessOnPort kills any process listening on the specified port
+// hostServerExitBudget must exceed the host's own --shutdown-timeout (25s by
+// default), or a correct but slow graceful shutdown fails the assertion below.
+// It is a wall clock deadline rather than an iteration count because each probe
+// costs an exec on top of the sleep.
+const hostServerExitBudget = 35 * time.Second
+
+// hostServerPIDs returns the host servers running for this enclave.
+//
+// The match is on the --enclave-cid argument, not just the binary path: on
+// Nitro both enclaves of a suite run the identical binary out of one app
+// directory, so the path alone cannot tell a sibling apart from the enclave
+// being cleaned up. The trailing delimiter keeps CID 1 from matching CID 16.
+// The path is quoted because pgrep -f takes an extended regular expression and
+// a checkout path can contain metacharacters.
+func hostServerPIDs(t *testing.T, rootDir, app, enclaveCID string) ([]string, bool) {
+	pattern := regexp.QuoteMeta(filepath.Join(rootDir, "enclave", "apps", app, "host-server")) +
+		`.*--enclave-cid=` + regexp.QuoteMeta(enclaveCID) + `([[:space:]]|$)`
+	out, err := exec.Command("pgrep", "-f", pattern).Output()
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+	case errors.As(err, &exitErr) && exitErr.ExitCode() == 1:
+		return nil, true // pgrep exits 1 for "nothing matched"
+	default:
+		// Anything else (bad pattern, exit 2) must not read as "stopped", which
+		// would make this check silently decorative.
+		t.Errorf("cannot verify the host server exited: pgrep %q: %v", pattern, err)
+		return nil, false
+	}
+	return strings.Fields(string(out)), true
+}
+
+// requireHostServerStopped reports a surviving host server for this enclave.
+//
+// It matches the process, not a port: the host closes its main HTTP listener
+// before draining the egress broker, so the HTTP port goes free while the
+// process still holds VSOCK 5001 -- which is the survivor that actually blocks
+// the next suite. On real Nitro that port is not visible to lsof at all.
+func requireHostServerStopped(t *testing.T, rootDir, app, enclaveCID string) {
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		t.Logf("pgrep unavailable; cannot verify the host server exited")
+		return
+	}
+	deadline := time.Now().Add(hostServerExitBudget)
+	for {
+		pids, ok := hostServerPIDs(t, rootDir, app, enclaveCID)
+		if !ok || len(pids) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("a host server for CID %s survived cleanup after %s; it still holds VSOCK 5001 and would stop the next suite's broker starting (pids %s)",
+				enclaveCID, hostServerExitBudget, strings.Join(pids, " "))
+			// Repair by PID: this survivor has already closed its HTTP listeners,
+			// so the port sweeps below cannot reach it.
+			for _, pid := range pids {
+				_ = exec.Command("kill", "-9", pid).Run()
+			}
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// KillProcessOnPort kills any process listening on the specified port.
+// -sTCP:LISTEN is required: a bare -i:PORT also matches sockets whose *remote*
+// port is PORT, so it would kill this test binary for its own client
+// connections, and any unrelated process talking to that port.
 func KillProcessOnPort(t *testing.T, port string) {
-	cmd := exec.Command("lsof", "-ti:"+port)
+	cmd := exec.Command("lsof", "-ti:"+port, "-sTCP:LISTEN")
 	output, err := cmd.Output()
 	if err != nil {
 		// No process found on this port, which is fine
@@ -578,9 +646,11 @@ func MustSetupEnclave(t *testing.T, rootDir string, enclaveCID string, httpPort 
 
 	// Delete stale EIF to force a fresh build. Cached EIFs from previous
 	// runs may contain old app binaries, causing hard-to-debug failures.
-	staleEIF := filepath.Join(rootDir, "enclave", "apps", app, "go-enclave-outbound-cid"+enclaveCID+".eif")
-	if err := os.Remove(staleEIF); err == nil {
-		t.Logf("Removed stale EIF: %s", staleEIF)
+	staleEIF := filepath.Join(rootDir, "enclave", "apps", app, "go-enclave-outbound.eif")
+	if isFirstEnclave {
+		if err := os.Remove(staleEIF); err == nil {
+			t.Logf("Removed stale EIF: %s", staleEIF)
+		}
 	}
 
 	// Kill any existing processes on the target ports before starting
@@ -628,17 +698,36 @@ func MustSetupEnclave(t *testing.T, rootDir string, enclaveCID string, httpPort 
 		// Give the bash script and host-server time to clean up
 		// The script should handle killing the host-server when it exits
 		time.Sleep(1 * time.Second)
+
+		// Then make it certain. The script's trap is the graceful path, but a host
+		// server that outlives it keeps VSOCK 5001 bound and stops the next
+		// suite's broker from starting, and the next suite's own pre-start sweep
+		// cannot find it because it allocates fresh HTTP ports.
+		// Assert before repairing. Sweeping first would restore a good state and
+		// leave the check able to fail only if the force-kill itself failed, so it
+		// would not detect a regression in the script's trap or in who owns the
+		// host server's lifetime -- which is the defect that went unnoticed.
+		requireHostServerStopped(t, rootDir, app, enclaveCID)
+
+		// Then guarantee it regardless: a survivor keeps VSOCK 5001 bound and the
+		// next suite's own pre-start sweep cannot find it, because each suite
+		// allocates fresh HTTP ports.
+		KillProcessOnPort(t, httpPort)
+		KillProcessOnPort(t, configHttpPort)
 	}
 
 	t.Logf("Starting enclave '%s' with CID %s on ports %s/%s...", enclaveName, enclaveCID, httpPort, configHttpPort)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	var enclaveOutput bytes.Buffer
 	outputMutex := &sync.Mutex{}
 	enclaveDone := make(chan struct{})
 	enclaveReady := make(chan struct{})
 	defer close(enclaveDone)
-	enclaveCmd = exec.CommandContext(ctx, buildAndRunPath)
+	// Deliberately not exec.CommandContext: its cancel is Process.Kill, and the
+	// context would be cancelled when this function returns, i.e. right after
+	// readiness. That SIGKILLs the run script mid-suite, which no trap can catch,
+	// so the host server it started would be orphaned and keep VSOCK 5001 bound.
+	// The returned cleanup owns the script's lifetime instead.
+	enclaveCmd = exec.Command(buildAndRunPath) //nolint:gosec // fixed in-repo script path
 	enclaveCmd.Dir = rootDir
 
 	// Build environment variables
@@ -660,6 +749,11 @@ func MustSetupEnclave(t *testing.T, rootDir string, enclaveCID string, httpPort 
 		envVars = append(envVars, "SKIP_ALLOCATOR_RESTART=true", "SKIP_IMAGE_BUILD=true")
 	}
 
+	// No OUTBOUND_CIDS: each host serves exactly one enclave, so the broker's
+	// default of admitting --enclave-cid is right. The flag stays on the host for
+	// the supervisor, which will front several enclaves from one process and must
+	// admit all of their CIDs through its single parent-scoped listener.
+
 	enclaveCmd.Env = append(os.Environ(), envVars...)
 	enclaveOut, err := enclaveCmd.StdoutPipe()
 	require.NoError(t, err)
@@ -667,6 +761,16 @@ func MustSetupEnclave(t *testing.T, rootDir string, enclaveCID string, httpPort 
 	require.NoError(t, err)
 	err = enclaveCmd.Start()
 	require.NoError(t, err, "Failed to start enclave process")
+
+	// Own the process from here, not from the return. Readiness can time out into
+	// t.Fatal, which never returns cleanup to the caller; dropping
+	// exec.CommandContext removed the context cancellation that used to reap the
+	// script on that path, so a late build could go on to launch an enclave after
+	// its own test had already failed. sync.Once keeps the caller's usual
+	// `defer cleanup()` from running it twice.
+	var cleanupOnce sync.Once
+	runCleanup := func() { cleanupOnce.Do(cleanup) }
+	t.Cleanup(runCleanup)
 
 	// Monitor enclave stdout for readiness.
 	go func() {
@@ -714,7 +818,7 @@ func MustSetupEnclave(t *testing.T, rootDir string, enclaveCID string, httpPort 
 	}
 	time.Sleep(10 * time.Second)
 
-	return cleanup
+	return runCleanup
 }
 
 // enclaveDescribeEntry represents the JSON output of `nitro-cli describe-enclaves`.

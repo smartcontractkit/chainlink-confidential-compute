@@ -1,16 +1,19 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"log"
 	"time"
 
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/app"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/outboundproxy"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 )
 
 var (
@@ -38,9 +41,15 @@ func main() {
 		logger.Fatalf("Failed to open Nitro attestor: %v", err)
 	}
 	defer cleanup()
+	outboundDialer := outboundproxy.NewWorkflowDialer(outboundproxy.ParentCID, outboundproxy.Port)
 
 	err = nitro.StartNitroEnclave(
-		app.NewHTTPEnclaveApp(nil),
+		app.NewHTTPEnclaveApp(
+			util.NewRestrictedHTTPClientWithDialer(outboundDialer.DialContext),
+			app.WithTLSClientFactory(func(config *tls.Config) types.HTTPClient {
+				return util.NewRestrictedHTTPClientWithTLSAndDialer(config, outboundDialer.DialContext)
+			}),
+		),
 		att,
 		keychain.NewBoxKeychain(logger, rotationOverride, expirationOverride, nil),
 		combiner.NewTDH2EasyCombiner(),

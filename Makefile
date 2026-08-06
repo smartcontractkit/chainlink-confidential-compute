@@ -244,18 +244,16 @@ clean-e2e:
 	echo "OK removed $(WORK_DIR), core symlink, and plugin binaries"
 
 # Clear stale Nitro runtime state between real-enclave runs. Leftover enclaves
-# block the allocator restart, orphaned wireguard-go-vsock helpers hold vsock
-# ports, and cached EIF/PCR artifacts can mask code changes. The ENCLAVE_TYPE=NITRO
+# block the allocator restart, and cached EIF/PCR artifacts can mask code changes. The ENCLAVE_TYPE=NITRO
 # e2e targets invoke this automatically before each run; it's also exposed as a
 # standalone target.
 .PHONY: clean-e2e-nitro
 clean-e2e-nitro:
 	echo "Cleaning stale Nitro state..."
 	-pkill -9 -f host-server 2>/dev/null || true
-	-{ sudo pkill -9 -f wireguard-go-vsock || pkill -9 -f wireguard-go-vsock; } 2>/dev/null || true
 	-nitro-cli terminate-enclave --all 2>/dev/null || true
-	-find "$(REPO_ROOT)/enclave/apps" \( -name 'go-enclave-outbound-cid*.eif' -o -name 'pcr_measurements*.json' \) -print -delete 2>/dev/null || true
-	echo "OK cleaned Nitro enclaves, wireguard-go-vsock orphans, and stale EIF/PCR artifacts"
+	-find "$(REPO_ROOT)/enclave/apps" \( -name 'go-enclave-outbound.eif' -o -name 'pcr_measurements*.json' \) -print -delete 2>/dev/null || true
+	echo "OK cleaned Nitro enclaves and stale EIF/PCR artifacts"
 
 # Run `go mod tidy` in every module found under the repo root. GOTOOLCHAIN=auto
 # lets modules pinning a newer Go toolchain fetch it automatically.
