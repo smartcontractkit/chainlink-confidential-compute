@@ -944,6 +944,9 @@ func main() {
 	host := NewHostServer(ctx, nil)
 	host.logger = lggr
 	host.metrics = metrics
+	if telemetryCfg.enabled() {
+		go metrics.monitorEnclaveMemory(ctx, host.enclaveClient, lggr, enclaveMemoryPollInterval, enclaveMemoryPollTimeout)
+	}
 	mainMux := http.NewServeMux()
 
 	var configServer *http.Server
