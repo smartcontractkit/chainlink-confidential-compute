@@ -349,12 +349,18 @@ type RealExecutor struct {
 	capConfigMu        sync.RWMutex
 	capConfig          *ParsedConfig
 	capabilityRegistry core.CapabilitiesRegistry
-	nodeID             string
 	proposalInFlight   atomic.Bool
-	donMu              sync.RWMutex
-	donMembers         [][]byte
-	donF               uint32
-	enclaves           []types.Enclave
+
+	// stateMu guards the mutable shared state that the background refresh loop
+	// (EnsureFreshEnclaves) and getLocalNodeAndCapConfig rewrite while Execute
+	// reads it concurrently. Access these only through the getter/setter helpers.
+	// vaultDON.CryptographyThreshold is guarded too (via getVaultThreshold/
+	// setVaultThreshold); the rest of vaultDON is publish-once at init.
+	stateMu    sync.RWMutex
+	nodeID     string
+	donMembers [][]byte
+	donF       uint32
+	enclaves   []types.Enclave
 
 	// Background enclave-refresh ticker, started once on init and stopped on Close.
 	refreshCancel context.CancelFunc
@@ -513,7 +519,7 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 	// and org, matching the DON-mode base labels (workflowName/workflowOwner/orgID).
 	// sdk is not available at this layer (not on RequestMetadata), so it is omitted.
 	metrics := NewScopedEmitter(e.metrics, map[string]any{
-		"node.id":        e.nodeID,
+		"node.id":        e.getNodeID(),
 		"workflow.owner": metadata.WorkflowOwner,
 		"workflow.id":    metadata.WorkflowID,
 		"workflow.name":  metadata.WorkflowName,
@@ -895,7 +901,7 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 	}
 
 	e.enclaveClient = pool
-	e.enclaves = nodes
+	e.setEnclaves(nodes)
 	e.rateLimiter = rateLimiter
 	e.setCapConfig(parsedConfig)
 	e.vaultDON = VaultDON{
@@ -908,11 +914,11 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 	e.startEnclaveRefreshLoop()
 	e.lggr.Infow("executor initialized",
 		"capabilityID", e.capabilityID,
-		"nodeID", e.nodeID,
+		"nodeID", e.getNodeID(),
 		"maxRetries", parsedConfig.MaxRetries,
 		"retryBackoffSeconds", parsedConfig.RetryBackoffSeconds,
 		"enableSecretsCache", parsedConfig.EnableSecretsCache,
-		"vaultDONThreshold", e.vaultDON.CryptographyThreshold,
+		"vaultDONThreshold", e.getVaultThreshold(),
 		"insecureSkipTLS", parsedConfig.InsecureSkipTLSVerify)
 	return nil
 }
@@ -978,14 +984,14 @@ func (e *RealExecutor) EnsureFreshEnclaves(ctx context.Context) error {
 			"endpoint": "publicKeys",
 		})
 	} else {
-		e.enclaves = nodes
+		e.setEnclaves(nodes)
 	}
 
 	vaultDONPossibleFaultyNodes, err := getVaultDONPossibleFaultyNodes(ctx, e.vaultDON.Capability, int(localNode.WorkflowDON.F))
 	if err != nil {
 		return fmt.Errorf("failed to get VaultDON possible faulty nodes: %w", err)
 	}
-	e.vaultDON.CryptographyThreshold = getVaultDONThreshold(vaultDONPossibleFaultyNodes)
+	e.setVaultThreshold(getVaultDONThreshold(vaultDONPossibleFaultyNodes))
 
 	newMembers := peerIDsToSortedBytes(localNode.WorkflowDON.Members)
 	newF := uint32(localNode.WorkflowDON.F)
@@ -995,16 +1001,46 @@ func (e *RealExecutor) EnsureFreshEnclaves(ctx context.Context) error {
 }
 
 func (e *RealExecutor) getDONMembership() (members [][]byte, f uint32) {
-	e.donMu.RLock()
-	defer e.donMu.RUnlock()
+	e.stateMu.RLock()
+	defer e.stateMu.RUnlock()
 	return e.donMembers, e.donF
 }
 
 func (e *RealExecutor) setDONMembership(members [][]byte, f uint32) {
-	e.donMu.Lock()
-	defer e.donMu.Unlock()
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
 	e.donMembers = members
 	e.donF = f
+}
+
+func (e *RealExecutor) getNodeID() string {
+	e.stateMu.RLock()
+	defer e.stateMu.RUnlock()
+	return e.nodeID
+}
+
+func (e *RealExecutor) setNodeID(id string) {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	e.nodeID = id
+}
+
+func (e *RealExecutor) setEnclaves(nodes []types.Enclave) {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	e.enclaves = nodes
+}
+
+func (e *RealExecutor) getVaultThreshold() int {
+	e.stateMu.RLock()
+	defer e.stateMu.RUnlock()
+	return e.vaultDON.CryptographyThreshold
+}
+
+func (e *RealExecutor) setVaultThreshold(t int) {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	e.vaultDON.CryptographyThreshold = t
 }
 
 func (e *RealExecutor) proposeConfigUpdateIfMembershipChanged(ctx context.Context, newMembers [][]byte, newF uint32) {
@@ -1099,6 +1135,8 @@ func (e *RealExecutor) broadcastConfigUpdate(ctx context.Context, newMembers [][
 }
 
 func (e *RealExecutor) GetEnclaves() []types.Enclave {
+	e.stateMu.RLock()
+	defer e.stateMu.RUnlock()
 	return e.enclaves
 }
 
@@ -1117,7 +1155,7 @@ func (e *RealExecutor) getLocalNodeAndCapConfig(ctx context.Context) (capabiliti
 		return capabilities.Node{}, capabilities.CapabilityConfiguration{}, fmt.Errorf("local node does not have a WorkflowDON ID, cannot initialise confidential http action capability")
 	}
 	if localNode.PeerID != nil {
-		e.nodeID = localNode.PeerID.String()
+		e.setNodeID(localNode.PeerID.String())
 	}
 
 	ownCapabilityConfig, err := e.capabilityRegistry.ConfigForCapability(ctx, e.capabilityID, localNode.WorkflowDON.ID)
@@ -1486,7 +1524,7 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 		} else {
 			return nil, nil, fmt.Errorf("no decryption shares found for secret %s: neither binary nor hex-encoded shares present", secretResp.GetId().GetKey())
 		}
-		minimumSharesRequired := e.vaultDON.CryptographyThreshold
+		minimumSharesRequired := e.getVaultThreshold()
 		if len(encryptedDecryptionSharesForSecret) < minimumSharesRequired {
 			return nil, nil, fmt.Errorf("not enough encrypted decryption key shares for secret %s, expected at least %d, got %d", secretResp.GetId().GetKey(), minimumSharesRequired, len(encryptedDecryptionSharesForSecret))
 		}
