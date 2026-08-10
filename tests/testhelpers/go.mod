@@ -5,8 +5,11 @@ module github.com/smartcontractkit/chainlink-confidential-compute/tests/testhelp
 
 go 1.26.4
 
+// The root module is required at a real pseudo-version, not v0.0.0, so that
+// external repositories can consume this module without adding their own
+// replace directive. The replace below only applies to in-repo builds.
 require (
-	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
+	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20260810193839-ed12934f0671
 	github.com/stretchr/testify v1.11.1
 )
 
