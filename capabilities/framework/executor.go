@@ -1397,7 +1397,7 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 		Method:   vault.MethodGetSecrets,
 		Metadata: vaultMetadata,
 	}
-	vaultRequestID := buildWorkflowGetSecretsRequestID(vaultMetadata)
+	vaultRequestID := vault.BuildWorkflowGetSecretsRequestID(vaultMetadata)
 	e.lggr.Debugw("fetching secrets from vault",
 		"secretCount", len(vaultDONSecrets),
 		"requestedKeys", requestedKeys,
@@ -1535,25 +1535,6 @@ func sortedBytesCopy(s [][]byte) [][]byte {
 	copy(out, s)
 	slices.SortFunc(out, bytes.Compare)
 	return out
-}
-
-// buildWorkflowGetSecretsRequestID returns the pending-queue / OCR request ID for a
-// workflow GetSecrets call. It must match chainlink core's
-// vaultutils.BuildWorkflowGetSecretsRequestID; the format is replicated here because
-// this minimal-TCB module cannot import chainlink/v2.
-//
-// We need sufficiently unique IDs accounting for two cases:
-//  1. called during the subscription phase, in which case the executionID will be blank
-//  2. called during execution, in which case it'll be present.
-//
-// The reference ID is unique per phase, so we differentiate when generating an ID.
-func buildWorkflowGetSecretsRequestID(md capabilities.RequestMetadata) string {
-	const subscriptionPhaseKey = "subscription"
-	phaseOrExecution := md.WorkflowExecutionID
-	if phaseOrExecution == "" {
-		phaseOrExecution = subscriptionPhaseKey
-	}
-	return fmt.Sprintf("%s::%s::%s", md.WorkflowID, phaseOrExecution, md.ReferenceID)
 }
 
 func (e *RealExecutor) applyPropagatedOrgIDToVault(ctx context.Context, md *capabilities.RequestMetadata) {
