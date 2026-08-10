@@ -633,6 +633,30 @@ func TestHandleMemory(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
 }
 
+func TestBytesToMBQuantizesMemoryReport(t *testing.T) {
+	t.Parallel()
+
+	const mib = uint64(1024 * 1024)
+	tests := []struct {
+		name  string
+		bytes uint64
+		want  uint64
+	}{
+		{name: "zero", bytes: 0, want: 0},
+		{name: "below half MiB", bytes: mib/2 - 1, want: 0},
+		{name: "half MiB rounds up", bytes: mib / 2, want: 1},
+		{name: "below one and a half MiB", bytes: mib + mib/2 - 1, want: 1},
+		{name: "one and a half MiB rounds up", bytes: mib + mib/2, want: 2},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, test.want, bytesToMB(test.bytes))
+		})
+	}
+}
+
 // configureTestServer POSTs a minimal non-zero config so the server will serve
 // /publicKeys. Tests that only need keys served (not the unconfigured 503
 // behavior) call this right after startup.

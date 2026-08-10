@@ -2,17 +2,28 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"math"
+	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
 
 const (
-	executionOutcomeSuccess = "success"
-	executionOutcomeError   = "error"
+	executionOutcomeSuccess       = "success"
+	executionOutcomeError         = "error"
+	enclaveMemoryPollInterval     = 5 * time.Minute
+	enclaveMemoryPollTimeout      = 30 * time.Second
+	maxEnclaveMemoryResponseBytes = 64 * 1024
 )
 
 type executionMetrics interface {
@@ -25,14 +36,22 @@ func (noopExecutionMetrics) startExecution(executionMetadata) func(string) {
 	return func(string) {}
 }
 
+type enclaveMemorySnapshot struct {
+	goRuntimeBytes  int64
+	processRSSBytes int64
+}
+
 type hostMetrics struct {
 	executionDuration  metric.Float64Histogram
 	executionsInflight metric.Int64Gauge
 	workflowActive     metric.Int64ObservableGauge
+	goRuntimeMemory    metric.Int64ObservableGauge
+	processRSSMemory   metric.Int64ObservableGauge
 
 	mu           sync.Mutex
 	inflight     int64
 	workflowRefs map[string]int64
+	memory       atomic.Pointer[enclaveMemorySnapshot]
 }
 
 func newHostMetrics(meter metric.Meter) (*hostMetrics, error) {
@@ -71,8 +90,28 @@ func newHostMetrics(meter metric.Meter) (*hostMetrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create active workflow gauge: %w", err)
 	}
+	goRuntimeMemory, err := meter.Int64ObservableGauge(
+		"confidential_compute.enclave.memory.go_runtime",
+		metric.WithDescription("Memory mapped by the enclave Go runtime, quantized to the nearest MiB inside the enclave"),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(metrics.observeGoRuntimeMemory),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave Go runtime memory gauge: %w", err)
+	}
+	processRSSMemory, err := meter.Int64ObservableGauge(
+		"confidential_compute.enclave.memory.rss",
+		metric.WithDescription("Resident memory of the enclave process, including native Wasmtime allocations, quantized to the nearest MiB inside the enclave"),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(metrics.observeProcessRSSMemory),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave process RSS memory gauge: %w", err)
+	}
 
 	metrics.workflowActive = active
+	metrics.goRuntimeMemory = goRuntimeMemory
+	metrics.processRSSMemory = processRSSMemory
 	metrics.executionsInflight.Record(context.Background(), 0)
 	return metrics, nil
 }
@@ -92,6 +131,110 @@ func (m *hostMetrics) observeActiveWorkflows(ctx context.Context, observer metri
 		)
 	}
 	return nil
+}
+
+// Memory is sampled over vsock in a background goroutine. These callbacks only
+// load the latest immutable snapshot, so metric collection never waits on the enclave.
+func (m *hostMetrics) observeGoRuntimeMemory(_ context.Context, observer metric.Int64Observer) error {
+	snapshot := m.memory.Load()
+	if snapshot != nil && snapshot.goRuntimeBytes > 0 {
+		observer.Observe(snapshot.goRuntimeBytes)
+	}
+	return nil
+}
+
+func (m *hostMetrics) observeProcessRSSMemory(_ context.Context, observer metric.Int64Observer) error {
+	snapshot := m.memory.Load()
+	if snapshot != nil && snapshot.processRSSBytes > 0 {
+		observer.Observe(snapshot.processRSSBytes)
+	}
+	return nil
+}
+
+func (m *hostMetrics) recordEnclaveMemory(estimate types.MemoryEstimateResponse) {
+	m.memory.Store(&enclaveMemorySnapshot{
+		goRuntimeBytes:  mibToBytes(estimate.UsedMB),
+		processRSSBytes: mibToBytes(estimate.RSSMB),
+	})
+}
+
+func (m *hostMetrics) clearEnclaveMemory() {
+	m.memory.Store(nil)
+}
+
+// monitorEnclaveMemory keeps network I/O outside OTel callbacks and clears a
+// cached sample after an error so an unreachable enclave cannot look healthy.
+func (m *hostMetrics) monitorEnclaveMemory(
+	ctx context.Context,
+	client *http.Client,
+	lggr cllogger.SugaredLogger,
+	interval time.Duration,
+	timeout time.Duration,
+) {
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			requestCtx, cancel := context.WithTimeout(ctx, timeout)
+			err := m.collectEnclaveMemory(requestCtx, client)
+			cancel()
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				m.clearEnclaveMemory()
+				lggr.Warnw("failed to collect enclave memory metrics",
+					"event", "ENCLAVE_MEMORY_METRICS_ERR",
+					"error", err)
+			}
+			timer.Reset(interval)
+		}
+	}
+}
+
+func (m *hostMetrics) collectEnclaveMemory(ctx context.Context, client *http.Client) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, vsockPrefix+types.MemoryPath, nil)
+	if err != nil {
+		return fmt.Errorf("create enclave memory request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request enclave memory: %w", err)
+	}
+	defer util.SafeClose(resp)
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxEnclaveMemoryResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("read enclave memory response: %w", err)
+	}
+	if len(body) > maxEnclaveMemoryResponseBytes {
+		return fmt.Errorf("enclave memory response exceeds %d bytes", maxEnclaveMemoryResponseBytes)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("enclave memory endpoint returned status %d", resp.StatusCode)
+	}
+
+	var estimate types.MemoryEstimateResponse
+	if err := json.Unmarshal(body, &estimate); err != nil {
+		return fmt.Errorf("decode enclave memory response: %w", err)
+	}
+	m.recordEnclaveMemory(estimate)
+	return nil
+}
+
+// MemoryEstimateResponse contains integer MiB values deliberately quantized
+// inside the enclave. This changes only the OTel unit; it does not add precision.
+func mibToBytes(value uint64) int64 {
+	const bytesPerMiB = uint64(1024 * 1024)
+	if value > uint64(math.MaxInt64)/bytesPerMiB {
+		return math.MaxInt64
+	}
+	return int64(value * bytesPerMiB)
 }
 
 func (m *hostMetrics) startExecution(metadata executionMetadata) func(string) {
