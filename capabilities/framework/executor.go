@@ -579,7 +579,7 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 
 		runLggr.Debugw("fetching enclave params")
 		enclaveParamsStart := time.Now()
-		enclaveParams, err := e.getEnclaveParams(ctx, reqID)
+		enclaveParams, err := e.getEnclaveParams(ctx, runLggr, reqID)
 		enclaveParamsDuration = time.Since(enclaveParamsStart)
 
 		if err != nil {
@@ -605,6 +605,7 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 		vaultDONAttemptStart := time.Now()
 		encryptedSecrets, encryptedDecryptionShares, err := e.GetEncryptedDecryptionShares(
 			ctx,
+			innerLggr,
 			secrets,
 			enclaveParams.EnclaveEphemeralPublicKey,
 			metadata,
@@ -1271,8 +1272,9 @@ func checkRequirements(req *sdk.Requirements) types.RequirementsChecker {
 	}
 }
 
-func (e *RealExecutor) getEnclaveParams(ctx context.Context, reqID [32]byte) (*EnclaveParams, error) {
-	reqIDHex := hex.EncodeToString(reqID[:])
+// getEnclaveParams selects an enclave and its most recent ephemeral public key for reqID. lggr must
+// be the request-scoped logger so the emitted lines carry the workflow/execution fields.
+func (e *RealExecutor) getEnclaveParams(ctx context.Context, lggr logger.Logger, reqID [32]byte) (*EnclaveParams, error) {
 	ephemeralPubKeyResponse, err := e.enclaveClient.GetPublicKeys(ctx, reqID, checkRequirements(nil))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get public keys: %w", err)
@@ -1281,8 +1283,7 @@ func (e *RealExecutor) getEnclaveParams(ctx context.Context, reqID [32]byte) (*E
 		return nil, fmt.Errorf("no enclave public keys found for request %x", reqID)
 	}
 
-	e.lggr.Debugw("public key responses received",
-		"reqID", reqIDHex,
+	lggr.Debugw("public key responses received",
 		"enclaveCount", len(ephemeralPubKeyResponse),
 		"pubKeyCount", len(ephemeralPubKeyResponse[0].PublicKeys))
 
@@ -1300,8 +1301,7 @@ func (e *RealExecutor) getEnclaveParams(ctx context.Context, reqID [32]byte) (*E
 	}
 	selectedEphemeralPublicKey := selectedEnclaveResponse.PublicKeys[mostRecentPubKeyIndex]
 	selectedEnclaveID := selectedEnclaveResponse.EnclaveID
-	e.lggr.Infow("selected enclave public key",
-		"reqID", reqIDHex,
+	lggr.Infow("selected enclave public key",
 		"enclaveID", hex.EncodeToString(selectedEnclaveID[:]),
 		"pubKeyIndex", mostRecentPubKeyIndex,
 		"pubKeyPrefix", fmt.Sprintf("%x", selectedEphemeralPublicKey[:min(8, len(selectedEphemeralPublicKey))]))
@@ -1317,19 +1317,23 @@ func generateSecretCacheKey(enclaveEphemeralPublicKey []byte, secret *framework.
 	return sha256.Sum256([]byte(keyData))
 }
 
+// GetEncryptedDecryptionShares fetches secrets and their encrypted decryption key shares from the
+// VaultDON, serving them from the local cache when every requested secret is present. lggr must be
+// the request-scoped logger so the emitted lines carry the workflow/execution/enclave fields.
 func (e *RealExecutor) GetEncryptedDecryptionShares(
 	ctx context.Context,
+	lggr logger.Logger,
 	vaultDONSecrets []*framework.SecretIdentifier,
 	enclaveEphemeralPublicKey []byte,
 	metadata capabilities.RequestMetadata,
 	metrics types.Emitter,
 ) ([][]byte, [][][]byte, error) {
-	e.lggr.Debugw("Attempting to get encrypted decrypted shares from VaultDON capability",
+	lggr.Debugw("Attempting to get encrypted decrypted shares from VaultDON capability",
 		"enclaveEphemeralPublicKey", fmt.Sprintf("%x", enclaveEphemeralPublicKey[:8]))
 
 	// Short circuit Vault DON call if no secrets are required.
 	if len(vaultDONSecrets) == 0 {
-		e.lggr.Debugw("no secrets required, skipping VaultDON call")
+		lggr.Debugw("no secrets required, skipping VaultDON call")
 		return nil, nil, nil
 	}
 
@@ -1357,7 +1361,7 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 				encryptedSecrets = append(encryptedSecrets, cachedEDKS.encryptedSecret)
 				encryptedDecryptionShares = append(encryptedDecryptionShares, cachedEDKS.encryptedDecryptionShares)
 			}
-			e.lggr.Debugw("All secrets retrieved from cache", "num_secrets", len(vaultDONSecrets))
+			lggr.Debugw("All secrets retrieved from cache", "num_secrets", len(vaultDONSecrets))
 			metrics.Emit("vault_don_cache_hit", nil)
 			return encryptedSecrets, encryptedDecryptionShares, nil
 		}
@@ -1398,7 +1402,7 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 		Metadata: vaultMetadata,
 	}
 	vaultRequestID := vault.BuildWorkflowGetSecretsRequestID(vaultMetadata)
-	e.lggr.Debugw("fetching secrets from vault",
+	lggr.Debugw("fetching secrets from vault",
 		"secretCount", len(vaultDONSecrets),
 		"requestedKeys", requestedKeys,
 		"vaultRequestID", vaultRequestID,
@@ -1407,7 +1411,7 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to execute VaultDON capability: %w", err)
 	}
-	e.lggr.Debugw("VaultDON response received", "secretCount", len(vaultDONSecrets))
+	lggr.Debugw("VaultDON response received", "secretCount", len(vaultDONSecrets))
 
 	var vaultDONOutput vault.GetSecretsResponse
 	err = vaultDONResponse.Payload.UnmarshalTo(&vaultDONOutput)
@@ -1504,7 +1508,7 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 				encryptedDecryptionShares: encryptedDecryptionShares[i],
 			}, nil)
 		}
-		e.lggr.Debugw("cached VaultDON secrets", "secretCount", len(vaultDONSecrets))
+		lggr.Debugw("cached VaultDON secrets", "secretCount", len(vaultDONSecrets))
 	}
 	return encryptedSecrets, encryptedDecryptionShares, nil
 }
