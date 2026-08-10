@@ -169,9 +169,6 @@ if [ "$SKIP_IMAGE_BUILD" = "false" ]; then
         --build-arg APP_NAME=${APP} \
         --build-arg KEYPAIR_ROTATION="${KEYPAIR_ROTATION}" \
         --build-arg KEYPAIR_EXPIRATION="${KEYPAIR_EXPIRATION}" \
-        --build-arg GATEWAY_URL="${GATEWAY_URL:-}" \
-        --build-arg STORAGE_SERVICE_URL="${STORAGE_SERVICE_URL:-}" \
-        --build-arg STORAGE_SERVICE_TLS="${STORAGE_SERVICE_TLS:-}" \
         --build-arg ALLOW_RECONFIG="${ALLOW_RECONFIG}"
     echo "Docker image built successfully."
     echo
@@ -185,9 +182,6 @@ else
             --build-arg APP_NAME=${APP} \
             --build-arg KEYPAIR_ROTATION="${KEYPAIR_ROTATION}" \
             --build-arg KEYPAIR_EXPIRATION="${KEYPAIR_EXPIRATION}" \
-            --build-arg GATEWAY_URL="${GATEWAY_URL:-}" \
-            --build-arg STORAGE_SERVICE_URL="${STORAGE_SERVICE_URL:-}" \
-            --build-arg STORAGE_SERVICE_TLS="${STORAGE_SERVICE_TLS:-}" \
             --build-arg ALLOW_RECONFIG="${ALLOW_RECONFIG}"
         echo "Docker image built successfully."
     else
