@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -14,7 +13,6 @@ import (
 	"math/big"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -31,6 +29,7 @@ import (
 	"github.com/smartcontractkit/chainlink-evm/gethwrappers/workflow/generated/capabilities_registry_wrapper_v2"
 	enclaveclient "github.com/smartcontractkit/chainlink-confidential-compute/enclave-client"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
+	"github.com/smartcontractkit/chainlink-confidential-compute/tests/testhelpers"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"github.com/smartcontractkit/tdh2/go/tdh2/tdh2easy"
@@ -504,258 +503,26 @@ func getHTTPClient(certPath string) (*http.Client, error) {
 	}, nil
 }
 
-// KillProcessOnPort kills any process listening on the specified port
+// KillProcessOnPort kills any process listening on the specified port.
+// Delegates to testhelpers.KillProcessOnPort.
 func KillProcessOnPort(t *testing.T, port string) {
-	cmd := exec.Command("lsof", "-ti:"+port)
-	output, err := cmd.Output()
-	if err != nil {
-		// No process found on this port, which is fine
-		return
-	}
-
-	pids := strings.TrimSpace(string(output))
-	if pids == "" {
-		return
-	}
-
-	for _, pid := range strings.Split(pids, "\n") {
-		pid = strings.TrimSpace(pid)
-		if pid == "" {
-			continue
-		}
-
-		t.Logf("Killing process %s on port %s", pid, port)
-		killCmd := exec.Command("kill", "-TERM", pid)
-		_ = killCmd.Run() // Ignore error, process might already be dead
-
-		// Wait a bit for graceful shutdown
-		time.Sleep(500 * time.Millisecond)
-
-		// Check if still running
-		checkCmd := exec.Command("kill", "-0", pid)
-		if checkCmd.Run() == nil {
-			// Process still running, force kill
-			t.Logf("Force killing process %s on port %s", pid, port)
-			forceKillCmd := exec.Command("kill", "-9", pid)
-			_ = forceKillCmd.Run()
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
+	testhelpers.KillProcessOnPort(t, port)
 }
 
 // UseFakeEnclave reports whether the test harness should provision fake enclaves
-// instead of real Nitro enclaves. An explicit ENCLAVE_TYPE=FAKE always selects
-// fake. Otherwise, when ENCLAVE_TYPE is unset and nitro-cli is not installed,
-// the harness falls back to fake so tests run on non-Nitro machines without the
-// caller needing to set anything — except when REMOTE_ENCLAVE_URLS points the
-// run at remote real enclaves.
+// instead of real Nitro enclaves. Delegates to testhelpers.UseFakeEnclave.
 func UseFakeEnclave() bool {
-	if os.Getenv(types.EnvEnclaveType) == string(types.EnclaveTypeFake) {
-		return true
-	}
-	if os.Getenv("REMOTE_ENCLAVE_URLS") != "" {
-		return false
-	}
-	if _, pinned := os.LookupEnv(types.EnvEnclaveType); !pinned {
-		if _, err := exec.LookPath("nitro-cli"); err != nil {
-			return true
-		}
-	}
-	return false
+	return testhelpers.UseFakeEnclave()
 }
 
+// MustSetupEnclave starts a single local enclave and returns a cleanup function.
+// Delegates to testhelpers.MustSetupEnclave.
 func MustSetupEnclave(t *testing.T, rootDir string, enclaveCID string, httpPort string, configHttpPort string, app string, enclaveName string, isFirstEnclave bool) func() {
-	scriptName := "build-and-run-go-enclave.sh"
-	scriptDir := "nitro"
-	if UseFakeEnclave() {
-		scriptName = "build-and-run-fake-enclave.sh"
-		scriptDir = "fake"
-	}
-	buildAndRunPath := filepath.Join(rootDir, "enclave", scriptDir, scriptName)
-	if _, err := os.Stat(buildAndRunPath); os.IsNotExist(err) {
-		t.Fatalf("%s script not found at: %s", scriptName, buildAndRunPath)
-	}
-
-	// Delete stale EIF to force a fresh build. Cached EIFs from previous
-	// runs may contain old app binaries, causing hard-to-debug failures.
-	staleEIF := filepath.Join(rootDir, "enclave", "apps", app, "go-enclave-outbound-cid"+enclaveCID+".eif")
-	if err := os.Remove(staleEIF); err == nil {
-		t.Logf("Removed stale EIF: %s", staleEIF)
-	}
-
-	// Kill any existing processes on the target ports before starting
-	t.Logf("Checking for existing processes on ports %s and %s...", httpPort, configHttpPort)
-	KillProcessOnPort(t, httpPort)
-	KillProcessOnPort(t, configHttpPort)
-
-	// Set up a cleanup handler to kill the enclave process.
-	var enclaveCmd *exec.Cmd
-	cleanup := func() {
-		// First, kill the enclave process
-		if enclaveCmd != nil && enclaveCmd.Process != nil {
-			t.Log("Terminating enclave process...")
-			_ = enclaveCmd.Process.Signal(os.Interrupt) // Try graceful shutdown first
-
-			// Wait a bit for graceful shutdown
-			time.Sleep(500 * time.Millisecond)
-
-			// Then force kill if needed
-			_ = enclaveCmd.Process.Kill()
-
-			// Wait for process to exit, but don't treat expected signals as errors
-			if err := enclaveCmd.Wait(); err != nil {
-				// These errors are expected when we kill the process
-				errStr := err.Error()
-				if errStr != "signal: killed" && errStr != "signal: terminated" &&
-					errStr != "signal: interrupt" && errStr != "context canceled" {
-					t.Logf("Unexpected error waiting for enclave process: %v", err)
-				}
-			}
-		}
-
-		// Terminate the specific enclave by name (only if using real nitro environment)
-		if !UseFakeEnclave() {
-			t.Logf("Terminating enclave '%s' via nitro-cli...", enclaveName)
-			cleanupCmd := exec.Command("nitro-cli", "terminate-enclave", "--enclave-name", enclaveName)
-			cleanupOutput, err := cleanupCmd.CombinedOutput()
-			if err != nil {
-				t.Logf("Failed to terminate enclave '%s': %v, output: %s", enclaveName, err, string(cleanupOutput))
-			} else {
-				t.Logf("Enclave '%s' terminated successfully", enclaveName)
-			}
-		}
-
-		// Give the bash script and host-server time to clean up
-		// The script should handle killing the host-server when it exits
-		time.Sleep(1 * time.Second)
-	}
-
-	t.Logf("Starting enclave '%s' with CID %s on ports %s/%s...", enclaveName, enclaveCID, httpPort, configHttpPort)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var enclaveOutput bytes.Buffer
-	outputMutex := &sync.Mutex{}
-	enclaveDone := make(chan struct{})
-	enclaveReady := make(chan struct{})
-	defer close(enclaveDone)
-	enclaveCmd = exec.CommandContext(ctx, buildAndRunPath)
-	enclaveCmd.Dir = rootDir
-
-	// Build environment variables
-	envVars := []string{
-		fmt.Sprintf("%s=%s", types.EnvEnclaveCID, enclaveCID),
-		fmt.Sprintf("HTTP_PORT=%s", httpPort),
-		fmt.Sprintf("CONFIG_HTTP_PORT=%s", configHttpPort),
-		fmt.Sprintf("APP=%s", app),
-		fmt.Sprintf("ENCLAVE_NAME=%s", enclaveName),
-		"KEYPAIR_ROTATION=15s",
-		"KEYPAIR_EXPIRATION=10m",
-		// Let tests re-POST /config to exercise reconfiguration (e.g. zeroing an
-		// enclave's config and restoring it).
-		"ALLOW_RECONFIG=true",
-	}
-
-	// For subsequent enclaves, skip allocator restart and image rebuilding
-	if !isFirstEnclave {
-		envVars = append(envVars, "SKIP_ALLOCATOR_RESTART=true", "SKIP_IMAGE_BUILD=true")
-	}
-
-	enclaveCmd.Env = append(os.Environ(), envVars...)
-	enclaveOut, err := enclaveCmd.StdoutPipe()
-	require.NoError(t, err)
-	enclaveErr, err := enclaveCmd.StderrPipe()
-	require.NoError(t, err)
-	err = enclaveCmd.Start()
-	require.NoError(t, err, "Failed to start enclave process")
-
-	// Monitor enclave stdout for readiness.
-	go func() {
-		scanner := bufio.NewScanner(enclaveOut)
-		for scanner.Scan() {
-			line := scanner.Text()
-			outputMutex.Lock()
-			enclaveOutput.WriteString(line + "\n")
-			outputMutex.Unlock()
-
-			if strings.Contains(line, "API endpoints available at") {
-				select {
-				case <-enclaveReady:
-				default:
-					close(enclaveReady)
-				}
-			}
-
-			t.Logf("[Enclave setup]: %s", line)
-		}
-	}()
-
-	// Monitor enclave errors (docker build writes progress/errors here).
-	go func() {
-		scanner := bufio.NewScanner(enclaveErr)
-		for scanner.Scan() {
-			line := scanner.Text()
-			outputMutex.Lock()
-			enclaveOutput.WriteString("enclave error: " + line + "\n")
-			outputMutex.Unlock()
-			t.Logf("[Enclave setup stderr]: %s", line)
-		}
-	}()
-
-	t.Log("Waiting for enclave to be ready...")
-	// The startup includes a Docker image build of the enclave Dockerfile
-	// (CGO/wasmtime for confidential-workflows, go mod download for all apps),
-	// which on a cold runner cache can run well past 15 minutes after a
-	// chainlink-common dep bump pulls in many transitive packages.
-	select {
-	case <-enclaveReady:
-		t.Log("Enclave is ready!")
-	case <-time.After(60 * time.Minute):
-		t.Fatal("Timeout waiting for enclave to start")
-	}
-	time.Sleep(10 * time.Second)
-
-	return cleanup
+	return testhelpers.MustSetupEnclave(t, rootDir, enclaveCID, httpPort, configHttpPort, app, enclaveName, isFirstEnclave)
 }
 
-// enclaveDescribeEntry represents the JSON output of `nitro-cli describe-enclaves`.
-type enclaveDescribeEntry struct {
-	EnclaveCID   int        `json:"EnclaveCID"`
-	Measurements nitro.PCRs `json:"Measurements"`
-}
-
+// EnsureEnclaveAndGetMeasurements retrieves PCR measurements for a running
+// enclave. Delegates to testhelpers.EnsureEnclaveAndGetMeasurements.
 func EnsureEnclaveAndGetMeasurements(enclaveCID int) ([]byte, error) {
-	if UseFakeEnclave() {
-		return []byte(types.FakeMeasurements), nil
-	}
-
-	cmd := exec.Command("nitro-cli", "describe-enclaves")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to run nitro-cli describe-enclaves: %w", err)
-	}
-
-	var entries []enclaveDescribeEntry
-	if err := json.Unmarshal(output, &entries); err != nil {
-		return nil, fmt.Errorf("failed to parse nitro-cli output: %w", err)
-	}
-
-	if len(entries) == 0 {
-		return nil, fmt.Errorf("no running enclaves found")
-	}
-
-	for _, entry := range entries {
-		if entry.EnclaveCID == enclaveCID {
-			measurementsBytes, err := json.Marshal(entry.Measurements)
-			if err != nil {
-				return nil, err
-			}
-			return measurementsBytes, nil
-		}
-	}
-
-	var availableCIDs []int
-	for _, entry := range entries {
-		availableCIDs = append(availableCIDs, entry.EnclaveCID)
-	}
-	return nil, fmt.Errorf("enclave with CID %d not found, available CIDs: %v", enclaveCID, availableCIDs)
+	return testhelpers.EnsureEnclaveAndGetMeasurements(enclaveCID)
 }
