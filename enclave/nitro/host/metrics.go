@@ -21,7 +21,7 @@ import (
 const (
 	executionOutcomeSuccess       = "success"
 	executionOutcomeError         = "error"
-	enclaveMemoryPollInterval     = 5 * time.Minute
+	enclaveMemoryPollInterval     = 30 * time.Second
 	enclaveMemoryPollTimeout      = 30 * time.Second
 	maxEnclaveMemoryResponseBytes = 64 * 1024
 )
