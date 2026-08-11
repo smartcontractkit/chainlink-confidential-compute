@@ -248,3 +248,118 @@ The enclave build process is publicly verifiable so users can trust what runs in
 ```
 
 We also use the `verify-wireguard-go-vsock` GitHub workflow to verify the source of the `wireguard-go-vsock` binary, which handles networking inside our AWS Nitro Enclaves.
+
+## Using the Enclave E2E Test Helpers From Another Repository
+
+This repository provides reusable components for spinning up local enclaves in E2E tests, designed to be consumed from **any** Go repository.
+
+### 1. GitHub Action: `setup-nitro-enclave`
+
+A composite action at [.github/actions/setup-nitro-enclave](.github/actions/setup-nitro-enclave) prepares a self-hosted Nitro runner with all prerequisites (nitro-cli, allocator, hugepages, wireguard-tools, lsof, socat). Reference it from your workflow:
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+    with:
+      repository: smartcontractkit/chainlink-confidential-compute
+      path: chainlink-confidential-compute
+      # pin to a release tag or commit SHA
+      ref: main
+
+  - name: Setup Nitro Enclave Environment
+    uses: ./chainlink-confidential-compute/.github/actions/setup-nitro-enclave
+    with:
+      total-cpu-count: "4"      # optional, default "4"
+      total-memory-mib: "2048"  # optional, default "2048"
+      hugepages: "1024"         # optional, default "1024"
+```
+
+After this step, `nitro-cli`, `wg`, `lsof`, and `socat` are available and the allocator is running. The action targets Amazon Linux (`dnf`), matching the self-hosted Nitro runners.
+
+### 2. Go Test Library: `tests/testhelpers`
+
+Import [tests/testhelpers](tests/testhelpers) to programmatically launch local enclaves. It is a standalone module whose dependency set is just the root module plus testify — no go-ethereum, no chainlink:
+
+```go
+import (
+    "github.com/smartcontractkit/chainlink-confidential-compute/tests/testhelpers"
+)
+
+func TestMyFeature(t *testing.T) {
+    // repoRoot is the absolute path to where you checked out this repository.
+    repoRoot := os.Getenv("CONFIDENTIAL_COMPUTE_ROOT")
+
+    cfg := testhelpers.DefaultLocalEnclaveSetupConfig(repoRoot, "confidential-http")
+    // Optionally override:
+    // cfg.EnclaveCount = 1
+    // cfg.BinaryPath = "/path/to/prebuilt/binary"
+    // cfg.Region = "us-west-2"
+
+    result := testhelpers.SetupLocalEnclaves(t, cfg)
+    defer result.CleanupAll()
+
+    // result.Enclaves   – []types.Enclave ready for the enclave client pool
+    // result.ConfigURLs – config-plane URLs for pushing EnclaveConfig
+}
+```
+
+In your `go.mod`, add replace directives pointing at your local checkout:
+
+```
+require github.com/smartcontractkit/chainlink-confidential-compute/tests/testhelpers v0.0.0
+
+replace github.com/smartcontractkit/chainlink-confidential-compute/tests/testhelpers => ./path/to/chainlink-confidential-compute/tests/testhelpers
+replace github.com/smartcontractkit/chainlink-confidential-compute => ./path/to/chainlink-confidential-compute
+```
+
+#### Key exported symbols (package `testhelpers`)
+
+| Symbol | Description |
+|--------|-------------|
+| `LocalEnclaveSetupConfig` | Configuration struct (repo root, app name, ports, CIDs, enclave type, region, extra env) |
+| `DefaultLocalEnclaveSetupConfig(repoRoot, appName)` | Config with sensible defaults (2 enclaves, CID 16+, ports 8080+/8082+) |
+| `SetupLocalEnclaves(t, config)` | Provisions local enclaves, returns `*LocalEnclaveResult` |
+| `ParseRemoteEnclaves(config)` | Parses pre-deployed enclave URLs + PCR JSON into `[]types.Enclave` |
+| `MustSetupEnclave(t, rootDir, cid, httpPort, configPort, app, name, isFirst)` | Low-level: starts a single enclave |
+| `MustSetupEnclaveWithEnv(...)` | `MustSetupEnclave` with extra environment entries for the build script |
+| `EnsureEnclaveAndGetMeasurements(cid)` | Retrieves PCR measurements from a running enclave |
+| `UseFakeEnclave()` | Reports whether fake enclaves are selected (via `ENCLAVE_TYPE`, or no `nitro-cli`) |
+| `KillProcessOnPort(t, port)` | Utility: kills any process listening on a port |
+| `DetectHostIP()` | Returns the host IP reachable from Docker containers |
+
+#### Prerequisites for the runner
+
+- **Nitro instance**: For real enclaves, the host must be an EC2 instance with Nitro Enclaves enabled. Without `nitro-cli` on `PATH`, the helpers fall back to fake enclaves (see `UseFakeEnclave`).
+- **Allocator configured**: Use the `setup-nitro-enclave` action above, or configure manually.
+- **Capability binary**: Either build the binary into `tests/e2e/binaries/<app>` before calling `SetupLocalEnclaves`, or set `config.BinaryPath` to a pre-built binary.
+- **Repository checkout**: This repo must be checked out — the build script, Dockerfile, and host binary are resolved relative to `config.RepoRoot`.
+
+### 3. Full CI Example (External Repo)
+
+```yaml
+name: E2E Tests
+on: [pull_request]
+jobs:
+  e2e:
+    runs-on: [self-hosted, Linux, X64]  # must be a Nitro-capable instance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: smartcontractkit/chainlink-confidential-compute
+          path: chainlink-confidential-compute
+          ref: main  # or pin to a release tag
+
+      - name: Setup Nitro Enclave Environment
+        uses: ./chainlink-confidential-compute/.github/actions/setup-nitro-enclave
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Run E2E tests
+        env:
+          CONFIDENTIAL_COMPUTE_ROOT: ${{ github.workspace }}/chainlink-confidential-compute
+        run: go test -v ./e2e/... -timeout 90m
+```

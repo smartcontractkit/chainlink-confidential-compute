@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"fmt"
 	"net"
 	"strconv"
 	"testing"
@@ -9,7 +8,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
-	"github.com/smartcontractkit/chainlink-confidential-compute/tests"
+	"github.com/smartcontractkit/chainlink-confidential-compute/tests/testhelpers"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 )
@@ -43,14 +42,11 @@ func allocateNitroTestPorts(t *testing.T, count int) []string {
 // first enclave is wrapped in a local API-key-injecting proxy.
 func startNitroEnclaves(t *testing.T, app App, logger zerolog.Logger) ([]types.Enclave, []string, func()) {
 	t.Helper()
-	var enclaves []types.Enclave
-	var configURLs []string
-	var cleanups []func()
 
 	logger.Info().Msgf("Starting local Nitro enclave for app: %s", app.Name)
 	rootDir, err := util.GetRepoRoot()
 	require.NoError(t, err)
-	baseCID := 16
+
 	httpPorts := allocateNitroTestPorts(t, 2)
 	configHttpPorts := allocateNitroTestPorts(t, 2)
 	logger.Info().Msgf(
@@ -60,55 +56,23 @@ func startNitroEnclaves(t *testing.T, app App, logger zerolog.Logger) ([]types.E
 		configHttpPorts,
 	)
 
-	logger.Info().Msgf("Cleaning up stale processes on ports...")
-	for i := range httpPorts {
-		tests.KillProcessOnPort(t, httpPorts[i])
-		tests.KillProcessOnPort(t, configHttpPorts[i])
+	cfg := testhelpers.LocalEnclaveSetupConfig{
+		RepoRoot:        rootDir,
+		AppName:         app.Name,
+		HTTPPorts:       httpPorts,
+		ConfigHTTPPorts: configHttpPorts,
+	}
+	result := testhelpers.SetupLocalEnclaves(t, cfg)
+	logger.Info().Msgf("Using host IP: %s for enclave communication", result.HostIP)
+
+	// Wrap the first enclave in an API-key-injecting proxy.
+	if len(result.Enclaves) > 0 {
+		enclaveURL := result.Enclaves[0].EnclaveURL
+		proxyURL, proxyCleanup := startProxy(t, enclaveURL, logger)
+		result.Cleanups = append(result.Cleanups, proxyCleanup)
+		logger.Info().Msgf("Started proxy for enclave 0 at %s forwarding to %s", proxyURL, enclaveURL)
+		result.Enclaves[0].EnclaveURL = proxyURL
 	}
 
-	for i := range httpPorts {
-		enclaveCID := strconv.Itoa(baseCID + i)
-		enclaveName := fmt.Sprintf("go-enclave-%s-%d", app.Name, i)
-		isFirstEnclave := i == 0
-
-		cleanup := tests.MustSetupEnclave(
-			t, rootDir, enclaveCID,
-			httpPorts[i], configHttpPorts[i],
-			app.Name, enclaveName, isFirstEnclave,
-		)
-		cleanups = append(cleanups, cleanup)
-
-		measurements, err := tests.EnsureEnclaveAndGetMeasurements(baseCID + i)
-		require.NoError(t, err, "Failed to get enclave measurements")
-
-		hostIP := getHostIP()
-		logger.Info().Msgf("Using host IP: %s for enclave communication", hostIP)
-
-		enclaveURL := fmt.Sprintf("http://%s:%s", hostIP, httpPorts[i])
-		if i == 0 {
-			proxyURL, proxyCleanup := startProxy(t, enclaveURL, logger)
-			cleanups = append(cleanups, proxyCleanup)
-			logger.Info().Msgf("Started proxy for enclave 0 at %s forwarding to %s", proxyURL, enclaveURL)
-			enclaveURL = proxyURL
-		}
-
-		enclaveType := types.EnclaveTypeNitro
-		if tests.UseFakeEnclave() {
-			enclaveType = types.EnclaveTypeFake
-		}
-		enclaves = append(enclaves, types.Enclave{
-			EnclaveType:      enclaveType,
-			EnclaveExtraData: []byte{},
-			EnclaveID:        [32]byte{uint8(i + 1)},
-			TrustedValues:    [][]byte{[]byte("invalid"), measurements},
-			EnclaveURL:       enclaveURL,
-		})
-		configURLs = append(configURLs, fmt.Sprintf("http://localhost:%s", configHttpPorts[i]))
-	}
-
-	return enclaves, configURLs, func() {
-		for _, fn := range cleanups {
-			fn()
-		}
-	}
+	return result.Enclaves, result.ConfigURLs, result.CleanupAll
 }
