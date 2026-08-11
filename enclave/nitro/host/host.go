@@ -98,6 +98,16 @@ func (br *batchRequest) signers() []string {
 	return slices.Sorted(maps.Keys(br.signersSeen))
 }
 
+// applicationRequestID returns the application request ID carried by the batch's
+// requests, or the empty string if the batch is still empty. All requests in a
+// batch share the same hash, so any of them yields the same value.
+func (br *batchRequest) applicationRequestID() string {
+	if len(br.requests) == 0 {
+		return ""
+	}
+	return br.requests[0].ApplicationRequestID
+}
+
 type batchResponse struct {
 	response *types.ExecuteResponse
 	err      error
@@ -466,6 +476,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	// below once the signature has been verified.
 	reqLog := h.logger.With(
 		"requestID", requestIDHex,
+		"applicationRequestID", execReq.ApplicationRequestID,
 		"requestHash", requestHashHex,
 		"remoteAddr", r.RemoteAddr,
 		"sigPrefix", sigFingerprint,
@@ -473,7 +484,6 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 
 	reqLog.Infow("request arrived",
 		"event", "RECV",
-		"applicationRequestID", execReq.ApplicationRequestID,
 		"ephemeralPK", ephemeralPKHex,
 		"bodyLen", len(body),
 		"arrivalTime", arrivalTime.Format(time.RFC3339Nano))
@@ -482,7 +492,6 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	// Log hash input components for debugging hash divergence
 	reqLog.Debugw("hash inputs",
 		"event", "HASH_INPUTS",
-		"applicationRequestID", execReq.ApplicationRequestID,
 		"publicDataLen", len(execReq.PublicData),
 		"ciphertextCount", len(execReq.Ciphertexts),
 		"ciphertextNamesCount", len(execReq.CiphertextNames),
@@ -725,6 +734,7 @@ func (h *hostServer) processBatch(reqs []types.SignedComputeRequest) (*types.Exe
 // notifyWaiters sends a response to all waiting channels for a batch.
 // Must be called while holding processRequestMutex.
 func (h *hostServer) notifyWaiters(br *batchRequest, resp *types.ExecuteResponse, err error) {
+	logger := h.logger.With("applicationRequestID", br.applicationRequestID())
 	notified := 0
 	dropped := 0
 	for _, ch := range br.responseCh {
@@ -733,10 +743,10 @@ func (h *hostServer) notifyWaiters(br *batchRequest, resp *types.ExecuteResponse
 			notified++
 		default:
 			dropped++
-			h.logger.Warnw("response channel full, dropping response", "event", "NOTIFY_DROP")
+			logger.Warnw("response channel full, dropping response", "event", "NOTIFY_DROP")
 		}
 	}
-	h.logger.Infow("waiters notified",
+	logger.Infow("waiters notified",
 		"event", "NOTIFY",
 		"signers", br.signers(),
 		"notified", notified,
@@ -760,6 +770,7 @@ func (h *hostServer) completeBatch(requestHash [32]byte, resp *types.ExecuteResp
 			"reason", "already_completed_or_timed_out")
 		return
 	}
+	logger = logger.With("applicationRequestID", br.applicationRequestID())
 
 	logger.Infow("completing batch",
 		"event", "COMPLETE_BATCH",
@@ -797,6 +808,7 @@ func (h *hostServer) failBatchIfNotProcessed(requestHash [32]byte, f uint32, isS
 			"processingRequest", exists && br.processingRequest)
 		return false
 	}
+	logger = logger.With("applicationRequestID", br.applicationRequestID())
 
 	threshold := quorumThreshold(f)
 	received := len(br.requests)
