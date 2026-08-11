@@ -651,7 +651,7 @@ jobs:
         # Real-enclave variants run on the self-hosted Nitro instance and need
         # nitro-cli; fake-enclave runs don't.
         if: ${{ matrix.real }}
-        uses: ./.github/actions/setup-nitro-enclave
+        uses: ./confidential-compute/.github/actions/setup-nitro-enclave
 
       - name: Fetch legacy enclave PCR measurements
         if: ${{ matrix.legacy-enclaves }}
