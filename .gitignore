@@ -42,3 +42,6 @@ enclave/apps/*/fake
 enclave/apps/*/nitro
 **/CLAUDE.md
 enclave/nitro/host/host
+
+# Compiled config-tracker binary (from `go build ./enclave/config-tracker`)
+enclave/config-tracker/config-tracker
