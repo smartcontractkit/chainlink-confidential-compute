@@ -4,12 +4,12 @@ go 1.26.4
 
 require (
 	github.com/andybalholm/brotli v1.1.1
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260804121723-720b3986a7ac
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260805141018-c1d260f42355
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
-	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260622152157-c8e129347b8b
+	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260804191526-b7a850ae7648
 	github.com/smartcontractkit/chainlink-protos/storage-service v0.3.0
 	github.com/smartcontractkit/chainlink-protos/workflows/go v0.0.0-20260528173149-f5b8336b19d9
-	github.com/smartcontractkit/cre-sdk-go v1.9.0-capdev.1.0.20260612142557-01f4db8d7d47
+	github.com/smartcontractkit/cre-sdk-go v1.17.0-capdev.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sys v0.45.0
 	google.golang.org/grpc v1.82.1
@@ -66,7 +66,7 @@ require (
 	github.com/prometheus/procfs v0.20.1 // indirect
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
-	github.com/smartcontractkit/chain-selectors v1.0.100 // indirect
+	github.com/smartcontractkit/chain-selectors v1.0.104 // indirect
 	github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260724142814-45996a1bcb72 // indirect
 	github.com/smartcontractkit/chainlink-protos/linking-service/go v0.0.0-20251002192024-d2ad9222409b // indirect
 	github.com/smartcontractkit/libocr v0.0.0-20250912173940-f3ab0246e23d // indirect
