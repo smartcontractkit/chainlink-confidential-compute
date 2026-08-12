@@ -614,8 +614,9 @@ jobs:
             echo "Bun already installed: $(bun --version)"
           fi
 
+      # Real-enclave legs get lsof from the setup-nitro-enclave action below.
       - name: Install lsof
-        if: ${{ !matrix.legacy-enclaves }}
+        if: ${{ !matrix.legacy-enclaves && !matrix.real }}
         run: |
           if ! command -v lsof &> /dev/null; then
             echo "lsof not found, installing..."
@@ -646,27 +647,11 @@ jobs:
         if: ${{ !matrix.legacy-enclaves }}
         run: echo "WASI_CLANG=/opt/wasi-sdk/bin/clang" >> $GITHUB_ENV
 
-      - name: Install Nitro CLI
+      - name: Setup Nitro Enclave Environment
         # Real-enclave variants run on the self-hosted Nitro instance and need
         # nitro-cli; fake-enclave runs don't.
         if: ${{ matrix.real }}
-        run: |
-          sudo dnf update -y
-          sudo dnf install -y aws-nitro-enclaves-cli
-          # Provision huge pages before allocator start (drop_caches + compact_memory
-          # works around fragmentation on long-uptime self-hosted runners).
-          echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
-          echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
-          sleep 1
-          sudo sysctl -w vm.nr_hugepages=1024
-          # Flush stale ENCLAVE iptables rules accumulated by past nitro-cli runs.
-          # nitro-enclaves-allocator appends one of each per enclave start and never
-          # removes them, slowing every packet through docker bridge over time.
-          while sudo iptables -t nat -D POSTROUTING -s 100.64.0.0/24 -o ens5 -j MASQUERADE -m comment --comment "ENCLAVE: NAT masquerade" 2>/dev/null; do :; done
-          while sudo iptables -D FORWARD -j ENCLAVE_FORWARD -m comment --comment "ENCLAVE: main chain" 2>/dev/null; do :; done
-          sudo systemctl start nitro-enclaves-allocator
-          sudo systemctl enable nitro-enclaves-allocator
-          echo "PATH=/usr/bin:/usr/local/bin:$PATH" >> $GITHUB_ENV
+        uses: ./confidential-compute/.github/actions/setup-nitro-enclave
 
       - name: Fetch legacy enclave PCR measurements
         if: ${{ matrix.legacy-enclaves }}

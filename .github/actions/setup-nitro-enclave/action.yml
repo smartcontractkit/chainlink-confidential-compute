@@ -1,0 +1,89 @@
+name: Setup Nitro Enclave Environment
+description: |
+  Prepares a self-hosted Nitro runner to build and launch AWS Nitro Enclaves.
+  Installs the Nitro CLI, configures the allocator with hugepages, installs
+  required dependencies (lsof, wireguard-tools, socat), and flushes stale
+  iptables rules from prior enclave runs.
+
+  This action is designed to be called from any repository that needs to
+  launch Nitro enclaves as part of its E2E testing.
+
+inputs:
+  total-cpu-count:
+    description: "Total vCPUs to allocate to the enclave allocator pool"
+    required: false
+    default: "4"
+  total-memory-mib:
+    description: "Total memory (MiB) to allocate to the enclave allocator pool"
+    required: false
+    default: "2048"
+  hugepages:
+    description: "Number of hugepages to provision (each is 2MiB)"
+    required: false
+    default: "1024"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nitro CLI
+      shell: bash
+      run: |
+        if command -v nitro-cli &> /dev/null; then
+          echo "nitro-cli already installed: $(nitro-cli --version 2>&1 || true)"
+        else
+          echo "Installing aws-nitro-enclaves-cli..."
+          sudo dnf update -y
+          sudo dnf install -y aws-nitro-enclaves-cli
+        fi
+        echo "PATH=/usr/bin:/usr/local/bin:$PATH" >> $GITHUB_ENV
+
+    - name: Provision hugepages and configure allocator
+      shell: bash
+      env:
+        TOTAL_CPU_COUNT: ${{ inputs.total-cpu-count }}
+        TOTAL_MEMORY_MIB: ${{ inputs.total-memory-mib }}
+        HUGEPAGES: ${{ inputs.hugepages }}
+      run: |
+        # Drop caches and compact memory to avoid hugepage fragmentation on
+        # long-uptime self-hosted runners.
+        echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+        echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
+        sleep 1
+        sudo sysctl -w vm.nr_hugepages="${HUGEPAGES}"
+
+        # Flush stale ENCLAVE iptables rules accumulated by past nitro-cli runs.
+        # nitro-enclaves-allocator appends one of each per enclave start and never
+        # removes them, slowing every packet through docker bridge over time.
+        while sudo iptables -t nat -D POSTROUTING -s 100.64.0.0/24 -o ens5 -j MASQUERADE -m comment --comment "ENCLAVE: NAT masquerade" 2>/dev/null; do :; done
+        while sudo iptables -D FORWARD -j ENCLAVE_FORWARD -m comment --comment "ENCLAVE: main chain" 2>/dev/null; do :; done
+
+        # Configure allocator pool size.
+        sudo sed -i \
+          -e "s/^cpu_count: .*/cpu_count: ${TOTAL_CPU_COUNT}/" \
+          -e "s/^memory_mib: .*/memory_mib: ${TOTAL_MEMORY_MIB}/" \
+          /etc/nitro_enclaves/allocator.yaml
+
+        echo "Starting nitro-enclaves-allocator..."
+        sudo systemctl start nitro-enclaves-allocator
+        sudo systemctl enable nitro-enclaves-allocator
+
+    - name: Install enclave runtime dependencies
+      shell: bash
+      run: |
+        # lsof: needed to detect/kill stale processes on ports
+        if ! command -v lsof &> /dev/null; then
+          echo "Installing lsof..."
+          sudo dnf install -y lsof
+        fi
+
+        # socat: needed to probe enclave vsock readiness
+        if ! command -v socat &> /dev/null; then
+          echo "Installing socat..."
+          sudo dnf install -y socat
+        fi
+
+        # wireguard-tools: needed for enclave outbound networking
+        if ! command -v wg &> /dev/null; then
+          echo "Installing wireguard-tools..."
+          sudo dnf install -y wireguard-tools
+        fi

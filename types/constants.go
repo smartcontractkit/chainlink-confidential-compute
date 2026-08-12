@@ -55,7 +55,7 @@ const (
 	DefaultGatewayRequestTimeout = DefaultEnclaveRequestTimeout
 
 	// DefaultWorkflowGracePeriod is how long a validated execution waits before
-	// it starts running. Overridable per-deployment via WorkflowSettings
+	// it starts running. Overridable per-deployment via the injected settings
 	// (workflowGracePeriod); a negative setting disables the wait.
 	DefaultWorkflowGracePeriod = 2 * time.Second
 
@@ -66,8 +66,8 @@ const (
 	GatewayFailoverDelay = 5 * time.Second
 
 	// Workflow-binary fetch & cache defaults. Each is overridable per-deployment
-	// at runtime via SettingsRequest (host injects them over vsock); these values
-	// apply only when the corresponding setting is left unset.
+	// at runtime via the injected settings (the host forwards them over vsock);
+	// these values apply only when the corresponding setting is left unset.
 	//
 	// DefaultMaxBinarySize bounds the workflow binary accepted from storage.
 	DefaultMaxBinarySize = 20 * 1024 * 1024 // 20 MB (matches chainlink-common default)

@@ -119,23 +119,27 @@ func WithMaxConcurrentExecutions(n int64) Option {
 	}
 }
 
-// InjectSettings receives the raw settings JSON injected by the host over vsock,
-// unmarshals the fields this app uses, and wires up whatever arrived: the
-// storage fetcher (once both the endpoint and the ed25519 key are known) and, on
-// the first gateway URL, the remote dispatcher (via the factory). Fetcher
-// tunables (max binary size, fetch timeout, cache size) and the timeouts
-// (global request, gateway client, workflow execution) are applied when present,
-// falling back to the built-in defaults. An injected StorageServiceURL overrides
-// the startup default. Safe to call again (e.g. key rotation).
+// InjectSettings receives the settings JSON injected by the host over vsock and
+// wires up what it carries: the storage fetcher (endpoint + ed25519 key) and, on
+// the first injection, the remote dispatcher (via the factory). The required
+// fields are asserted before anything is applied, so a deployment that forgot
+// one fails the injection instead of running half-configured; see
+// WorkflowSettings. Fetcher tunables (max binary size, fetch timeout, cache
+// size) and the timeouts (global request, gateway client, workflow execution)
+// fall back to the built-in defaults when omitted. Safe to call again (e.g. key
+// rotation), as long as the payload stays complete.
 func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
-	var req types.WorkflowSettings
+	var req WorkflowSettings
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return fmt.Errorf("parsing settings: %w", err)
+	}
+	if err := req.validate(); err != nil {
+		return err
 	}
 
 	a.fetcher.SetMaxCacheBytes(int(req.MaxCacheBytes))
 	if a.httpFetcher != nil {
-		a.httpFetcher.SetDefaultTimeout(req.RequestTimeout)
+		a.httpFetcher.SetDefaultTimeout(time.Duration(req.RequestTimeout))
 	}
 	if req.ExecutionTimeout > 0 {
 		a.executionTimeout.Store(int64(req.ExecutionTimeout))
@@ -144,45 +148,41 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 		a.gracePeriod.Store(int64(req.WorkflowGracePeriod))
 	}
 
+	// The injected endpoint replaces the startup default (which only the fake and
+	// test wirings set).
 	a.mu.Lock()
-	if req.StorageServiceURL != "" {
-		a.storageServiceURL = req.StorageServiceURL
-		a.storageServiceTLS = req.StorageServiceTLS
-	}
+	a.storageServiceURL = req.StorageServiceURL
+	a.storageServiceTLS = req.StorageServiceTLS
 	url, tls := a.storageServiceURL, a.storageServiceTLS
 	a.mu.Unlock()
 
-	if req.StorageKey != "" && url != "" {
-		fetcher, pub, err := NewStorageFetcher(url, tls, req.StorageKey, req.MaxBinarySize, req.BinaryFetchTimeout, a.logger)
-		if err != nil {
-			return fmt.Errorf("building storage fetcher: %w", err)
-		}
-		a.mu.Lock()
-		old := a.storageFetcher
-		a.storageFetcher = fetcher
-		a.mu.Unlock()
-		if old != nil {
-			if cerr := old.Close(); cerr != nil {
-				a.logger.Warnf("[app] closing previous storage fetcher: %v", cerr)
-			}
-		}
-		a.logger.Infof("[app] storage credentials set (pubkey=%x, storage=%s)", pub, url)
+	fetcher, pub, err := NewStorageFetcher(url, tls, req.StorageKey, req.MaxBinarySize, time.Duration(req.BinaryFetchTimeout), a.logger)
+	if err != nil {
+		return fmt.Errorf("building storage fetcher: %w", err)
 	}
+	a.mu.Lock()
+	old := a.storageFetcher
+	a.storageFetcher = fetcher
+	a.mu.Unlock()
+	if old != nil {
+		if cerr := old.Close(); cerr != nil {
+			a.logger.Warnf("[app] closing previous storage fetcher: %v", cerr)
+		}
+	}
+	a.logger.Infof("[app] storage credentials set (pubkey=%x, storage=%s)", pub, url)
 
-	if req.GatewayURL != "" {
-		a.mu.Lock()
-		if a.dispatcher == nil && a.dispatcherFactory != nil {
-			d := a.dispatcherFactory(req.GatewayURL, req.GatewayRequestTimeout)
-			if a.haveConfig {
-				// Config may have arrived before credentials; apply it now so the
-				// freshly built dispatcher has the vault's MasterPublicKey/T.
-				d.SetConfig(a.lastConfig)
-			}
-			a.dispatcher = d
-			a.logger.Infof("[app] remote dispatch enabled (gateway=%s)", req.GatewayURL)
+	a.mu.Lock()
+	if a.dispatcher == nil && a.dispatcherFactory != nil {
+		d := a.dispatcherFactory(req.GatewayURL, time.Duration(req.GatewayRequestTimeout))
+		if a.haveConfig {
+			// Config may have arrived before credentials; apply it now so the
+			// freshly built dispatcher has the vault's MasterPublicKey/T.
+			d.SetConfig(a.lastConfig)
 		}
-		a.mu.Unlock()
+		a.dispatcher = d
+		a.logger.Infof("[app] remote dispatch enabled (gateway=%s)", req.GatewayURL)
 	}
+	a.mu.Unlock()
 	return nil
 }
 

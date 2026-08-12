@@ -34,10 +34,10 @@ import (
 	capabilitiespb "github.com/smartcontractkit/chainlink-common/pkg/capabilities/pb"
 	jsonrpc "github.com/smartcontractkit/chainlink-common/pkg/jsonrpc2"
 	gateway_common "github.com/smartcontractkit/chainlink-common/pkg/types/gateway"
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
 	"github.com/smartcontractkit/chainlink-confidential-compute/tests"
 	creEnvironment "github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/environment"
 	creJob "github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/job"
+	"github.com/smartcontractkit/chainlink-confidential-compute/tests/testhelpers"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	capabilities_registry_wrapper_v2 "github.com/smartcontractkit/chainlink-evm/gethwrappers/workflow/generated/capabilities_registry_wrapper_v2"
@@ -74,6 +74,9 @@ const (
 	interRequestDelay = 5 * time.Second
 	// workflowTag is a constant used when registering/triggering the workflow.
 	workflowTag = "some-tag"
+	// enclaveRegion is the region recorded on enclave descriptors. Descriptor
+	// hashes cover it, so it must match what the enclave reports.
+	enclaveRegion = "us-west-2"
 )
 
 type App struct {
@@ -502,102 +505,53 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			if os.Getenv("REMOTE_ENCLAVE_URLS") != "" && os.Getenv("PCR_MEASUREMENTS_FILE") != "" {
 				mBytes, err := os.ReadFile(os.Getenv("PCR_MEASUREMENTS_FILE"))
 				require.NoError(t, err, "failed to read PCR measurements file")
-				var pcrMeasurements nitro.Measurements
-				err = json.Unmarshal(mBytes, &pcrMeasurements)
-				require.NoError(t, err, "failed to unmarshal PCR measurements")
-				testLogger.Info().Msgf("Using remote enclaves with PCR measurements: %+v", pcrMeasurements)
-				mBytes, err = json.Marshal(pcrMeasurements.Measurements)
-				require.NoError(t, err, "failed to re-marshal PCR measurements")
 
-				remoteEnclaveURLs := strings.Split(os.Getenv("REMOTE_ENCLAVE_URLS"), ",")
-				remoteConfigURLs := remoteEnclaveURLs
-				if os.Getenv("REMOTE_ENCLAVE_CONFIG_URLS") != "" {
-					remoteConfigURLs = strings.Split(os.Getenv("REMOTE_ENCLAVE_CONFIG_URLS"), ",")
-					require.Equal(t, len(remoteEnclaveURLs), len(remoteConfigURLs), "REMOTE_ENCLAVE_URLS and REMOTE_ENCLAVE_CONFIG_URLS must have the same number of entries")
-				}
-
-				for i, enclaveURL := range remoteEnclaveURLs {
-					enclaveURL = strings.TrimSpace(enclaveURL)
-					configURL := strings.TrimSpace(remoteConfigURLs[i])
-					testLogger.Info().Msgf("Adding remote enclave %d: %s (config: %s)", i, enclaveURL, configURL)
-					enclaves = append(enclaves, types.Enclave{
-						EnclaveType:      enclaveType,
-						EnclaveExtraData: []byte{},
-						EnclaveID:        [32]byte{uint8(i + 1)},
-						TrustedValues:    [][]byte{mBytes},
-						EnclaveURL:       enclaveURL,
-						Region:           "us-west-2",
-					})
-					configURLs = append(configURLs, configURL)
+				enclaves, configURLs, err = testhelpers.ParseRemoteEnclaves(testhelpers.RemoteEnclaveSetupConfig{
+					URLsCSV:             os.Getenv("REMOTE_ENCLAVE_URLS"),
+					ConfigURLsCSV:       os.Getenv("REMOTE_ENCLAVE_CONFIG_URLS"),
+					PCRMeasurementsJSON: mBytes,
+					EnclaveType:         enclaveType,
+					Region:              enclaveRegion,
+				})
+				require.NoError(t, err, "failed to parse remote enclaves")
+				for i, enclave := range enclaves {
+					testLogger.Info().Msgf("Added remote enclave %d: %s (config: %s)", i, enclave.EnclaveURL, configURLs[i])
 				}
 			} else {
 				testLogger.Info().Msgf("Starting local enclave for app: %s", app.Name)
 				rootDir, err := util.GetRepoRoot()
 				require.NoError(t, err)
 
+				cfg := testhelpers.DefaultLocalEnclaveSetupConfig(rootDir, app.Name)
+				cfg.EnclaveType = enclaveType
+				cfg.Region = enclaveRegion
 				// Check if we should use a prior version binary
 				if priorPath, usePrior := priorVersionPaths[app.Name]; usePrior {
-					// Copy prior version binary to expected location
 					testLogger.Info().Msgf("Using prior version binary from: %s", priorPath)
-					destPath := filepath.Join(rootDir, "tests", "e2e", "binaries", app.Name)
-					copyCmd := exec.Command("cp", priorPath, destPath)
-					if output, err := copyCmd.CombinedOutput(); err != nil {
-						require.NoError(t, err, "failed to copy prior version binary: %s", string(output))
-					}
-				}
-				baseCID := 16
-				httpPorts := []string{"8080", "8081"}
-				configHttpPorts := []string{"8082", "8083"}
-
-				// Clean up any stale processes on ports before starting.
-				testLogger.Info().Msgf("Cleaning up stale processes on ports...")
-				for i := range httpPorts {
-					tests.KillProcessOnPort(t, httpPorts[i])
-					tests.KillProcessOnPort(t, configHttpPorts[i])
+					cfg.BinaryPath = priorPath
 				}
 
-				for i := range httpPorts {
-					enclaveCID := strconv.Itoa(baseCID + i)
-					enclaveName := fmt.Sprintf("go-enclave-%s-%d", app.Name, i)
-					isFirstEnclave := i == 0
-
-					cleanup := tests.MustSetupEnclave(
-						t, rootDir, enclaveCID,
-						httpPorts[i], configHttpPorts[i],
-						app.Name, enclaveName, isFirstEnclave,
-					)
-					enclaveCleanups = append(enclaveCleanups, cleanup)
-
-					measurements, err := tests.EnsureEnclaveAndGetMeasurements(baseCID + i)
-					require.NoError(t, err, "Failed to get enclave measurements")
-
-					hostIP := getHostIP()
-					testLogger.Info().Msgf("Using host IP: %s for enclave communication", hostIP)
-					// Proxy our enclaves to ensure the correct API key is used.
-					enclaveURL := fmt.Sprintf("http://%s:%s", hostIP, httpPorts[i])
-					if i == 0 {
-						proxyURL, proxyCleanup := startProxy(t, enclaveURL, testLogger)
-						defer proxyCleanup()
-						testLogger.Info().Msgf("Started proxy for enclave 0 at %s forwarding to %s", proxyURL, enclaveURL)
-						enclaveURL = proxyURL
-					}
-
-					enclaves = append(enclaves, types.Enclave{
-						EnclaveType:      enclaveType,
-						EnclaveExtraData: []byte{},
-						EnclaveID:        [32]byte{uint8(i + 1)},
-						TrustedValues:    [][]byte{[]byte("invalid"), measurements}, // ensures we can handle multiple trusted values
-						EnclaveURL:       enclaveURL,
-						Region:           "us-west-2",
-					})
-					configURLs = append(configURLs, fmt.Sprintf("http://localhost:%s", configHttpPorts[i]))
-				}
+				result := testhelpers.SetupLocalEnclaves(t, cfg)
+				enclaveCleanups = result.Cleanups
 				// Defer cleanup of all enclaves that haven't been stopped yet
 				defer func() {
 					for _, cleanup := range enclaveCleanups {
 						cleanup()
 					}
 				}()
+				testLogger.Info().Msgf("Using host IP: %s for enclave communication", result.HostIP)
+
+				// Proxy the first enclave to ensure the correct API key is used.
+				if len(result.Enclaves) > 0 {
+					enclaveURL := result.Enclaves[0].EnclaveURL
+					proxyURL, proxyCleanup := startProxy(t, enclaveURL, testLogger)
+					defer proxyCleanup()
+					testLogger.Info().Msgf("Started proxy for enclave 0 at %s forwarding to %s", proxyURL, enclaveURL)
+					result.Enclaves[0].EnclaveURL = proxyURL
+				}
+
+				enclaves = result.Enclaves
+				configURLs = result.ConfigURLs
 			}
 			confhttpCap, err := creJob.New(app.Name, app.Version, app.Name, enclaves)
 			require.NoError(t, err, "failed to create confidential-http capability job")
@@ -1326,7 +1280,7 @@ func postEnclaveConfig(t *testing.T, configURL string, config types.EnclaveConfi
 		EnclaveURL:    configURL,
 		EnclaveType:   enclaveType,
 		TrustedValues: [][]byte{},
-		Region:        "us-west-2",
+		Region:        enclaveRegion,
 	}, types.ConfigRequest{Config: configBytes}, &client)
 	require.NoError(t, err)
 }
@@ -1479,23 +1433,10 @@ func isGatewayNotAllowlistedError(body []byte) bool {
 		strings.Contains(resp.Error.Message, "request not allowlisted")
 }
 
-// getHostIP returns the host's IP address accessible from Docker containers
+// getHostIP returns the host's IP address accessible from Docker containers.
+// Delegates to testhelpers.DetectHostIP.
 func getHostIP() string {
-	// First try to use host.docker.internal if available
-	if _, err := net.LookupHost("host.docker.internal"); err == nil {
-		return "host.docker.internal"
-	}
-
-	// Fallback: get the default route interface IP
-	conn, err := net.Dial("udp", "8.8.8.8:80")
-	if err != nil {
-		// Final fallback to localhost (for local testing)
-		return "localhost"
-	}
-	defer util.SafeClose(&http.Response{Body: conn})
-
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	return localAddr.IP.String()
+	return testhelpers.DetectHostIP()
 }
 
 func allowlistRequest(t *testing.T, owner string, request jsonrpc.Request[json.RawMessage], opts *bind.TransactOpts, wfRegistryContract *workflow_registry_v2_wrapper.WorkflowRegistry) {

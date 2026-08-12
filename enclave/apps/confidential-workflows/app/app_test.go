@@ -410,10 +410,9 @@ func TestExecute_ExecutionTimeout(t *testing.T) {
 	binary := compressed.Bytes()
 	hash := sha256.Sum256(binary)
 
-	app, locator := newStorageBackedApp(t, binary)
-	settings, err := json.Marshal(types.WorkflowSettings{ExecutionTimeout: time.Second})
-	require.NoError(t, err)
-	require.NoError(t, app.(*confidentialWorkflowsApp).InjectSettings(settings))
+	app, locator := newStorageBackedAppWithSettings(t, binary, func(s *WorkflowSettings) {
+		s.ExecutionTimeout = Duration(time.Second)
+	})
 
 	execution := makeExecution(t, "wf-spin", locator, hash[:])
 	data, err := proto.Marshal(execution)
@@ -440,10 +439,9 @@ func TestExecute_GracePeriod(t *testing.T) {
 
 	run := func(t *testing.T, grace time.Duration) time.Duration {
 		t.Helper()
-		app, locator := newStorageBackedApp(t, binary)
-		settings, err := json.Marshal(types.WorkflowSettings{WorkflowGracePeriod: grace})
-		require.NoError(t, err)
-		require.NoError(t, app.(*confidentialWorkflowsApp).InjectSettings(settings))
+		app, locator := newStorageBackedAppWithSettings(t, binary, func(s *WorkflowSettings) {
+			s.WorkflowGracePeriod = Duration(grace)
+		})
 
 		execution := makeExecution(t, "wf-grace", locator, hash[:])
 		data, err := proto.Marshal(execution)
@@ -478,7 +476,12 @@ func TestInjectSettings_Timeouts(t *testing.T) {
 		return a, &got
 	}
 
-	inject := func(t *testing.T, a *confidentialWorkflowsApp, s types.WorkflowSettings) {
+	// Storage is never dialed here (gRPC connects lazily), so a placeholder
+	// endpoint is enough to satisfy the required settings.
+	inject := func(t *testing.T, a *confidentialWorkflowsApp, mutate func(*WorkflowSettings)) {
+		t.Helper()
+		s := testSettings("127.0.0.1:1")
+		mutate(&s)
 		raw, err := json.Marshal(s)
 		require.NoError(t, err)
 		require.NoError(t, a.InjectSettings(raw))
@@ -486,11 +489,10 @@ func TestInjectSettings_Timeouts(t *testing.T) {
 
 	t.Run("forwarded to the dispatcher factory", func(t *testing.T) {
 		a, got := newApp()
-		inject(t, a, types.WorkflowSettings{
-			GatewayURL:            "https://gateway.example.com",
-			RequestTimeout:        80 * time.Second,
-			GatewayRequestTimeout: 75 * time.Second,
-			ExecutionTimeout:      80 * time.Second,
+		inject(t, a, func(s *WorkflowSettings) {
+			s.RequestTimeout = Duration(80 * time.Second)
+			s.GatewayRequestTimeout = Duration(75 * time.Second)
+			s.ExecutionTimeout = Duration(80 * time.Second)
 		})
 		assert.Equal(t, 75*time.Second, *got)
 		assert.Equal(t, int64(80*time.Second), a.executionTimeout.Load())
@@ -498,8 +500,62 @@ func TestInjectSettings_Timeouts(t *testing.T) {
 
 	t.Run("omitted leaves the fallback to the factory", func(t *testing.T) {
 		a, got := newApp()
-		inject(t, a, types.WorkflowSettings{GatewayURL: "https://gateway.example.com"})
+		inject(t, a, func(*WorkflowSettings) {})
 		assert.Zero(t, *got)
+	})
+}
+
+// A payload missing required settings is rejected whole, and nothing is applied:
+// the enclave stays unconfigured instead of running half-configured until an
+// execution trips over the gap.
+func TestInjectSettings_RequiredFields(t *testing.T) {
+	a := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil,
+		WithRemoteDispatcherFactory(func(string, time.Duration) RemoteDispatcher { return &testRemoteDispatcher{} }),
+	).(*confidentialWorkflowsApp)
+
+	err := a.InjectSettings([]byte(`{"requestTimeout":"80s"}`))
+	require.Error(t, err)
+	for _, field := range []string{"storageKey", "storageServiceUrl", "gatewayUrl"} {
+		assert.Contains(t, err.Error(), field)
+	}
+
+	a.mu.Lock()
+	fetcher, dispatcher := a.storageFetcher, a.dispatcher
+	a.mu.Unlock()
+	assert.Nil(t, fetcher)
+	assert.Nil(t, dispatcher)
+}
+
+// Durations arrive as the readable strings deployment config hand-writes; raw
+// nanoseconds still parse, and an unparsable duration fails the injection.
+func TestInjectSettings_DurationForms(t *testing.T) {
+	newApp := func() *confidentialWorkflowsApp {
+		return NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), nil).(*confidentialWorkflowsApp)
+	}
+	payload := func(execTimeout, gracePeriod string) []byte {
+		return []byte(fmt.Sprintf(
+			`{"storageKey":%q,"storageServiceUrl":"127.0.0.1:1","gatewayUrl":%q,"executionTimeout":%s,"workflowGracePeriod":%s}`,
+			testStorageKeyHex, testGatewayURL, execTimeout, gracePeriod))
+	}
+
+	t.Run("duration string", func(t *testing.T) {
+		a := newApp()
+		require.NoError(t, a.InjectSettings(payload(`"80s"`, `"-1ns"`)))
+		assert.Equal(t, int64(80*time.Second), a.executionTimeout.Load())
+		assert.Equal(t, int64(-1), a.gracePeriod.Load())
+	})
+
+	t.Run("nanoseconds", func(t *testing.T) {
+		a := newApp()
+		require.NoError(t, a.InjectSettings(payload(`80000000000`, `-1`)))
+		assert.Equal(t, int64(80*time.Second), a.executionTimeout.Load())
+		assert.Equal(t, int64(-1), a.gracePeriod.Load())
+	})
+
+	t.Run("unparsable", func(t *testing.T) {
+		err := newApp().InjectSettings(payload(`"80 seconds"`, `0`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "80 seconds")
 	})
 }
 

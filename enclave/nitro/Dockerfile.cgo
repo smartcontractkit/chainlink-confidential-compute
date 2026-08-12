@@ -49,13 +49,9 @@ ARG ENCLAVE_CID=16
 ENV HOST_CID=$HOST_CID
 ENV ENCLAVE_CID=$ENCLAVE_CID
 
-ARG GATEWAY_URL=""
-ENV GATEWAY_URL=$GATEWAY_URL
-
-ARG STORAGE_SERVICE_URL=""
-ENV STORAGE_SERVICE_URL=$STORAGE_SERVICE_URL
-ARG STORAGE_SERVICE_TLS=""
-ENV STORAGE_SERVICE_TLS=$STORAGE_SERVICE_TLS
+# The gateway and storage endpoints are not baked in here: the host injects them
+# over vsock at runtime (ENCLAVE_SETTINGS), so one measured EIF serves every
+# environment.
 
 # Enclave DNS resolver (empty falls back to the AWS VPC resolver 169.254.169.253
 # in setup-enclave-networking.sh)
