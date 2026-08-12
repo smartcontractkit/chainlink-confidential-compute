@@ -3,7 +3,7 @@ module github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/work
 go 1.25.5
 
 require (
-	github.com/smartcontractkit/cre-sdk-go v1.7.1-0.20260504162314-fbfac1c36bec
+	github.com/smartcontractkit/cre-sdk-go v1.17.0-capdev.1
 	github.com/smartcontractkit/cre-sdk-go/capabilities/networking/confidentialhttp v0.0.0-20260330200534-964c8354b78b
 	github.com/smartcontractkit/cre-sdk-go/capabilities/networking/http v1.3.0
 	google.golang.org/protobuf v1.36.11
@@ -18,7 +18,7 @@ require (
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
-	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260504161322-7061fbfd5189 // indirect
+	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260804191526-b7a850ae7648 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
