@@ -223,14 +223,18 @@ func (f *testConfidentialRelayFeature) PostEnvStartup(
 
 const engineTestBinaryFilename = "workflow-test-confidential.br.b64"
 const engineTestConfigFilename = "workflow-test-config.json"
+const engineTestBinaryPath = "/artifacts/" + engineTestBinaryFilename
+const engineTestConfigPath = "/artifacts/" + engineTestConfigFilename
+const engineTestArtifactPath = "/artifact/" + engineTestBinaryFilename
 
 // cwEngineTestServers holds the engine-test WASM binary server state.
 var cwEngineTestServers struct {
-	once        sync.Once
-	wasmURL     string // URL using host IP (accessible from Docker and host)
-	binaryHash  []byte
-	artifactDir string // directory containing the binary and config files
-	err         error
+	once         sync.Once
+	wasmURL      string // URL using host IP (accessible from Docker and host)
+	binaryHash   []byte
+	artifactDir  string // directory containing the binary and config files
+	artifactHits atomic.Int64
+	err          error
 }
 
 // initCWEngineTestServers compiles the engine-test WASM binary, brotli-compresses
@@ -303,10 +307,14 @@ func initCWEngineTestServers(configJSON string) (wasmURL string, configURL strin
 		// RegisterWithContract can download them and constructArtifactURL can
 		// derive container filenames.
 		mux := http.NewServeMux()
-		mux.HandleFunc("/"+engineTestBinaryFilename, func(rw http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc(engineTestBinaryPath, func(rw http.ResponseWriter, r *http.Request) {
 			_, _ = rw.Write([]byte(encoded))
 		})
-		mux.HandleFunc("/"+engineTestConfigFilename, func(rw http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc(engineTestArtifactPath, func(rw http.ResponseWriter, r *http.Request) {
+			cwEngineTestServers.artifactHits.Add(1)
+			_, _ = rw.Write([]byte(encoded))
+		})
+		mux.HandleFunc(engineTestConfigPath, func(rw http.ResponseWriter, r *http.Request) {
 			_, _ = rw.Write([]byte(configJSON))
 		})
 		wasmListener, err := net.Listen("tcp", "0.0.0.0:0")
@@ -319,7 +327,7 @@ func initCWEngineTestServers(configJSON string) (wasmURL string, configURL strin
 
 		hostIP := getHostIP()
 		port := wasmListener.Addr().(*net.TCPAddr).Port
-		cwEngineTestServers.wasmURL = fmt.Sprintf("http://%s:%d/%s", hostIP, port, engineTestBinaryFilename)
+		cwEngineTestServers.wasmURL = fmt.Sprintf("http://%s:%d%s", hostIP, port, engineTestBinaryPath)
 	})
 
 	baseURL := cwEngineTestServers.wasmURL
@@ -365,6 +373,12 @@ func (f *fakeStorageService) setURL(u string) {
 	f.mu.Lock()
 	f.url = u
 	f.mu.Unlock()
+}
+
+func (f *fakeStorageService) lastArtifactID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastID
 }
 
 func (f *fakeStorageService) DownloadArtifact(_ context.Context, req *storage_service.DownloadArtifactRequest) (*storage_service.DownloadArtifactResponse, error) {
@@ -557,7 +571,7 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// Point the fake storage service at the (base64) WASM the enclave will fetch.
 	wasmParsed, perr := url.Parse(wasmURL)
 	require.NoError(t, perr, "parsing engine-test WASM URL")
-	storageSvc.setURL(fmt.Sprintf("http://%s:%s%s", enclaveHostAddr(), wasmParsed.Port(), wasmParsed.Path))
+	storageSvc.setURL(fmt.Sprintf("http://%s:%s%s", enclaveHostAddr(), wasmParsed.Port(), engineTestArtifactPath))
 
 	// Copy the binary and config to workflow DON containers so the syncer's
 	// file-based fetcher can read them.
@@ -613,6 +627,9 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	//    engine-level log.
 	waitForWorkflowExecutionComplete(t, testEnv, testLogger, workflowID, 5*time.Minute)
 
+	require.Equal(t, engineTestBinaryFilename, storageSvc.lastArtifactID(), "unexpected artifact requested from storage")
+	require.Positive(t, cwEngineTestServers.artifactHits.Load(), "enclave never downloaded the artifact URL returned by storage")
+
 	// The GetSecret path routes through the enclave's gateway client, configured
 	// with a dead gateway first (:9998) and the real one second (:9999). The
 	// workflow only finishes if every gateway call failed over from the dead
@@ -620,6 +637,7 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// test genuinely exercises round-robin failover rather than passing vacuously
 	// (e.g. if the cursor logic changed to skip the first URL).
 	require.Positive(t, deadGwProxy.Hits(), "dead gateway proxy was never hit; round-robin failover was not exercised")
+	require.Positive(t, gwProxy.Hits(), "healthy gateway proxy was never reached after failover")
 
 	// 7b. The engine log above only proves the WASM returned without error. Read the
 	// consumer contract back to prove the report was actually signed by the DON
