@@ -87,8 +87,9 @@ func (t *controlledRoundTripper) callCount() int {
 }
 
 type recordedExecution struct {
-	metadata executionMetadata
-	outcome  string
+	metadata      executionMetadata
+	outcome       string
+	failureReason string
 }
 
 type recordingExecutionMetrics struct {
@@ -106,14 +107,18 @@ func newRecordingExecutionMetrics() *recordingExecutionMetrics {
 	}
 }
 
-func (r *recordingExecutionMetrics) startExecution(metadata executionMetadata) func(string) {
+func (r *recordingExecutionMetrics) startExecution(metadata executionMetadata, _ time.Duration) func(string, string) {
 	r.mu.Lock()
 	r.started = append(r.started, metadata)
 	r.mu.Unlock()
 	r.startedSignal <- struct{}{}
-	return func(outcome string) {
+	return func(outcome, failureReason string) {
 		r.mu.Lock()
-		r.completed = append(r.completed, recordedExecution{metadata: metadata, outcome: outcome})
+		r.completed = append(r.completed, recordedExecution{
+			metadata:      metadata,
+			outcome:       outcome,
+			failureReason: failureReason,
+		})
 		r.mu.Unlock()
 		r.completedSignal <- struct{}{}
 	}
@@ -457,10 +462,24 @@ func TestHandleExecuteRecordsEnclaveError(t *testing.T) {
 	started, completed := recordedMetrics.snapshot()
 	require.Len(t, started, 1)
 	require.Equal(t, []recordedExecution{{
-		metadata: started[0],
-		outcome:  executionOutcomeError,
+		metadata:      started[0],
+		outcome:       executionOutcomeError,
+		failureReason: executionFailureTransport,
 	}}, completed)
 	assert.Equal(t, 1, transport.callCount())
+}
+
+func TestExecutionFailureReasonForStatus(t *testing.T) {
+	tests := map[int]string{
+		http.StatusBadRequest:         executionFailureInvalid,
+		http.StatusConflict:           executionFailureConflict,
+		http.StatusTooManyRequests:    executionFailureCapacity,
+		http.StatusGatewayTimeout:     executionFailureTimeout,
+		http.StatusServiceUnavailable: executionFailureInternal,
+	}
+	for status, expected := range tests {
+		assert.Equal(t, expected, executionFailureReasonForStatus(status))
+	}
 }
 
 func TestHandleGetPublicKeys(t *testing.T) {

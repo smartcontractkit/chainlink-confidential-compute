@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -638,20 +639,21 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		h.processRequestMutex.Unlock()
 
 		if shouldProcess {
+			quorumWait := time.Since(br.createdAt)
+			finishExecution := h.metrics.startExecution(metadata, quorumWait)
 			reqLog.Infow("quorum reached, dispatching to enclave",
 				"event", "QUORUM",
 				"signers", signers,
 				"signatureCount", len(requests))
 			go func() {
-				finishExecution := h.metrics.startExecution(metadata)
 				enclaveStart := time.Now()
-				resp, err := h.processBatch(requests)
+				resp, failureReason, err := h.processBatch(requests)
 				enclaveDuration := time.Since(enclaveStart)
 				outcome := executionOutcomeSuccess
 				if err != nil {
 					outcome = executionOutcomeError
 				}
-				finishExecution(outcome)
+				finishExecution(outcome, failureReason)
 
 				if err != nil {
 					reqLog.Errorw("enclave execution failed",
@@ -701,34 +703,40 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 }
 
 // processBatch sends a batch of requests to the host's enclave for execution.
-func (h *hostServer) processBatch(reqs []types.SignedComputeRequest) (*types.ExecuteResponse, error) {
+func (h *hostServer) processBatch(reqs []types.SignedComputeRequest) (*types.ExecuteResponse, string, error) {
 	body, err := json.Marshal(reqs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal batch of requests: %w", err)
+		return nil, executionFailureInternal, fmt.Errorf("failed to marshal batch of requests: %w", err)
 	}
 	httpReq, err := http.NewRequest(http.MethodPost, vsockPrefix+"/requests", bytes.NewBuffer(body))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, executionFailureInternal, fmt.Errorf("failed to create request: %w", err)
 	}
 	resp, err := h.enclaveClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to communicate with enclave: %w", err)
+		failureReason := executionFailureTransport
+		var netErr net.Error
+		if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &netErr) && netErr.Timeout() {
+			failureReason = executionFailureTimeout
+		}
+		return nil, failureReason, fmt.Errorf("failed to communicate with enclave: %w", err)
 	}
 	defer util.SafeClose(resp)
 	if resp.StatusCode != http.StatusOK {
+		failureReason := executionFailureReasonForStatus(resp.StatusCode)
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, fmt.Errorf("enclave returned error: %s (no message provided)", resp.Status)
+			return nil, failureReason, fmt.Errorf("enclave returned error: %s (no message provided)", resp.Status)
 		}
-		return nil, fmt.Errorf("enclave returned error: %s - %s", resp.Status, string(body))
+		return nil, failureReason, fmt.Errorf("enclave returned error: %s - %s", resp.Status, string(body))
 	}
 
 	var execResp types.ExecuteResponse
 	if err := json.NewDecoder(resp.Body).Decode(&execResp); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+		return nil, executionFailureProtocol, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return &execResp, nil
+	return &execResp, "", nil
 }
 
 // notifyWaiters sends a response to all waiting channels for a batch.

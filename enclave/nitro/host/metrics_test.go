@@ -24,22 +24,32 @@ import (
 )
 
 const (
-	executionDurationMetric  = "confidential_compute.enclave.execution.duration"
-	endpointDurationMetric   = "confidential_compute.enclave.host.endpoint.duration"
-	executionsInflightMetric = "confidential_compute.enclave.executions.inflight"
-	workflowActiveMetric     = "confidential_compute.enclave.workflow.active"
-	goRuntimeMemoryMetric    = "confidential_compute.enclave.memory.go_runtime"
-	processRSSMemoryMetric   = "confidential_compute.enclave.memory.rss"
+	executionDurationMetric     = "confidential_compute.enclave.execution.duration"
+	endpointDurationMetric      = "confidential_compute.enclave.host.endpoint.duration"
+	quorumWaitDurationMetric    = "confidential_compute.enclave.execution.quorum_wait.duration"
+	totalDurationMetric         = "confidential_compute.enclave.execution.total.duration"
+	executionsStartedMetric     = "confidential_compute.enclave.executions.started"
+	executionsRejectedMetric    = "confidential_compute.enclave.executions.rejected"
+	executionsInflightMetric    = "confidential_compute.enclave.executions.inflight"
+	executionsInflightMaxMetric = "confidential_compute.enclave.executions.inflight.max"
+	workflowActiveMetric        = "confidential_compute.enclave.workflow.active"
+	workflowsActiveMaxMetric    = "confidential_compute.enclave.workflows.active.max"
+	goRuntimeMemoryMetric       = "confidential_compute.enclave.memory.go_runtime"
+	processRSSMemoryMetric      = "confidential_compute.enclave.memory.rss"
 )
 
 func newTestHostMetrics(t *testing.T) (*hostMetrics, *sdkmetric.ManualReader) {
+	return newTestHostMetricsWithClock(t, time.Now)
+}
+
+func newTestHostMetricsWithClock(t *testing.T, now func() time.Time) (*hostMetrics, *sdkmetric.ManualReader) {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() {
 		require.NoError(t, provider.Shutdown(context.Background()))
 	})
-	metrics, err := newHostMetrics(provider.Meter(hostInstrumentationScope))
+	metrics, err := newHostMetricsWithClock(provider.Meter(hostInstrumentationScope), now)
 	require.NoError(t, err)
 	return metrics, reader
 }
@@ -152,6 +162,98 @@ func TestHostMetricsEndpointLatency(t *testing.T) {
 	assert.Equal(t, uint64(1), histogramCount(t, histogram, map[string]string{"endpoint": "unmatched"}))
 }
 
+func int64SumValue(t *testing.T, data metricdata.ResourceMetrics, name string, attrs map[string]string) int64 {
+	t.Helper()
+	sum, ok := requireMetric(t, data, name).Data.(metricdata.Sum[int64])
+	require.True(t, ok, "metric %s was not an int64 sum", name)
+	for _, point := range sum.DataPoints {
+		if dataPointHasAttributes(point.Attributes, attrs) {
+			return point.Value
+		}
+	}
+	t.Fatalf("metric %s had no data point with attributes %v", name, attrs)
+	return 0
+}
+
+func histogramPoint(t *testing.T, data metricdata.ResourceMetrics, name string, attrs map[string]string) metricdata.HistogramDataPoint[float64] {
+	t.Helper()
+	histogram, ok := requireMetric(t, data, name).Data.(metricdata.Histogram[float64])
+	require.True(t, ok, "metric %s was not a float64 histogram", name)
+	for _, point := range histogram.DataPoints {
+		if dataPointHasAttributes(point.Attributes, attrs) {
+			return point
+		}
+	}
+	t.Fatalf("metric %s had no data point with attributes %v", name, attrs)
+	return metricdata.HistogramDataPoint[float64]{}
+}
+
+type testClock struct {
+	now time.Time
+}
+
+func (c *testClock) Now() time.Time {
+	return c.now
+}
+
+func (c *testClock) Advance(d time.Duration) {
+	c.now = c.now.Add(d)
+}
+
+func TestHostMetricsExecutionLoadAndLatencyPhases(t *testing.T) {
+	clock := &testClock{now: time.Unix(1_000, 0)}
+	metrics, reader := newTestHostMetricsWithClock(t, clock.Now)
+	metadata := func(workflowID string) executionMetadata {
+		return executionMetadata{
+			appID:       "confidential-workflows",
+			workflowID:  workflowID,
+			requestKind: "trigger",
+		}
+	}
+
+	finishA := metrics.startExecution(metadata("workflow-a"), 2*time.Second)
+	clock.Advance(time.Second)
+	finishB := metrics.startExecution(metadata("workflow-b"), 3*time.Second)
+	clock.Advance(2 * time.Second)
+	finishA(executionOutcomeSuccess, "")
+	clock.Advance(time.Second)
+	finishB(executionOutcomeError, executionFailureCapacity)
+
+	data := collectHostMetrics(t, reader)
+	baseAttrs := map[string]string{
+		"app.id":       "confidential-workflows",
+		"request.kind": "trigger",
+	}
+	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMetric, nil))
+	assert.Equal(t, int64(2), gaugeValue(t, data, executionsInflightMaxMetric, nil))
+	assert.Equal(t, int64(2), gaugeValue(t, data, workflowsActiveMaxMetric, nil))
+	assert.Equal(t, int64(2), int64SumValue(t, data, executionsStartedMetric, baseAttrs))
+	assert.Equal(t, int64(1), int64SumValue(t, data, executionsRejectedMetric, baseAttrs))
+
+	quorumPoint := histogramPoint(t, data, quorumWaitDurationMetric, baseAttrs)
+	assert.Equal(t, uint64(2), quorumPoint.Count)
+	assert.Equal(t, 5.0, quorumPoint.Sum)
+	successAttrs := map[string]string{
+		"app.id":       "confidential-workflows",
+		"outcome":      executionOutcomeSuccess,
+		"request.kind": "trigger",
+	}
+	assert.Equal(t, 3.0, histogramPoint(t, data, executionDurationMetric, successAttrs).Sum)
+	assert.Equal(t, 5.0, histogramPoint(t, data, totalDurationMetric, successAttrs).Sum)
+	errorAttrs := map[string]string{
+		"app.id":         "confidential-workflows",
+		"failure.reason": executionFailureCapacity,
+		"outcome":        executionOutcomeError,
+		"request.kind":   "trigger",
+	}
+	assert.Equal(t, 3.0, histogramPoint(t, data, executionDurationMetric, errorAttrs).Sum)
+	assert.Equal(t, 6.0, histogramPoint(t, data, totalDurationMetric, errorAttrs).Sum)
+
+	data = collectHostMetrics(t, reader)
+	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMaxMetric, nil))
+	assert.Equal(t, int64(0), gaugeValue(t, data, workflowsActiveMaxMetric, nil))
+}
+
 func TestHostMetricsExecutionLifecycle(t *testing.T) {
 	metrics, reader := newTestHostMetrics(t)
 	metadata := executionMetadata{
@@ -160,12 +262,12 @@ func TestHostMetricsExecutionLifecycle(t *testing.T) {
 		requestKind: "trigger",
 	}
 
-	finish := metrics.startExecution(metadata)
+	finish := metrics.startExecution(metadata, 0)
 	data := collectHostMetrics(t, reader)
 	assert.Equal(t, int64(1), gaugeValue(t, data, executionsInflightMetric, nil))
 	assert.Equal(t, int64(1), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"}))
 
-	finish(executionOutcomeSuccess)
+	finish(executionOutcomeSuccess, "")
 	data = collectHostMetrics(t, reader)
 	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMetric, nil))
 	assertNoGaugePoint(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"})
@@ -182,16 +284,17 @@ func TestHostMetricsExecutionError(t *testing.T) {
 		appID:       "confidential-workflows",
 		workflowID:  "workflow-a",
 		requestKind: "subscribe",
-	})
+	}, 0)
 
-	finish(executionOutcomeError)
+	finish(executionOutcomeError, executionFailureUnknown)
 	data := collectHostMetrics(t, reader)
 	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMetric, nil))
 	assertNoGaugePoint(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"})
 	assert.Equal(t, uint64(1), histogramCount(t, durationHistogram(t, data), map[string]string{
-		"app.id":       "confidential-workflows",
-		"outcome":      executionOutcomeError,
-		"request.kind": "subscribe",
+		"app.id":         "confidential-workflows",
+		"failure.reason": executionFailureUnknown,
+		"outcome":        executionOutcomeError,
+		"request.kind":   "subscribe",
 	}))
 }
 
@@ -199,18 +302,18 @@ func TestHostMetricsConcurrentSameWorkflow(t *testing.T) {
 	metrics, reader := newTestHostMetrics(t)
 	metadata := executionMetadata{appID: "confidential-workflows", workflowID: "workflow-a", requestKind: "trigger"}
 
-	finishFirst := metrics.startExecution(metadata)
-	finishSecond := metrics.startExecution(metadata)
+	finishFirst := metrics.startExecution(metadata, 0)
+	finishSecond := metrics.startExecution(metadata, 0)
 	data := collectHostMetrics(t, reader)
 	assert.Equal(t, int64(2), gaugeValue(t, data, executionsInflightMetric, nil))
 	assert.Equal(t, int64(1), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"}))
 
-	finishFirst(executionOutcomeSuccess)
+	finishFirst(executionOutcomeSuccess, "")
 	data = collectHostMetrics(t, reader)
 	assert.Equal(t, int64(1), gaugeValue(t, data, executionsInflightMetric, nil))
 	assert.Equal(t, int64(1), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"}))
 
-	finishSecond(executionOutcomeSuccess)
+	finishSecond(executionOutcomeSuccess, "")
 	data = collectHostMetrics(t, reader)
 	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMetric, nil))
 	assertNoGaugePoint(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"})
@@ -223,21 +326,21 @@ func TestHostMetricsConcurrentSameWorkflow(t *testing.T) {
 
 func TestHostMetricsConcurrentDifferentWorkflows(t *testing.T) {
 	metrics, reader := newTestHostMetrics(t)
-	finishFirst := metrics.startExecution(executionMetadata{appID: "confidential-workflows", workflowID: "workflow-a"})
-	finishSecond := metrics.startExecution(executionMetadata{appID: "confidential-workflows", workflowID: "workflow-b"})
+	finishFirst := metrics.startExecution(executionMetadata{appID: "confidential-workflows", workflowID: "workflow-a"}, 0)
+	finishSecond := metrics.startExecution(executionMetadata{appID: "confidential-workflows", workflowID: "workflow-b"}, 0)
 
 	data := collectHostMetrics(t, reader)
 	assert.Equal(t, int64(2), gaugeValue(t, data, executionsInflightMetric, nil))
 	assert.Equal(t, int64(1), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"}))
 	assert.Equal(t, int64(1), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-b"}))
 
-	finishFirst(executionOutcomeSuccess)
+	finishFirst(executionOutcomeSuccess, "")
 	data = collectHostMetrics(t, reader)
 	assert.Equal(t, int64(1), gaugeValue(t, data, executionsInflightMetric, nil))
 	assertNoGaugePoint(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-a"})
 	assert.Equal(t, int64(1), gaugeValue(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-b"}))
 
-	finishSecond(executionOutcomeSuccess)
+	finishSecond(executionOutcomeSuccess, "")
 	data = collectHostMetrics(t, reader)
 	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMetric, nil))
 	assertNoGaugePoint(t, data, workflowActiveMetric, map[string]string{"workflow.id": "workflow-b"})
@@ -245,8 +348,8 @@ func TestHostMetricsConcurrentDifferentWorkflows(t *testing.T) {
 
 func TestHostMetricsUnknownWorkflow(t *testing.T) {
 	metrics, reader := newTestHostMetrics(t)
-	finish := metrics.startExecution(executionMetadata{appID: "confidential-http"})
-	finish(executionOutcomeSuccess)
+	finish := metrics.startExecution(executionMetadata{appID: "confidential-http"}, 0)
+	finish(executionOutcomeSuccess, "")
 
 	data := collectHostMetrics(t, reader)
 	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMetric, nil))
@@ -260,10 +363,10 @@ func TestHostMetricsUnknownWorkflow(t *testing.T) {
 
 func TestHostMetricsFinishIsIdempotent(t *testing.T) {
 	metrics, reader := newTestHostMetrics(t)
-	finish := metrics.startExecution(executionMetadata{appID: "confidential-workflows", workflowID: "workflow-a"})
+	finish := metrics.startExecution(executionMetadata{appID: "confidential-workflows", workflowID: "workflow-a"}, 0)
 
-	finish(executionOutcomeSuccess)
-	finish(executionOutcomeError)
+	finish(executionOutcomeSuccess, "")
+	finish(executionOutcomeError, executionFailureUnknown)
 
 	data := collectHostMetrics(t, reader)
 	assert.Equal(t, int64(0), gaugeValue(t, data, executionsInflightMetric, nil))
@@ -276,8 +379,8 @@ func TestHostMetricsFinishIsIdempotent(t *testing.T) {
 
 func TestHostMetricsHistogramBoundaries(t *testing.T) {
 	metrics, reader := newTestHostMetrics(t)
-	finish := metrics.startExecution(executionMetadata{appID: "confidential-workflows"})
-	finish(executionOutcomeSuccess)
+	finish := metrics.startExecution(executionMetadata{appID: "confidential-workflows"}, 0)
+	finish(executionOutcomeSuccess, "")
 
 	histogram := durationHistogram(t, collectHostMetrics(t, reader))
 	require.Len(t, histogram.DataPoints, 1)
@@ -299,8 +402,8 @@ func TestHostMetricsConcurrentUpdates(t *testing.T) {
 			finish := metrics.startExecution(executionMetadata{
 				appID:      "confidential-workflows",
 				workflowID: "workflow-a",
-			})
-			finish(executionOutcomeSuccess)
+			}, 0)
+			finish(executionOutcomeSuccess, "")
 		}()
 	}
 	wg.Wait()
@@ -323,8 +426,8 @@ func TestHostMetricsDoesNotRetainCompletedWorkflows(t *testing.T) {
 		finish := metrics.startExecution(executionMetadata{
 			appID:      "confidential-workflows",
 			workflowID: fmt.Sprintf("workflow-%d", i),
-		})
-		finish(executionOutcomeSuccess)
+		}, 0)
+		finish(executionOutcomeSuccess, "")
 	}
 
 	data := collectHostMetrics(t, reader)
