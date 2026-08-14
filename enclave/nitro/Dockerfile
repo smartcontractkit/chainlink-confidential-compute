@@ -47,7 +47,7 @@ RUN echo '#!/bin/sh' > /start.sh && \
     echo 'ip addr replace 127.0.0.1/8 dev lo' >> /start.sh && \
     echo 'ip link set dev lo up' >> /start.sh && \
     echo 'chronyd' >> /start.sh && \
-    echo 'chronyc waitsync' >> /start.sh && \
+    echo 'chronyc waitsync 60 || { echo "chrony failed to synchronize after 60 attempts" >&2; exit 1; }' >> /start.sh && \
     echo 'ARGS=""' >> /start.sh && \
     echo 'if [ -n "$KEYPAIR_ROTATION" ]; then ARGS="$ARGS --keypair-rotation=$KEYPAIR_ROTATION"; fi' >> /start.sh && \
     echo 'if [ -n "$KEYPAIR_EXPIRATION" ]; then ARGS="$ARGS --keypair-expiration=$KEYPAIR_EXPIRATION"; fi' >> /start.sh && \

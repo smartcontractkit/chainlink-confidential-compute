@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -342,11 +343,11 @@ func (h *hostServer) handleInjectSettings(w http.ResponseWriter, r *http.Request
 // the enclave app owns the schema. Retries while the enclave is still booting.
 func (h *hostServer) injectSettings(ctx context.Context, payload []byte) error {
 	const (
-		maxAttempts = 60
-		retryDelay  = 2 * time.Second
+		initialRetryDelay = 2 * time.Second
+		maxRetryDelay     = 30 * time.Second
 	)
-	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	retryDelay := initialRetryDelay
+	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -358,7 +359,6 @@ func (h *hostServer) injectSettings(ctx context.Context, payload []byte) error {
 
 		resp, err := h.enclaveClient.Do(req)
 		if err != nil {
-			lastErr = err
 		} else {
 			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
@@ -366,17 +366,17 @@ func (h *hostServer) injectSettings(ctx context.Context, payload []byte) error {
 				slog.Info("injected storage credentials into enclave")
 				return nil
 			}
-			lastErr = fmt.Errorf("enclave rejected credentials: status %d: %s", resp.StatusCode, string(body))
+			err = fmt.Errorf("enclave rejected credentials: status %d: %s", resp.StatusCode, string(body))
 		}
 
-		slog.Warn("credentials injection not yet accepted, retrying", "attempt", attempt, "error", lastErr)
+		slog.Warn("credentials injection not yet accepted, retrying", "attempt", attempt, "retryIn", retryDelay, "error", err)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(retryDelay):
 		}
+		retryDelay = min(retryDelay*2, maxRetryDelay)
 	}
-	return fmt.Errorf("failed to inject credentials after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // proxyConfig forwards a /config request to the enclave over vsock using the given
@@ -1024,7 +1024,7 @@ func main() {
 			slog.Error("enclave settings are not a JSON object, skipping injection", "error", err)
 		} else {
 			go func() {
-				if err := host.injectSettings(ctx, payload); err != nil {
+				if err := host.injectSettings(ctx, payload); err != nil && !errors.Is(err, context.Canceled) {
 					slog.Error("failed to inject settings into enclave", "error", err)
 				}
 			}()
