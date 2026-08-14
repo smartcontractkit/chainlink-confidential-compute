@@ -114,6 +114,12 @@ func fetchEchoStatus(cfg *config, trt cre.TeeRuntime, client *http.Client) (int3
 	if err != nil {
 		return 0, err
 	}
+	if resp.StatusCode != 200 {
+		return 0, fmt.Errorf("echo returned status %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(resp.Body), "hello from engine-test") {
+		return 0, fmt.Errorf("echo response did not contain request body")
+	}
 	return int32(resp.StatusCode), nil
 }
 
