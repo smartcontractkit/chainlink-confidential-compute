@@ -865,6 +865,25 @@ func (h *hostServer) handleQuorumTimeout(requestHash [32]byte, f uint32, doneCh 
 	h.failBatchIfNotProcessed(requestHash, f, isShutdown)
 }
 
+func instrumentEndpointLatency(metrics *hostMetrics, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startedAt := time.Now()
+		defer func() {
+			metrics.recordEndpointDuration(r.Context(), hostEndpoint(r.URL.Path), time.Since(startedAt))
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func hostEndpoint(path string) string {
+	switch path {
+	case types.PublicKeyPath, types.ExecutePath, types.MemoryPath, types.SetConfigPath, types.SettingsPath:
+		return path
+	default:
+		return "unmatched"
+	}
+}
+
 func main() {
 	flag.Parse()
 
@@ -932,7 +951,7 @@ func main() {
 		configMux.HandleFunc("POST "+types.SettingsPath, host.handleInjectSettings)
 		configServer = &http.Server{
 			Addr:              fmt.Sprintf("127.0.0.1:%d", *configHttpPort),
-			Handler:           configMux,
+			Handler:           instrumentEndpointLatency(metrics, configMux),
 			ReadHeaderTimeout: *readHeaderTimeout,
 			ReadTimeout:       *readTimeout,
 			WriteTimeout:      *writeTimeout,
@@ -957,7 +976,7 @@ func main() {
 
 	mainServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", *httpPort),
-		Handler:           mainMux,
+		Handler:           instrumentEndpointLatency(metrics, mainMux),
 		ReadHeaderTimeout: *readHeaderTimeout,
 		ReadTimeout:       *readTimeout,
 		WriteTimeout:      *writeTimeout,
