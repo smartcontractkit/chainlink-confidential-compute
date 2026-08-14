@@ -717,7 +717,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				rotate("node restoration", originalNodes, originalNodes)
 			})
 
-			t.Run("DNS NXDOMAIN returns 400", func(t *testing.T) {
+			t.Run("DNS NXDOMAIN returns 502", func(t *testing.T) {
 				// Reset recipient to isolate this sub-test's results
 				recipient.mu.Lock()
 				recipient.requests = nil

@@ -191,8 +191,8 @@ func validateSSRFBlockedResponse(logger zerolog.Logger, bodies [][]byte) error {
 	return nil
 }
 
-// validateDNSFailureResponse checks that the recipient received a 400 response
-// with a DNS resolution failure message from the enclave.
+// validateDNSFailureResponse checks that the recipient received a 502 response
+// with a host-unreachable message from the enclave.
 func validateDNSFailureResponse(logger zerolog.Logger, bodies [][]byte) error {
 	if len(bodies) == 0 {
 		return fmt.Errorf("expected at least 1 recipient request for DNS failure, got 0")
@@ -202,11 +202,11 @@ func validateDNSFailureResponse(logger zerolog.Logger, bodies [][]byte) error {
 		if err := json.Unmarshal(body, &output); err != nil {
 			return fmt.Errorf("response %d: failed to unmarshal: %w", i, err)
 		}
-		if output.StatusCode != 400 {
-			return fmt.Errorf("response %d: expected statusCode 400, got %d (body: %s)", i, output.StatusCode, output.Body)
+		if output.StatusCode != 502 {
+			return fmt.Errorf("response %d: expected statusCode 502, got %d (body: %s)", i, output.StatusCode, output.Body)
 		}
-		if !strings.Contains(output.Body, "upstream DNS resolution failed") {
-			return fmt.Errorf("response %d: expected body to contain 'upstream DNS resolution failed', got: %s", i, output.Body)
+		if !strings.Contains(output.Body, "upstream host unreachable") {
+			return fmt.Errorf("response %d: expected body to contain 'upstream host unreachable', got: %s", i, output.Body)
 		}
 		logger.Info().Msgf("DNS failure response %d: statusCode=%d, body=%s", i, output.StatusCode, output.Body)
 	}

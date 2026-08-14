@@ -91,6 +91,9 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 // x/net/proxy exposes SOCKS reply codes only in error strings.
 func mapSOCKSError(err error) error {
 	switch {
+	case strings.HasSuffix(err.Error(), "unknown error host unreachable"):
+		// SOCKS5 uses the same reply for NXDOMAIN and an unreachable resolved host.
+		return syscall.EHOSTUNREACH
 	case strings.HasSuffix(err.Error(), "unknown error connection refused"):
 		return syscall.ECONNREFUSED
 	case strings.HasSuffix(err.Error(), "unknown error connection not allowed by ruleset"):

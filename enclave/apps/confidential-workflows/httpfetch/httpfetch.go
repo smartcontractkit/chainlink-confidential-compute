@@ -124,7 +124,7 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request) (*httpcap.Resp
 
 	resp, err := f.client.Do(httpReq)
 	if err != nil {
-		// Timeout (504), DNS NXDOMAIN (400), and SSRF-policy blocks (400) are
+		// Timeout (504), host-unreachable (502), and SSRF-policy blocks (400) are
 		// caller-facing conditions returned as HTTP status responses rather than
 		// capability failures, matching the standalone confidential-http path.
 		if he := util.ClassifyOutboundHTTPError(err); he != nil {

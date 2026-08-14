@@ -3,7 +3,6 @@ package util
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -22,7 +21,7 @@ type OutboundHTTPError struct {
 // synthetic response for the conditions the outbound HTTP capabilities treat as
 // caller-facing rather than enclave failures:
 //   - timeout (deadline or net timeout)     -> 504 Gateway Timeout
-//   - DNS NXDOMAIN                           -> 400 Bad Request
+//   - DNS NXDOMAIN / host unreachable        -> 502 Bad Gateway
 //   - SSRF policy block                      -> 400 Bad Request
 //   - connection refused                     -> 502 Bad Gateway
 //   - connection reset / closed (EOF)        -> 502 Bad Gateway
@@ -40,8 +39,8 @@ func ClassifyOutboundHTTPError(err error) *OutboundHTTPError {
 		return &OutboundHTTPError{StatusCode: http.StatusGatewayTimeout, Body: "upstream request timed out"}
 	}
 	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
-		return &OutboundHTTPError{StatusCode: http.StatusBadRequest, Body: fmt.Sprintf("upstream DNS resolution failed for %s: %v", dnsErr.Name, err)}
+	if (errors.As(err, &dnsErr) && dnsErr.IsNotFound) || errors.Is(err, syscall.EHOSTUNREACH) {
+		return &OutboundHTTPError{StatusCode: http.StatusBadGateway, Body: "upstream host unreachable"}
 	}
 	if IsRequestBlockedError(err) {
 		return &OutboundHTTPError{StatusCode: http.StatusBadRequest, Body: "upstream request blocked by enclave network policy"}
