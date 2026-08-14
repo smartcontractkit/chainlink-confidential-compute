@@ -718,6 +718,10 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			})
 
 			t.Run("DNS NXDOMAIN returns 502", func(t *testing.T) {
+				if useLegacyEnclaves {
+					t.Skip("skipping: legacy/remote enclaves return 400 for DNS failures")
+				}
+
 				// Reset recipient to isolate this sub-test's results
 				recipient.mu.Lock()
 				recipient.requests = nil
