@@ -80,7 +80,7 @@ func newStorageBackedAppWithSettings(t *testing.T, rawBinary []byte, mutate func
 	t.Helper()
 
 	addr := startFakeStorage(t, rawBinary)
-	allOpts := append([]Option{WithStorageService(addr, false), WithInsecureArtifactHTTPForTests()}, opts...)
+	allOpts := append([]Option{WithStorageService(addr, false), withInsecureArtifactHTTP()}, opts...)
 	a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), allOpts...)
 	settings := testSettings(addr)
 	if mutate != nil {

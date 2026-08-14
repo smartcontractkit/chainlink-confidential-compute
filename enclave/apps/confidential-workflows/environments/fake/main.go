@@ -1,19 +1,24 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"flag"
 	"log"
+	"net/http"
 	"time"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/app"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/fake/runner"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
 	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 )
 
@@ -73,17 +78,55 @@ func main() {
 		if timeout <= 0 {
 			timeout = *gatewayTimeout
 		}
-		client := gateway.NewGatewayClient(gatewayURL, att, gateway.WithTimeout(timeout))
+		dialer, err := proxyclient.NewConfiguredEndpointDialer(types.ProxyParentCID, types.ProxyPort, gatewayURL)
+		if err != nil {
+			return nil, err
+		}
+		client := gateway.NewGatewayClient(gatewayURL, att, gateway.WithHTTPClient(&http.Client{
+			Timeout:   timeout,
+			Transport: tunnelTransport(dialer, true),
+		}))
 		verifier := signatureverifier.NewEd25519SignatureVerifier()
 		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier), nil
 	}
 
-	appOptions := []app.Option{app.WithRemoteDispatcherFactory(dispatcherFactory)}
-	if *allowReconfig {
-		appOptions = append(appOptions, app.WithInsecureArtifactHTTPForTests())
+	storageFactory := func(storageURL string, useTLS bool, privateKey string, maxBytes int64, timeout time.Duration, lggr cllogger.Logger) (app.RawFetcher, ed25519.PublicKey, error) {
+		operatorDialer, err := proxyclient.NewConfiguredEndpointDialer(types.ProxyParentCID, types.ProxyPort, storageURL)
+		if err != nil {
+			return nil, nil, err
+		}
+		artifactDialer := proxyclient.NewPreSignedURLDialer(types.ProxyParentCID, types.ProxyPort)
+		var artifactClient types.HTTPClient = util.NewRestrictedHTTPClientWithDialer(artifactDialer.DialContext)
+		if *allowReconfig {
+			artifactDialer = proxyclient.NewInsecureFixtureDialerForTests(types.ProxyParentCID, types.ProxyPort)
+			artifactClient = &http.Client{Transport: tunnelTransport(artifactDialer, false)}
+		}
+		return app.NewStorageFetcher(
+			storageURL, useTLS, privateKey, maxBytes, timeout, lggr, artifactClient,
+			app.WithStorageDialer(operatorDialer.DialContext),
+		)
 	}
+
+	confApp, err := app.NewConfidentialWorkflowsApp(
+		sdkpb.TeeType_TEE_TYPE_AWS_NITRO,
+		appLogger,
+		app.Config{
+			RemoteDispatcherFactory: dispatcherFactory,
+			StorageFetcherFactory:   storageFactory,
+			HTTPFetcher: httpfetch.NewFetcherWithClient(
+				httpfetch.DefaultPolicy(),
+				util.NewRestrictedHTTPClientWithDialer(
+					proxyclient.NewWorkflowControlledDialer(types.ProxyParentCID, types.ProxyPort).DialContext,
+				),
+			),
+		},
+	)
+	if err != nil {
+		logger.Fatalf("Failed to construct confidential workflows app: %v", err)
+	}
+
 	err = runner.StartFakeEnclave(
-		app.NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, appLogger, appOptions...),
+		confApp,
 		att,
 		kc,
 		comb,
@@ -94,5 +137,13 @@ func main() {
 	)
 	if err != nil {
 		logger.Fatalf("Failed to start fake enclave: %v", err)
+	}
+}
+
+func tunnelTransport(dialer *proxyclient.Dialer, disableKeepAlives bool) *http.Transport {
+	return &http.Transport{
+		DialContext:       dialer.DialContext,
+		DisableKeepAlives: disableKeepAlives,
+		ForceAttemptHTTP2: true,
 	}
 }

@@ -614,9 +614,17 @@ func TestInsecureArtifactHTTPComesOnlyFromTheEntrypoint(t *testing.T) {
 
 	_, err = download()
 	require.Error(t, err, "the default test client must require HTTPS artifacts")
-	got, err := download(WithInsecureArtifactHTTPForTests())
+	got, err := download(withInsecureArtifactHTTP())
 	require.NoError(t, err)
 	require.Equal(t, []byte("wasm"), got)
+}
+
+func withInsecureArtifactHTTP() Option {
+	return func(a *confidentialWorkflowsApp) {
+		a.storageFactory = storageFetcherFactory(func() types.HTTPClient {
+			return util.NewUnrestrictedClient()
+		})
+	}
 }
 
 // testRemoteDispatcher is a stub that returns pre-configured secrets and

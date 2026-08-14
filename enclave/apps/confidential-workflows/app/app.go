@@ -138,14 +138,6 @@ func WithStorageFetcherFactory(factory StorageFetcherFactory) Option {
 	}
 }
 
-func WithInsecureArtifactHTTPForTests() Option {
-	return func(a *confidentialWorkflowsApp) {
-		a.storageFactory = storageFetcherFactory(func() types.HTTPClient {
-			return util.NewUnrestrictedClient()
-		})
-	}
-}
-
 // WithMaxConcurrentExecutions bounds concurrent Execute calls to n; n <= 0 means
 // unbounded. The nitro entrypoint derives n from enclave memory so a burst of
 // executions can't exhaust the fixed enclave memory and wedge the VM. fake/local
