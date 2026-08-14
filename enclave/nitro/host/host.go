@@ -941,7 +941,7 @@ func main() {
 		closeCancel()
 		log.Fatalf("failed to initialize host metrics: %v", err)
 	}
-	outboundBroker, err := proxyserver.New(*outboundAllowLocalForTests)
+	outboundBroker, err := proxyserver.New(*outboundAllowLocalForTests, lggr)
 	if err != nil {
 		log.Fatalf("failed to construct outbound proxy: %v", err)
 	}

@@ -8,12 +8,14 @@ import (
 	"testing"
 	"time"
 
+	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
 	ccvsock "github.com/smartcontractkit/chainlink-confidential-compute/enclave/vsock"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/stretchr/testify/require"
 	"github.com/things-go/go-socks5"
 	"github.com/things-go/go-socks5/statute"
+	"go.uber.org/zap/zapcore"
 )
 
 func TestSOCKSProxyResolvesAndRelays(t *testing.T) {
@@ -21,7 +23,7 @@ func TestSOCKSProxyResolvesAndRelays(t *testing.T) {
 	upstream := startEchoServer(t)
 	_, port, err := net.SplitHostPort(upstream)
 	require.NoError(t, err)
-	startOutboundProxyTestServer(t, 5191, true)
+	startOutboundProxyTestServer(t, 5191, true, cllogger.Nop())
 
 	dialer := proxyclient.NewInsecureFixtureDialerForTests(types.ProxyParentCID, 5191)
 	conn, err := dialer.DialContext(context.Background(), "tcp", net.JoinHostPort("localhost", port))
@@ -39,12 +41,28 @@ func TestSOCKSProxyResolvesAndRelays(t *testing.T) {
 
 func TestSOCKSProxyPublicProfileRejectsBlockedAddress(t *testing.T) {
 	t.Setenv(types.EnvVSOCKBackend, types.VSOCKBackendTCP)
-	startOutboundProxyTestServer(t, 5192, true)
+	startOutboundProxyTestServer(t, 5192, true, cllogger.Nop())
 
 	_, err := proxyclient.NewWorkflowControlledDialer(types.ProxyParentCID, 5192).
 		DialContext(context.Background(), "tcp", "127.0.0.1:443")
 	require.Error(t, err)
 	require.True(t, proxyclient.IsPolicyError(err), "%v", err)
+}
+
+func TestSOCKSProxyLogsFailedRequest(t *testing.T) {
+	t.Setenv(types.EnvVSOCKBackend, types.VSOCKBackendTCP)
+	logger, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
+	startOutboundProxyTestServer(t, 5193, true, logger)
+
+	_, err := proxyclient.NewWorkflowControlledDialer(types.ProxyParentCID, 5193).
+		DialContext(context.Background(), "tcp", "127.0.0.1:443")
+	require.Error(t, err)
+
+	require.Eventually(t, func() bool { return logs.Len() == 1 }, time.Second, time.Millisecond)
+	entry := logs.All()[0]
+	require.Equal(t, "outbound proxy request failed", entry.Message)
+	require.Equal(t, "OUTBOUND_PROXY_REQUEST_ERR", entry.ContextMap()["event"])
+	require.Contains(t, entry.ContextMap()["error"], "blocked by rules")
 }
 
 func TestRuleSetConfiguredProfile(t *testing.T) {
@@ -71,9 +89,9 @@ func allows(rules ruleSet, profile types.ProxyProfile, address string) bool {
 	return allowed
 }
 
-func startOutboundProxyTestServer(t *testing.T, port uint32, allowLocalDestinationsForTests bool) {
+func startOutboundProxyTestServer(t *testing.T, port uint32, allowLocalDestinationsForTests bool, logger warningLogger) {
 	t.Helper()
-	server, err := New(allowLocalDestinationsForTests)
+	server, err := New(allowLocalDestinationsForTests, logger)
 	require.NoError(t, err)
 	listener, err := ccvsock.ListenAt(types.ProxyParentCID, port, nil)
 	require.NoError(t, err)

@@ -16,12 +16,28 @@ import (
 
 const outboundDialTimeout = 10 * time.Second
 
+type warningLogger interface {
+	Warnw(msg string, keysAndValues ...any)
+}
+
+type socksLogger struct {
+	logger warningLogger
+}
+
+func (l socksLogger) Errorf(format string, args ...interface{}) {
+	l.logger.Warnw(
+		"outbound proxy request failed",
+		"event", "OUTBOUND_PROXY_REQUEST_ERR",
+		"error", fmt.Errorf(format, args...),
+	)
+}
+
 type ruleSet struct {
 	localAddresses                 map[netip.Addr]struct{}
 	allowLocalDestinationsForTests bool
 }
 
-func New(allowLocalDestinationsForTests bool) (*socks5.Server, error) {
+func New(allowLocalDestinationsForTests bool, logger warningLogger) (*socks5.Server, error) {
 	localAddresses, err := localInterfaceAddresses()
 	if err != nil {
 		return nil, err
@@ -39,6 +55,7 @@ func New(allowLocalDestinationsForTests bool) (*socks5.Server, error) {
 		}),
 		socks5.WithRule(rules),
 		socks5.WithDial(dialer.DialContext),
+		socks5.WithLogger(socksLogger{logger: logger}),
 	), nil
 }
 
