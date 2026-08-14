@@ -43,6 +43,7 @@ type enclaveMemorySnapshot struct {
 
 type hostMetrics struct {
 	executionDuration  metric.Float64Histogram
+	endpointDuration   metric.Float64Histogram
 	executionsInflight metric.Int64Gauge
 	workflowActive     metric.Int64ObservableGauge
 	goRuntimeMemory    metric.Int64ObservableGauge
@@ -67,6 +68,18 @@ func newHostMetrics(meter metric.Meter) (*hostMetrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create enclave execution duration histogram: %w", err)
 	}
+	endpointDuration, err := meter.Float64Histogram(
+		"confidential_compute.enclave.host.endpoint.duration",
+		metric.WithDescription("End-to-end wall-clock duration of an enclave host HTTP request"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(
+			0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1,
+			2.5, 5, 10, 30, 60, 120, 300, 600,
+		),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave host endpoint duration histogram: %w", err)
+	}
 	inflight, err := meter.Int64Gauge(
 		"confidential_compute.enclave.executions.inflight",
 		metric.WithDescription("Actual enclave executions currently in flight in this host"),
@@ -77,6 +90,7 @@ func newHostMetrics(meter metric.Meter) (*hostMetrics, error) {
 	}
 	metrics := &hostMetrics{
 		executionDuration:  duration,
+		endpointDuration:   endpointDuration,
 		executionsInflight: inflight,
 		workflowRefs:       make(map[string]int64),
 	}
@@ -114,6 +128,14 @@ func newHostMetrics(meter metric.Meter) (*hostMetrics, error) {
 	metrics.processRSSMemory = processRSSMemory
 	metrics.executionsInflight.Record(context.Background(), 0)
 	return metrics, nil
+}
+
+func (m *hostMetrics) recordEndpointDuration(ctx context.Context, endpoint string, duration time.Duration) {
+	m.endpointDuration.Record(
+		ctx,
+		duration.Seconds(),
+		metric.WithAttributes(attribute.String("endpoint", endpoint)),
+	)
 }
 
 func (m *hostMetrics) observeActiveWorkflows(ctx context.Context, observer metric.Int64Observer) error {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +25,7 @@ import (
 
 const (
 	executionDurationMetric  = "confidential_compute.enclave.execution.duration"
+	endpointDurationMetric   = "confidential_compute.enclave.host.endpoint.duration"
 	executionsInflightMetric = "confidential_compute.enclave.executions.inflight"
 	workflowActiveMetric     = "confidential_compute.enclave.workflow.active"
 	goRuntimeMemoryMetric    = "confidential_compute.enclave.memory.go_runtime"
@@ -122,6 +124,32 @@ func histogramCount(t *testing.T, histogram metricdata.Histogram[float64], attrs
 	}
 	t.Fatalf("duration histogram had no data point with attributes %v", attrs)
 	return 0
+}
+
+func TestHostMetricsEndpointLatency(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+	handler := instrumentEndpointLatency(metrics, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case types.PublicKeyPath:
+			_, _ = w.Write([]byte("ok"))
+		case types.ExecutePath:
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	for _, path := range []string{types.PublicKeyPath, types.ExecutePath, "/client-supplied-path"} {
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	}
+
+	metricData := requireMetric(t, collectHostMetrics(t, reader), endpointDurationMetric)
+	histogram, ok := metricData.Data.(metricdata.Histogram[float64])
+	require.True(t, ok)
+	assert.Equal(t, "s", metricData.Unit)
+	assert.Equal(t, uint64(1), histogramCount(t, histogram, map[string]string{"endpoint": types.PublicKeyPath}))
+	assert.Equal(t, uint64(1), histogramCount(t, histogram, map[string]string{"endpoint": types.ExecutePath}))
+	assert.Equal(t, uint64(1), histogramCount(t, histogram, map[string]string{"endpoint": "unmatched"}))
 }
 
 func TestHostMetricsExecutionLifecycle(t *testing.T) {
