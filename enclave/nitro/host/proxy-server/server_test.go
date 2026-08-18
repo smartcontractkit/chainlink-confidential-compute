@@ -70,6 +70,8 @@ func TestRuleSetConfiguredProfile(t *testing.T) {
 	require.True(t, allows(rules, types.ProxyProfileConfigured, "10.0.0.8"))
 	require.False(t, allows(rules, types.ProxyProfileConfigured, "169.254.169.254"))
 	require.False(t, allows(rules, types.ProxyProfileConfigured, "10.0.0.7"))
+	require.False(t, allows(rules, types.ProxyProfileConfigured, "0.0.0.1"))
+	require.False(t, allows(rules, types.ProxyProfileConfigured, "240.0.0.1"))
 }
 
 func TestRuleSetLocalFixtureFlag(t *testing.T) {

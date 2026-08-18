@@ -16,6 +16,13 @@ import (
 
 const outboundDialTimeout = 10 * time.Second
 
+// alwaysBlockedIPv4Prefixes are special-purpose ranges denied for every profile.
+// This includes configured endpoints and test fixtures.
+var alwaysBlockedIPv4Prefixes = [...]netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
 type warningLogger interface {
 	Warnw(msg string, keysAndValues ...any)
 }
@@ -94,7 +101,12 @@ func (r ruleSet) destinationDenied(address netip.Addr) bool {
 			return true
 		}
 	}
-	return netip.MustParsePrefix("0.0.0.0/8").Contains(address) || netip.MustParsePrefix("240.0.0.0/4").Contains(address)
+	for _, prefix := range alwaysBlockedIPv4Prefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
 }
 
 func localInterfaceAddresses() (map[netip.Addr]struct{}, error) {
