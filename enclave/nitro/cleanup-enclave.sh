@@ -30,12 +30,6 @@ cleanup() {
         echo "No running enclaves found."
     fi
     
-    # Stop wireguard-go-vsock if running
-    if pgrep -f wireguard-go-vsock >/dev/null 2>&1; then
-        echo "Stopping wireguard-go-vsock..."
-        sudo pkill -f wireguard-go-vsock || true
-    fi
-    
     echo "Cleanup complete."
 }
 

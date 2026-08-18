@@ -5,14 +5,14 @@ package testhelpers
 
 import (
 	"bufio"
-	"bytes"
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +30,9 @@ import (
 // for all apps), which on a cold runner cache can run well past 15 minutes
 // after a chainlink-common dep bump pulls in many transitive packages.
 const enclaveReadyTimeout = 60 * time.Minute
+
+// Must exceed the host's 25-second shutdown timeout.
+const hostServerExitBudget = 35 * time.Second
 
 // ---------------------------------------------------------------------------
 // High-level setup API
@@ -350,11 +353,53 @@ func UseFakeEnclave() bool {
 	return false
 }
 
-// KillProcessOnPort kills any process listening on the specified port.
+// Match the CID so sibling enclave processes are not mistaken for leaks.
+func hostServerPIDs(t *testing.T, rootDir, app, enclaveCID string) ([]string, bool) {
+	pattern := regexp.QuoteMeta(filepath.Join(rootDir, "enclave", "apps", app, "host-server")) +
+		`.*--enclave-cid=` + regexp.QuoteMeta(enclaveCID) + `([[:space:]]|$)`
+	out, err := exec.Command("pgrep", "-f", pattern).Output()
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+	case errors.As(err, &exitErr) && exitErr.ExitCode() == 1:
+		return nil, true
+	default:
+		t.Errorf("cannot verify the host server exited: pgrep %q: %v", pattern, err)
+		return nil, false
+	}
+	return strings.Fields(string(out)), true
+}
+
+// A leaked host server retains parent-wide VSOCK port 5001 after HTTP shutdown.
+func requireHostServerStopped(t *testing.T, rootDir, app, enclaveCID string) {
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		t.Logf("pgrep unavailable; cannot verify the host server exited")
+		return
+	}
+	deadline := time.Now().Add(hostServerExitBudget)
+	for {
+		pids, ok := hostServerPIDs(t, rootDir, app, enclaveCID)
+		if !ok || len(pids) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("a host server for CID %s survived cleanup after %s; it still holds VSOCK 5001 and would stop the next suite's broker starting (pids %s)",
+				enclaveCID, hostServerExitBudget, strings.Join(pids, " "))
+			for _, pid := range pids {
+				_ = exec.Command("kill", "-9", pid).Run()
+			}
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// KillProcessOnPort kills any process listening on the specified port. The
+// LISTEN filter avoids killing clients whose remote endpoint uses that port.
 func KillProcessOnPort(t *testing.T, port string) {
 	t.Helper()
 
-	cmd := exec.Command("lsof", "-ti:"+port)
+	cmd := exec.Command("lsof", "-ti:"+port, "-sTCP:LISTEN")
 	output, err := cmd.Output()
 	if err != nil {
 		// No process found on this port, which is fine
@@ -417,11 +462,12 @@ func MustSetupEnclaveWithEnv(t *testing.T, rootDir string, enclaveCID string, ht
 		t.Fatalf("%s script not found at: %s", scriptName, buildAndRunPath)
 	}
 
-	// Delete stale EIF to force a fresh build. Cached EIFs from previous
-	// runs may contain old app binaries, causing hard-to-debug failures.
-	staleEIF := filepath.Join(rootDir, "enclave", "apps", app, "go-enclave-outbound-cid"+enclaveCID+".eif")
-	if err := os.Remove(staleEIF); err == nil {
-		t.Logf("Removed stale EIF: %s", staleEIF)
+	// Rebuild once, then reuse the shared EIF for subsequent enclaves.
+	staleEIF := filepath.Join(rootDir, "enclave", "apps", app, "go-enclave-outbound.eif")
+	if isFirstEnclave {
+		if err := os.Remove(staleEIF); err == nil {
+			t.Logf("Removed stale EIF: %s", staleEIF)
+		}
 	}
 
 	// Kill any existing processes on the target ports before starting
@@ -469,17 +515,17 @@ func MustSetupEnclaveWithEnv(t *testing.T, rootDir string, enclaveCID string, ht
 		// Give the bash script and host-server time to clean up
 		// The script should handle killing the host-server when it exits
 		time.Sleep(1 * time.Second)
+
+		// Verify broker shutdown after the HTTP listener closes.
+		requireHostServerStopped(t, rootDir, app, enclaveCID)
+		KillProcessOnPort(t, httpPort)
+		KillProcessOnPort(t, configHttpPort)
 	}
 
 	t.Logf("Starting enclave '%s' with CID %s on ports %s/%s...", enclaveName, enclaveCID, httpPort, configHttpPort)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var enclaveOutput bytes.Buffer
-	outputMutex := &sync.Mutex{}
-	enclaveDone := make(chan struct{})
-	enclaveReady := make(chan struct{})
-	defer close(enclaveDone)
-	enclaveCmd = exec.CommandContext(ctx, buildAndRunPath)
+	startupResult := make(chan error, 1)
+	// The returned cleanup, not this function's context, owns the script.
+	enclaveCmd = exec.Command(buildAndRunPath) //nolint:gosec // fixed in-repo script path
 	enclaveCmd.Dir = rootDir
 
 	// Build environment variables
@@ -511,24 +557,31 @@ func MustSetupEnclaveWithEnv(t *testing.T, rootDir string, enclaveCID string, ht
 	err = enclaveCmd.Start()
 	require.NoError(t, err, "Failed to start enclave process")
 
+	// Register before readiness checks because Fatal calls Goexit.
+	var cleanupOnce sync.Once
+	runCleanup := func() { cleanupOnce.Do(cleanup) }
+	t.Cleanup(runCleanup)
+
 	// Monitor enclave stdout for readiness.
 	go func() {
 		scanner := bufio.NewScanner(enclaveOut)
+		ready := false
 		for scanner.Scan() {
 			line := scanner.Text()
-			outputMutex.Lock()
-			enclaveOutput.WriteString(line + "\n")
-			outputMutex.Unlock()
 
-			if strings.Contains(line, "API endpoints available at") {
-				select {
-				case <-enclaveReady:
-				default:
-					close(enclaveReady)
-				}
+			if !ready && strings.Contains(line, "API endpoints available at") {
+				ready = true
+				startupResult <- nil
 			}
 
 			t.Logf("[Enclave setup]: %s", line)
+		}
+		if !ready {
+			if err := scanner.Err(); err != nil {
+				startupResult <- fmt.Errorf("reading enclave startup output: %w", err)
+				return
+			}
+			startupResult <- errors.New("enclave startup exited before readiness")
 		}
 	}()
 
@@ -537,23 +590,23 @@ func MustSetupEnclaveWithEnv(t *testing.T, rootDir string, enclaveCID string, ht
 		scanner := bufio.NewScanner(enclaveErr)
 		for scanner.Scan() {
 			line := scanner.Text()
-			outputMutex.Lock()
-			enclaveOutput.WriteString("enclave error: " + line + "\n")
-			outputMutex.Unlock()
 			t.Logf("[Enclave setup stderr]: %s", line)
 		}
 	}()
 
 	t.Log("Waiting for enclave to be ready...")
 	select {
-	case <-enclaveReady:
+	case err := <-startupResult:
+		if err != nil {
+			t.Fatal(err)
+		}
 		t.Log("Enclave is ready!")
 	case <-time.After(enclaveReadyTimeout):
 		t.Fatal("Timeout waiting for enclave to start")
 	}
 	time.Sleep(10 * time.Second)
 
-	return cleanup
+	return runCleanup
 }
 
 // enclaveDescribeEntry represents the JSON output of `nitro-cli describe-enclaves`.

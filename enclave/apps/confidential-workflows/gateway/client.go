@@ -43,6 +43,12 @@ func WithTimeout(d time.Duration) Option {
 	}
 }
 
+func WithHTTPClient(client *http.Client) Option {
+	return func(c *GatewayClient) {
+		c.httpClient = client
+	}
+}
+
 // NewGatewayClient builds a client over one or more gateway endpoints.
 // gatewayURLs is a comma-separated list; SendRequest round-robins across the
 // entries and fails over to the next on a transport/proxy error. A single URL

@@ -25,8 +25,8 @@ import (
 	"unicode/utf8"
 
 	enclavetypes "github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/types"
-	httpsmocks "github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/outbound-https/mocks"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
+	httpsmocks "github.com/smartcontractkit/chainlink-confidential-compute/enclave/testutil"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"github.com/stretchr/testify/assert"

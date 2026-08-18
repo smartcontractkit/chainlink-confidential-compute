@@ -54,8 +54,8 @@ import (
 
 // deferredGatewayProxy is a reverse proxy on a fixed port that returns 502
 // until SetTarget is called with the real gateway URL. This solves the
-// chicken-and-egg problem: the enclave's EIF must bake in the gateway URL at
-// build time, but the real URL is only known after the CRE env starts.
+// chicken-and-egg problem: GATEWAY_URL must be fixed before the enclave starts,
+// but the real URL is only known after the CRE env comes up.
 type deferredGatewayProxy struct {
 	mu     sync.RWMutex
 	target *url.URL
@@ -128,13 +128,9 @@ func (p *deferredGatewayProxy) Close() {
 // authenticate to the fake storage service (the fake does not verify the JWT).
 const engineTestStorageKeyHex = "0000000000000000000000000000000000000000000000000000000000000001"
 
-// enclaveHostAddr is the address the enclave reaches host-local test servers at:
-// loopback for fake enclaves (local processes), the wg0 host IP for real Nitro.
+// SOCKS resolves enclaveHostAddr in the parent namespace.
 func enclaveHostAddr() string {
-	if tests.UseFakeEnclave() {
-		return "localhost"
-	}
-	return "100.64.0.3"
+	return "127.0.0.1"
 }
 
 func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
@@ -156,12 +152,11 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
 	// can go into the settings the host injects over vsock at startup.
 	storageAddr, storageSvc := startFakeStorageService(t, enclaveHostAddr())
 	t.Setenv("REQUIRE_BFT_QUORUM", "true")
+	t.Setenv("OUTBOUND_ALLOW_LOCAL_FOR_TESTS", "true")
 
 	// The whole runtime configuration reaches the enclave as one opaque JSON
 	// payload (ENCLAVE_SETTINGS): the host forwards it verbatim and the enclave
 	// app requires the storage endpoint, storage key and gateway URL.
-	// enclaveHostAddr resolves to loopback for fake enclaves (local processes)
-	// and the Nitro wg0 host IP (100.64.0.3) for real enclaves.
 	host := enclaveHostAddr()
 	t.Setenv("ENCLAVE_SETTINGS", fmt.Sprintf(
 		`{"storageKey":%q,"storageServiceUrl":%q,"storageServiceTls":false,"gatewayUrl":%q}`,
@@ -228,14 +223,18 @@ func (f *testConfidentialRelayFeature) PostEnvStartup(
 
 const engineTestBinaryFilename = "workflow-test-confidential.br.b64"
 const engineTestConfigFilename = "workflow-test-config.json"
+const engineTestBinaryPath = "/artifacts/" + engineTestBinaryFilename
+const engineTestConfigPath = "/artifacts/" + engineTestConfigFilename
+const engineTestArtifactPath = "/artifact/" + engineTestBinaryFilename
 
 // cwEngineTestServers holds the engine-test WASM binary server state.
 var cwEngineTestServers struct {
-	once        sync.Once
-	wasmURL     string // URL using host IP (accessible from Docker and host)
-	binaryHash  []byte
-	artifactDir string // directory containing the binary and config files
-	err         error
+	once         sync.Once
+	wasmURL      string // URL using host IP (accessible from Docker and host)
+	binaryHash   []byte
+	artifactDir  string // directory containing the binary and config files
+	artifactHits atomic.Int64
+	err          error
 }
 
 // initCWEngineTestServers compiles the engine-test WASM binary, brotli-compresses
@@ -308,10 +307,14 @@ func initCWEngineTestServers(configJSON string) (wasmURL string, configURL strin
 		// RegisterWithContract can download them and constructArtifactURL can
 		// derive container filenames.
 		mux := http.NewServeMux()
-		mux.HandleFunc("/"+engineTestBinaryFilename, func(rw http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc(engineTestBinaryPath, func(rw http.ResponseWriter, r *http.Request) {
 			_, _ = rw.Write([]byte(encoded))
 		})
-		mux.HandleFunc("/"+engineTestConfigFilename, func(rw http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc(engineTestArtifactPath, func(rw http.ResponseWriter, r *http.Request) {
+			cwEngineTestServers.artifactHits.Add(1)
+			_, _ = rw.Write([]byte(encoded))
+		})
+		mux.HandleFunc(engineTestConfigPath, func(rw http.ResponseWriter, r *http.Request) {
 			_, _ = rw.Write([]byte(configJSON))
 		})
 		wasmListener, err := net.Listen("tcp", "0.0.0.0:0")
@@ -324,7 +327,7 @@ func initCWEngineTestServers(configJSON string) (wasmURL string, configURL strin
 
 		hostIP := getHostIP()
 		port := wasmListener.Addr().(*net.TCPAddr).Port
-		cwEngineTestServers.wasmURL = fmt.Sprintf("http://%s:%d/%s", hostIP, port, engineTestBinaryFilename)
+		cwEngineTestServers.wasmURL = fmt.Sprintf("http://%s:%d%s", hostIP, port, engineTestBinaryPath)
 	})
 
 	baseURL := cwEngineTestServers.wasmURL
@@ -372,6 +375,12 @@ func (f *fakeStorageService) setURL(u string) {
 	f.mu.Unlock()
 }
 
+func (f *fakeStorageService) lastArtifactID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastID
+}
+
 func (f *fakeStorageService) DownloadArtifact(_ context.Context, req *storage_service.DownloadArtifactRequest) (*storage_service.DownloadArtifactResponse, error) {
 	f.mu.Lock()
 	f.lastID = req.GetId()
@@ -391,10 +400,6 @@ func (f *fakeStorageService) DownloadArtifact(_ context.Context, req *storage_se
 	return &storage_service.DownloadArtifactResponse{Url: u}, nil
 }
 
-// startFakeStorageService starts a gRPC NodeService bound to 0.0.0.0 (so the
-// enclave can reach it over wg0 in nitro) and returns the address the enclave
-// dials it at (enclaveHost:port) plus the service, so the test can set the
-// artifact URL once the WASM server is up.
 func startFakeStorageService(t *testing.T, enclaveHost string) (string, *fakeStorageService) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "0.0.0.0:0")
@@ -460,9 +465,7 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// 3. Set up CRE environment with ConfidentialRelay feature and MOCK_SECRET.
 	// Use real PCR measurements from built EIF. Relay attestation validation
 	// falls back to the default AWS Nitro root CA.
-	// Each enclave has different PCR values (WireGuard keys baked per CID),
-	// so collect all valid measurements. The relay handler accepts a JSON
-	// array of PCR objects and tries each until one matches.
+	// Reusable EIFs share PCR values across CIDs.
 	var pcrsJSON string
 	if tests.UseFakeEnclave() {
 		// Fake enclaves emit a sentinel attestation document instead of real
@@ -566,12 +569,9 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	testLogger.Info().Msgf("Engine-test config served at %s", configURL)
 
 	// Point the fake storage service at the (base64) WASM the enclave will fetch.
-	// The WASM server binds 0.0.0.0, so the enclave reaches the same port at its
-	// enclave-reachable host (wg0 IP for nitro, loopback for fake); swap only the
-	// host of wasmURL (which uses the Docker-reachable host IP).
 	wasmParsed, perr := url.Parse(wasmURL)
 	require.NoError(t, perr, "parsing engine-test WASM URL")
-	storageSvc.setURL(fmt.Sprintf("http://%s:%s%s", enclaveHostAddr(), wasmParsed.Port(), wasmParsed.Path))
+	storageSvc.setURL(fmt.Sprintf("http://%s:%s%s", enclaveHostAddr(), wasmParsed.Port(), engineTestArtifactPath))
 
 	// Copy the binary and config to workflow DON containers so the syncer's
 	// file-based fetcher can read them.
@@ -627,6 +627,9 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	//    engine-level log.
 	waitForWorkflowExecutionComplete(t, testEnv, testLogger, workflowID, 5*time.Minute)
 
+	require.Equal(t, engineTestBinaryFilename, storageSvc.lastArtifactID(), "unexpected artifact requested from storage")
+	require.Positive(t, cwEngineTestServers.artifactHits.Load(), "enclave never downloaded the artifact URL returned by storage")
+
 	// The GetSecret path routes through the enclave's gateway client, configured
 	// with a dead gateway first (:9998) and the real one second (:9999). The
 	// workflow only finishes if every gateway call failed over from the dead
@@ -634,6 +637,7 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// test genuinely exercises round-robin failover rather than passing vacuously
 	// (e.g. if the cursor logic changed to skip the first URL).
 	require.Positive(t, deadGwProxy.Hits(), "dead gateway proxy was never hit; round-robin failover was not exercised")
+	require.Positive(t, gwProxy.Hits(), "healthy gateway proxy was never reached after failover")
 
 	// 7b. The engine log above only proves the WASM returned without error. Read the
 	// consumer contract back to prove the report was actually signed by the DON

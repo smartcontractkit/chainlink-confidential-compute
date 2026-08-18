@@ -37,7 +37,7 @@ func allocateNitroTestPorts(t *testing.T, count int) []string {
 	return ports
 }
 
-// startNitroEnclaves brings up two local Nitro enclaves for an app and returns
+// startNitroEnclaves brings up local Nitro enclaves for an app and returns
 // the resulting enclave descriptors, config URLs, and a combined cleanup. The
 // first enclave is wrapped in a local API-key-injecting proxy.
 func startNitroEnclaves(t *testing.T, app App, logger zerolog.Logger) ([]types.Enclave, []string, func()) {
@@ -47,8 +47,13 @@ func startNitroEnclaves(t *testing.T, app App, logger zerolog.Logger) ([]types.E
 	rootDir, err := util.GetRepoRoot()
 	require.NoError(t, err)
 
-	httpPorts := allocateNitroTestPorts(t, 2)
-	configHttpPorts := allocateNitroTestPorts(t, 2)
+	// VSOCK port 5001 permits one host process per Nitro parent.
+	enclaveCount := 2
+	if !testhelpers.UseFakeEnclave() {
+		enclaveCount = 1
+	}
+	httpPorts := allocateNitroTestPorts(t, enclaveCount)
+	configHttpPorts := allocateNitroTestPorts(t, enclaveCount)
 	logger.Info().Msgf(
 		"Allocated Nitro test ports for %s: host=%v config=%v",
 		app.Name,

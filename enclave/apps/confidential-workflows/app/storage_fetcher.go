@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	neturl "net/url"
 	"path"
@@ -17,8 +18,8 @@ import (
 	nodeauthgrpc "github.com/smartcontractkit/chainlink-common/pkg/nodeauth/grpc"
 	nodeauthjwt "github.com/smartcontractkit/chainlink-common/pkg/nodeauth/jwt"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
-	storage_service "github.com/smartcontractkit/chainlink-protos/storage-service/go"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	storage_service "github.com/smartcontractkit/chainlink-protos/storage-service/go"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -43,10 +44,20 @@ type StorageFetcher struct {
 	conn       *grpc.ClientConn
 	client     storage_service.NodeServiceClient
 	jwtGen     nodeauthjwt.JWTGenerator
-	httpClient *http.Client
+	httpClient types.HTTPClient
 	maxBytes   int64
 	timeout    time.Duration
 	lggr       logger.Logger
+}
+
+type storageFetcherConfig struct {
+	dialContext func(context.Context, string, string) (net.Conn, error)
+}
+
+type StorageFetcherOption func(*storageFetcherConfig)
+
+func WithStorageDialer(dialContext func(context.Context, string, string) (net.Conn, error)) StorageFetcherOption {
+	return func(config *storageFetcherConfig) { config.dialContext = dialContext }
 }
 
 var _ RawFetcher = (*StorageFetcher)(nil)
@@ -89,9 +100,16 @@ func newJWTGenerator(privKeyHex string) (nodeauthjwt.JWTGenerator, ed25519.Publi
 // NewStorageFetcher parses the ed25519 key, dials the storage service, and
 // prepares the JWT generator. It returns the derived public key so the caller
 // can log which identity is being used (the pubkey whitelisted by storage).
-func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes int64, timeout time.Duration, lggr logger.Logger) (*StorageFetcher, ed25519.PublicKey, error) {
+func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes int64, timeout time.Duration, lggr logger.Logger, httpClient types.HTTPClient, opts ...StorageFetcherOption) (*StorageFetcher, ed25519.PublicKey, error) {
 	if storageURL == "" {
 		return nil, nil, fmt.Errorf("storage service url is required")
+	}
+	if httpClient == nil {
+		return nil, nil, fmt.Errorf("artifact HTTP client is required")
+	}
+	config := storageFetcherConfig{}
+	for _, opt := range opts {
+		opt(&config)
 	}
 
 	jwtGen, pub, err := newJWTGenerator(privKeyHex)
@@ -106,7 +124,19 @@ func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes 
 		creds = insecure.NewCredentials()
 	}
 
-	conn, err := grpc.NewClient(storageURL, grpc.WithTransportCredentials(creds))
+	grpcOptions := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
+	// Preserve the hostname so the parent-side SOCKS proxy performs DNS resolution.
+	target := "passthrough:///" + storageURL
+	if config.dialContext != nil {
+		grpcOptions = append(grpcOptions,
+			grpc.WithNoProxy(),
+			grpc.WithAuthority(storageURL),
+			grpc.WithContextDialer(func(ctx context.Context, address string) (net.Conn, error) {
+				return config.dialContext(ctx, "tcp", address)
+			}),
+		)
+	}
+	conn, err := grpc.NewClient(target, grpcOptions...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dialing storage service %q: %w", storageURL, err)
 	}
@@ -122,7 +152,7 @@ func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes 
 		conn:       conn,
 		client:     storage_service.NewNodeServiceClient(conn),
 		jwtGen:     jwtGen,
-		httpClient: &http.Client{},
+		httpClient: httpClient,
 		maxBytes:   maxBytes,
 		timeout:    timeout,
 		lggr:       lggr,

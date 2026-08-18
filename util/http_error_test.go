@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/doyensec/safeurl"
+	proxyclient "github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,8 +51,18 @@ func TestClassifyOutboundHTTPError(t *testing.T) {
 		},
 		"dns nxdomain": {
 			err:            wrap(&net.DNSError{Name: "upstream.example.com", IsNotFound: true}),
+			wantStatus:     http.StatusBadGateway,
+			wantBodySubstr: "upstream host unreachable",
+		},
+		"host unreachable via outbound proxy": {
+			err:            wrap(syscall.EHOSTUNREACH),
+			wantStatus:     http.StatusBadGateway,
+			wantBodySubstr: "upstream host unreachable",
+		},
+		"outbound proxy policy block": {
+			err:            wrap(&proxyclient.PolicyError{Reason: "private address"}),
 			wantStatus:     http.StatusBadRequest,
-			wantBodySubstr: "DNS resolution failed for upstream.example.com",
+			wantBodySubstr: "blocked by enclave network policy",
 		},
 		"ssrf policy block": {
 			err:            wrap(&net.OpError{Op: "dial", Err: &safeurl.AllowedSchemeError{}}),
@@ -210,5 +221,29 @@ func writeThenClose(payload []byte) func(net.Conn) {
 		defer func() { _ = conn.Close() }()
 		_, _ = conn.Read(make([]byte, 1024))
 		_, _ = conn.Write(payload)
+	}
+}
+
+func TestClassifyOutboundProxyPolicyError(t *testing.T) {
+	classified := ClassifyOutboundHTTPError(&proxyclient.PolicyError{Reason: "private address"})
+	require.NotNil(t, classified)
+	require.Equal(t, http.StatusBadRequest, classified.StatusCode)
+}
+
+func TestClassifyOutboundHostUnreachable(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "direct DNS failure", err: &net.DNSError{Name: "example.invalid", IsNotFound: true}},
+		{name: "SOCKS host unreachable", err: syscall.EHOSTUNREACH},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			classified := ClassifyOutboundHTTPError(test.err)
+			require.NotNil(t, classified)
+			require.Equal(t, http.StatusBadGateway, classified.StatusCode)
+			require.Equal(t, "upstream host unreachable", classified.Body)
+		})
 	}
 }

@@ -126,3 +126,13 @@ const (
 // in the compute request hash.
 const ServiceConfidentialComputeVersion = "0.0.6"
 const ServiceConfidentialComputeVersionLegacy = "0.0.6"
+
+type ProxyProfile string
+
+const (
+	ProxyParentCID         uint32       = 3
+	ProxyPort              uint32       = 5001
+	ProxyProfilePublic     ProxyProfile = "public"
+	ProxyProfileConfigured ProxyProfile = "configured"
+	ProxyProfileTest       ProxyProfile = "test"
+)

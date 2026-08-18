@@ -34,16 +34,29 @@ type httpEnclaveApp struct {
 
 var _ types.EnclaveApp = (*httpEnclaveApp)(nil)
 
-func NewHTTPEnclaveApp(httpClient types.HTTPClient) types.EnclaveApp {
+type Option func(*httpEnclaveApp)
+
+// WithTLSClientFactory preserves the default client's transport policy for custom roots.
+func WithTLSClientFactory(factory func(*tls.Config) types.HTTPClient) Option {
+	return func(app *httpEnclaveApp) {
+		app.newTLSClient = factory
+	}
+}
+
+func NewHTTPEnclaveApp(httpClient types.HTTPClient, opts ...Option) types.EnclaveApp {
 	if httpClient == nil {
 		httpClient = util.NewRestrictedHTTPClient()
 	}
-	return &httpEnclaveApp{
+	app := &httpEnclaveApp{
 		httpClient: httpClient,
 		newTLSClient: func(tlsCfg *tls.Config) types.HTTPClient {
 			return util.NewRestrictedHTTPClientWithTLS(tlsCfg)
 		},
 	}
+	for _, opt := range opts {
+		opt(app)
+	}
+	return app
 }
 
 func (a *httpEnclaveApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, _ ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
@@ -286,10 +299,10 @@ func (a *httpEnclaveApp) executeHTTPRequest(request *enclavetypes.Request, templ
 
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
-		// Caller-facing conditions (timeouts, DNS NXDOMAIN, SSRF-policy blocks)
-		// and faults at the upstream endpoint (refused/reset connections, TLS
-		// handshake failures) are returned as HTTP status responses rather than
-		// enclave failures. See util.ClassifyOutboundHTTPError.
+		// Caller-facing conditions (timeouts, unreachable hosts, SSRF-policy
+		// blocks) and faults at the upstream endpoint (refused/reset connections,
+		// TLS handshake failures) are returned as HTTP status responses rather
+		// than enclave failures. See util.ClassifyOutboundHTTPError.
 		if he := util.ClassifyOutboundHTTPError(err); he != nil {
 			return enclavetypes.Response{
 				StatusCode: uint32(he.StatusCode),
