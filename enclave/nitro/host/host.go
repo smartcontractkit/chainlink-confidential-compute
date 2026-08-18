@@ -12,6 +12,7 @@ import (
 	"log"
 	"log/slog"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/host/proxy-server"
 	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/vsock"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -64,6 +66,8 @@ var (
 	idleTimeout = flag.Duration("idle-timeout", 2*time.Minute, "Max duration to keep idle keep-alive connections open")
 	// maxHeaderBytes caps the accepted request header size (1 MiB).
 	maxHeaderBytes = flag.Int("max-header-bytes", 1<<20, "Max size of request headers in bytes (default 1 MiB)")
+
+	outboundAllowLocalForTests = flag.Bool("outbound-allow-local-for-tests", os.Getenv("OUTBOUND_ALLOW_LOCAL_FOR_TESTS") == "true", "Allow outbound connections to local addresses (insecure, for testing only). Reads OUTBOUND_ALLOW_LOCAL_FOR_TESTS.")
 )
 
 // `hostServer` provides an untrusted proxy for AWS Nitro Enclaves.
@@ -339,11 +343,11 @@ func (h *hostServer) handleInjectSettings(w http.ResponseWriter, r *http.Request
 // the enclave app owns the schema. Retries while the enclave is still booting.
 func (h *hostServer) injectSettings(ctx context.Context, payload []byte) error {
 	const (
-		maxAttempts = 60
-		retryDelay  = 2 * time.Second
+		initialRetryDelay = 2 * time.Second
+		maxRetryDelay     = 30 * time.Second
 	)
-	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	retryDelay := initialRetryDelay
+	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -355,7 +359,6 @@ func (h *hostServer) injectSettings(ctx context.Context, payload []byte) error {
 
 		resp, err := h.enclaveClient.Do(req)
 		if err != nil {
-			lastErr = err
 		} else {
 			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
@@ -363,17 +366,17 @@ func (h *hostServer) injectSettings(ctx context.Context, payload []byte) error {
 				slog.Info("injected storage credentials into enclave")
 				return nil
 			}
-			lastErr = fmt.Errorf("enclave rejected credentials: status %d: %s", resp.StatusCode, string(body))
+			err = fmt.Errorf("enclave rejected credentials: status %d: %s", resp.StatusCode, string(body))
 		}
 
-		slog.Warn("credentials injection not yet accepted, retrying", "attempt", attempt, "error", lastErr)
+		slog.Warn("credentials injection not yet accepted, retrying", "attempt", attempt, "retryIn", retryDelay, "error", err)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(retryDelay):
 		}
+		retryDelay = min(retryDelay*2, maxRetryDelay)
 	}
-	return fmt.Errorf("failed to inject credentials after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // proxyConfig forwards a /config request to the enclave over vsock using the given
@@ -916,6 +919,9 @@ func main() {
 	if *shutdownTimeout <= 0 {
 		log.Fatalf("shutdown-timeout (%v) must be greater than zero", *shutdownTimeout)
 	}
+	if *enclaveCID <= 0 || uint64(*enclaveCID) > math.MaxUint32 {
+		log.Fatalf("enclave-cid (%d) must be between 1 and %d", *enclaveCID, uint64(math.MaxUint32))
+	}
 
 	if *requireBFTQuorum {
 		lggr.Infow("BFT quorum required: batch threshold is 2f+1", "requireBFTQuorum", true)
@@ -942,6 +948,19 @@ func main() {
 		closeCancel()
 		log.Fatalf("failed to initialize host metrics: %v", err)
 	}
+	outboundBroker, err := proxyserver.New(*outboundAllowLocalForTests, lggr)
+	if err != nil {
+		log.Fatalf("failed to construct outbound proxy: %v", err)
+	}
+	outboundListener, err := vsock.ListenAt(vsock.CIDAny, types.ProxyPort, nil)
+	if err != nil {
+		log.Fatalf("failed to listen for enclave outbound traffic: %v", err)
+	}
+	outboundErr := make(chan error, 1)
+	go func() {
+		outboundErr <- outboundBroker.Serve(outboundListener)
+	}()
+	lggr.Infow("started enclave outbound proxy", "port", types.ProxyPort)
 
 	// Start servers. Optionally handle the config endpoint on a different port.
 	host := NewHostServer(ctx, nil)
@@ -1012,16 +1031,19 @@ func main() {
 			slog.Error("enclave settings are not a JSON object, skipping injection", "error", err)
 		} else {
 			go func() {
-				if err := host.injectSettings(ctx, payload); err != nil {
+				if err := host.injectSettings(ctx, payload); err != nil && !errors.Is(err, context.Canceled) {
 					slog.Error("failed to inject settings into enclave", "error", err)
 				}
 			}()
 		}
 	}
 
-	// Wait for shutdown signal
-	sig := <-sigCh
-	lggr.Infow("received shutdown signal", "signal", sig.String())
+	select {
+	case sig := <-sigCh:
+		lggr.Infow("received shutdown signal", "signal", sig.String())
+	case proxyErr := <-outboundErr:
+		lggr.Errorw("outbound proxy stopped unexpectedly", "error", proxyErr)
+	}
 
 	// Cancel context to stop all background goroutines (like quorum timeout handlers)
 	cancel()
@@ -1039,6 +1061,7 @@ func main() {
 	if err := mainServer.Shutdown(shutdownCtx); err != nil {
 		lggr.Errorw("main server shutdown error", "error", err)
 	}
+	_ = outboundListener.Close()
 	// Give telemetry its own timeout budget
 	flushCtx, flushCancel := context.WithTimeout(context.Background(), *shutdownTimeout)
 	defer flushCancel()

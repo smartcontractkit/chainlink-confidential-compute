@@ -525,6 +525,10 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				cfg := testhelpers.DefaultLocalEnclaveSetupConfig(rootDir, app.Name)
 				cfg.EnclaveType = enclaveType
 				cfg.Region = enclaveRegion
+				// VSOCK port 5001 permits one host process per Nitro parent.
+				if !tests.UseFakeEnclave() {
+					cfg.EnclaveCount = 1
+				}
 				// Check if we should use a prior version binary
 				if priorPath, usePrior := priorVersionPaths[app.Name]; usePrior {
 					testLogger.Info().Msgf("Using prior version binary from: %s", priorPath)
@@ -713,7 +717,11 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				rotate("node restoration", originalNodes, originalNodes)
 			})
 
-			t.Run("DNS NXDOMAIN returns 400", func(t *testing.T) {
+			t.Run("DNS NXDOMAIN returns 502", func(t *testing.T) {
+				if useLegacyEnclaves {
+					t.Skip("skipping: legacy/remote enclaves return 400 for DNS failures")
+				}
+
 				// Reset recipient to isolate this sub-test's results
 				recipient.mu.Lock()
 				recipient.requests = nil

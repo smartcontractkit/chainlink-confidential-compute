@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/host"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"google.golang.org/protobuf/proto"
 )
@@ -58,16 +60,37 @@ type confidentialWorkflowsApp struct {
 	storageServiceURL string // startup default (fake/tests); an injected URL overrides
 	storageServiceTLS bool
 	storageFetcher    RawFetcher
-	dispatcher        RemoteDispatcher                                                // nil = local mode
-	dispatcherFactory func(gatewayURL string, timeout time.Duration) RemoteDispatcher // builds dispatcher on first GatewayURL injection
+	storageFactory    StorageFetcherFactory
+	dispatcher        RemoteDispatcher        // nil = local mode
+	dispatcherFactory RemoteDispatcherFactory // builds dispatcher on first GatewayURL injection
 	lastConfig        types.EnclaveConfig
 	haveConfig        bool
 }
 
 var _ types.EnclaveApp = (*confidentialWorkflowsApp)(nil)
 
-// Option configures optional behavior for the confidential workflows app.
+// Config requires explicit transports to prevent direct network access.
+type Config struct {
+	HTTPFetcher             *httpfetch.Fetcher
+	StorageFetcherFactory   StorageFetcherFactory
+	RemoteDispatcherFactory RemoteDispatcherFactory
+	MaxConcurrentExecutions int64
+}
+
 type Option func(*confidentialWorkflowsApp)
+
+type StorageFetcherFactory func(storageURL string, tls bool, privateKey string, maxBytes int64, timeout time.Duration, lggr logger.Logger) (RawFetcher, ed25519.PublicKey, error)
+
+// RemoteDispatcherFactory defers construction until the host injects the gateway URL.
+type RemoteDispatcherFactory func(gatewayURL string, timeout time.Duration) (RemoteDispatcher, error)
+
+func storageFetcherFactory(newHTTPClient func() types.HTTPClient) StorageFetcherFactory {
+	return func(storageURL string, tls bool, privateKey string, maxBytes int64, timeout time.Duration, lggr logger.Logger) (RawFetcher, ed25519.PublicKey, error) {
+		return NewStorageFetcher(
+			storageURL, tls, privateKey, maxBytes, timeout, lggr, newHTTPClient(),
+		)
+	}
+}
 
 // WithRemoteDispatcher enables remote dynamic secrets and remote capability
 // dispatch with a dispatcher built up-front. Used by tests that already know the
@@ -84,7 +107,7 @@ func WithRemoteDispatcher(d RemoteDispatcher) Option {
 // InjectSettings). The measured EIF can't bake the gateway URL, so the
 // nitro/fake mains pass a factory here and the dispatcher is created when the
 // host injects the URL. A non-positive timeout means the caller's own default.
-func WithRemoteDispatcherFactory(f func(gatewayURL string, timeout time.Duration) RemoteDispatcher) Option {
+func WithRemoteDispatcherFactory(f RemoteDispatcherFactory) Option {
 	return func(a *confidentialWorkflowsApp) {
 		a.dispatcherFactory = f
 	}
@@ -106,6 +129,12 @@ func WithStorageService(url string, tls bool) Option {
 	return func(a *confidentialWorkflowsApp) {
 		a.storageServiceURL = url
 		a.storageServiceTLS = tls
+	}
+}
+
+func WithStorageFetcherFactory(factory StorageFetcherFactory) Option {
+	return func(a *confidentialWorkflowsApp) {
+		a.storageFactory = factory
 	}
 }
 
@@ -156,7 +185,7 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	url, tls := a.storageServiceURL, a.storageServiceTLS
 	a.mu.Unlock()
 
-	fetcher, pub, err := NewStorageFetcher(url, tls, req.StorageKey, req.MaxBinarySize, time.Duration(req.BinaryFetchTimeout), a.logger)
+	fetcher, pub, err := a.storageFactory(url, tls, req.StorageKey, req.MaxBinarySize, time.Duration(req.BinaryFetchTimeout), a.logger)
 	if err != nil {
 		return fmt.Errorf("building storage fetcher: %w", err)
 	}
@@ -173,7 +202,11 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 
 	a.mu.Lock()
 	if a.dispatcher == nil && a.dispatcherFactory != nil {
-		d := a.dispatcherFactory(req.GatewayURL, time.Duration(req.GatewayRequestTimeout))
+		d, err := a.dispatcherFactory(req.GatewayURL, time.Duration(req.GatewayRequestTimeout))
+		if err != nil {
+			a.mu.Unlock()
+			return fmt.Errorf("building remote dispatcher: %w", err)
+		}
 		if a.haveConfig {
 			// Config may have arrived before credentials; apply it now so the
 			// freshly built dispatcher has the vault's MasterPublicKey/T.
@@ -202,20 +235,49 @@ func (a *confidentialWorkflowsApp) OnConfigUpdate(config types.EnclaveConfig) {
 	}
 }
 
-func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, _ types.HTTPClient, opts ...Option) types.EnclaveApp {
+// NewConfidentialWorkflowsApp requires every production transport explicitly.
+func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config Config) (types.EnclaveApp, error) {
+	if config.HTTPFetcher == nil {
+		return nil, errors.New("HTTP fetcher is required")
+	}
+	if config.StorageFetcherFactory == nil {
+		return nil, errors.New("storage fetcher factory is required")
+	}
+	if config.RemoteDispatcherFactory == nil {
+		return nil, errors.New("remote dispatcher factory is required")
+	}
+
+	a := &confidentialWorkflowsApp{
+		logger:            lggr,
+		fetcher:           NewBinaryFetcher(lggr),
+		httpFetcher:       config.HTTPFetcher,
+		tpe:               tpe,
+		limiter:           newExecutionLimiter(config.MaxConcurrentExecutions),
+		storageFactory:    config.StorageFetcherFactory,
+		dispatcherFactory: config.RemoteDispatcherFactory,
+	}
+	a.gracePeriod.Store(int64(types.DefaultWorkflowGracePeriod))
+	a.requirementsHandler.Tee = a.validTee
+	return a, nil
+}
+
+// NewTestConfidentialWorkflowsApp supplies direct clients for tests and fake environments.
+func NewTestConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, opts ...Option) types.EnclaveApp {
 	a := &confidentialWorkflowsApp{
 		logger:      lggr,
 		fetcher:     NewBinaryFetcher(lggr),
 		httpFetcher: httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
 		tpe:         tpe,
-		limiter:     newExecutionLimiter(0), // unbounded unless an option overrides
+		limiter:     newExecutionLimiter(0),
+		storageFactory: storageFetcherFactory(func() types.HTTPClient {
+			return util.NewRestrictedHTTPClient()
+		}),
 	}
 	a.gracePeriod.Store(int64(types.DefaultWorkflowGracePeriod))
+	a.requirementsHandler.Tee = a.validTee
 	for _, opt := range opts {
 		opt(a)
 	}
-	a.requirementsHandler.Tee = a.validTee
-
 	return a
 }
 
