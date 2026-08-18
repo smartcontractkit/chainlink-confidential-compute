@@ -21,19 +21,32 @@ import (
 const (
 	executionOutcomeSuccess       = "success"
 	executionOutcomeError         = "error"
+	executionFailureCapacity      = "capacity"
+	executionFailureConflict      = "conflict"
+	executionFailureInternal      = "internal"
+	executionFailureInvalid       = "invalid_request"
+	executionFailureProtocol      = "protocol"
+	executionFailureTimeout       = "timeout"
+	executionFailureTransport     = "transport"
+	executionFailureUnknown       = "unknown"
 	enclaveMemoryPollInterval     = 30 * time.Second
 	enclaveMemoryPollTimeout      = 30 * time.Second
 	maxEnclaveMemoryResponseBytes = 64 * 1024
 )
 
+var executionDurationBuckets = []float64{
+	0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1,
+	2.5, 5, 10, 30, 60, 120, 300, 600,
+}
+
 type executionMetrics interface {
-	startExecution(executionMetadata) func(outcome string)
+	startExecution(executionMetadata, time.Duration) func(outcome, failureReason string)
 }
 
 type noopExecutionMetrics struct{}
 
-func (noopExecutionMetrics) startExecution(executionMetadata) func(string) {
-	return func(string) {}
+func (noopExecutionMetrics) startExecution(executionMetadata, time.Duration) func(string, string) {
+	return func(string, string) {}
 }
 
 type enclaveMemorySnapshot struct {
@@ -42,28 +55,42 @@ type enclaveMemorySnapshot struct {
 }
 
 type hostMetrics struct {
-	executionDuration  metric.Float64Histogram
-	endpointDuration   metric.Float64Histogram
-	executionsInflight metric.Int64Gauge
-	workflowActive     metric.Int64ObservableGauge
-	goRuntimeMemory    metric.Int64ObservableGauge
-	processRSSMemory   metric.Int64ObservableGauge
+	// Post-quorum enclave execution time for one batch.
+	executionDuration metric.Float64Histogram
+	// End-to-end host HTTP handler time for one request.
+	endpointDuration metric.Float64Histogram
+	// Time from the first matching request until quorum dispatch for one batch.
+	quorumWaitDuration metric.Float64Histogram
+	// Quorum wait plus post-quorum enclave execution time for one batch.
+	totalDuration         metric.Float64Histogram
+	executionsStarted     metric.Int64Counter
+	executionsRejected    metric.Int64Counter
+	executionsInflight    metric.Int64ObservableGauge
+	executionsInflightMax metric.Int64ObservableGauge
+	workflowActive        metric.Int64ObservableGauge
+	workflowsActiveMax    metric.Int64ObservableGauge
+	goRuntimeMemory       metric.Int64ObservableGauge
+	processRSSMemory      metric.Int64ObservableGauge
 
-	mu           sync.Mutex
-	inflight     int64
-	workflowRefs map[string]int64
-	memory       atomic.Pointer[enclaveMemorySnapshot]
+	now              func() time.Time
+	mu               sync.Mutex
+	inflight         int64
+	inflightMax      int64
+	workflowCountMax int64
+	workflowRefs     map[string]int64
+	memory           atomic.Pointer[enclaveMemorySnapshot]
 }
 
 func newHostMetrics(meter metric.Meter) (*hostMetrics, error) {
+	return newHostMetricsWithClock(meter, time.Now)
+}
+
+func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMetrics, error) {
 	duration, err := meter.Float64Histogram(
 		"confidential_compute.enclave.execution.duration",
 		metric.WithDescription("Wall-clock duration of one post-quorum enclave execution"),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(
-			0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1,
-			2.5, 5, 10, 30, 60, 120, 300, 600,
-		),
+		metric.WithExplicitBucketBoundaries(executionDurationBuckets...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create enclave execution duration histogram: %w", err)
@@ -72,15 +99,46 @@ func newHostMetrics(meter metric.Meter) (*hostMetrics, error) {
 		"confidential_compute.enclave.host.endpoint.duration",
 		metric.WithDescription("End-to-end wall-clock duration of an enclave host HTTP request"),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(
-			0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1,
-			2.5, 5, 10, 30, 60, 120, 300, 600,
-		),
+		metric.WithExplicitBucketBoundaries(executionDurationBuckets...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create enclave host endpoint duration histogram: %w", err)
 	}
-	inflight, err := meter.Int64Gauge(
+	quorumWait, err := meter.Float64Histogram(
+		"confidential_compute.enclave.execution.quorum_wait.duration",
+		metric.WithDescription("Wall-clock duration from the first matching host request until quorum dispatch"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(executionDurationBuckets...),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave quorum wait duration histogram: %w", err)
+	}
+	total, err := meter.Float64Histogram(
+		"confidential_compute.enclave.execution.total.duration",
+		metric.WithDescription("Wall-clock duration from the first matching host request through enclave execution"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(executionDurationBuckets...),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave total execution duration histogram: %w", err)
+	}
+	started, err := meter.Int64Counter(
+		"confidential_compute.enclave.executions.started",
+		metric.WithDescription("Enclave executions dispatched after reaching quorum"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave executions started counter: %w", err)
+	}
+	rejected, err := meter.Int64Counter(
+		"confidential_compute.enclave.executions.rejected",
+		metric.WithDescription("Enclave executions rejected after dispatch"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave executions rejected counter: %w", err)
+	}
+	inflight, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.executions.inflight",
 		metric.WithDescription("Actual enclave executions currently in flight in this host"),
 		metric.WithUnit("1"),
@@ -88,21 +146,41 @@ func newHostMetrics(meter metric.Meter) (*hostMetrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create enclave executions in-flight gauge: %w", err)
 	}
-	metrics := &hostMetrics{
-		executionDuration:  duration,
-		endpointDuration:   endpointDuration,
-		executionsInflight: inflight,
-		workflowRefs:       make(map[string]int64),
+	inflightMax, err := meter.Int64ObservableGauge(
+		"confidential_compute.enclave.executions.inflight.max",
+		metric.WithDescription("Maximum enclave executions in flight since the previous metric collection"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create maximum enclave executions in-flight gauge: %w", err)
 	}
-	// Observable state prevents the cumulative SDK from retaining every historical workflow ID.
+	metrics := &hostMetrics{
+		executionDuration:     duration,
+		endpointDuration:      endpointDuration,
+		quorumWaitDuration:    quorumWait,
+		totalDuration:         total,
+		executionsStarted:     started,
+		executionsRejected:    rejected,
+		executionsInflight:    inflight,
+		executionsInflightMax: inflightMax,
+		now:                   now,
+		workflowRefs:          make(map[string]int64),
+	}
 	active, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.workflow.active",
 		metric.WithDescription("Whether a workflow has an enclave execution in flight in this host"),
 		metric.WithUnit("1"),
-		metric.WithInt64Callback(metrics.observeActiveWorkflows),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create active workflow gauge: %w", err)
+	}
+	activeMax, err := meter.Int64ObservableGauge(
+		"confidential_compute.enclave.workflows.active.max",
+		metric.WithDescription("Maximum distinct workflows executing since the previous metric collection"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create maximum active workflows gauge: %w", err)
 	}
 	goRuntimeMemory, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.memory.go_runtime",
@@ -124,9 +202,19 @@ func newHostMetrics(meter metric.Meter) (*hostMetrics, error) {
 	}
 
 	metrics.workflowActive = active
+	metrics.workflowsActiveMax = activeMax
 	metrics.goRuntimeMemory = goRuntimeMemory
 	metrics.processRSSMemory = processRSSMemory
-	metrics.executionsInflight.Record(context.Background(), 0)
+	_, err = meter.RegisterCallback(
+		metrics.observeExecutionLoad,
+		metrics.executionsInflight,
+		metrics.executionsInflightMax,
+		metrics.workflowActive,
+		metrics.workflowsActiveMax,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("register enclave execution load callback: %w", err)
+	}
 	return metrics, nil
 }
 
@@ -138,16 +226,27 @@ func (m *hostMetrics) recordEndpointDuration(ctx context.Context, endpoint strin
 	)
 }
 
-func (m *hostMetrics) observeActiveWorkflows(ctx context.Context, observer metric.Int64Observer) error {
+func (m *hostMetrics) observeExecutionLoad(_ context.Context, observer metric.Observer) error {
 	m.mu.Lock()
+	inflight := m.inflight
+	inflightMax := m.inflightMax
+	workflowsActiveMax := m.workflowCountMax
 	workflowIDs := make([]string, 0, len(m.workflowRefs))
 	for workflowID := range m.workflowRefs {
 		workflowIDs = append(workflowIDs, workflowID)
 	}
+	// Peaks cover work that starts and finishes between exports. Resetting to the
+	// current load preserves the maximum correctly across collection windows.
+	m.inflightMax = inflight
+	m.workflowCountMax = int64(len(m.workflowRefs))
 	m.mu.Unlock()
 
+	observer.ObserveInt64(m.executionsInflight, inflight)
+	observer.ObserveInt64(m.executionsInflightMax, inflightMax)
+	observer.ObserveInt64(m.workflowsActiveMax, workflowsActiveMax)
 	for _, workflowID := range workflowIDs {
-		observer.Observe(
+		observer.ObserveInt64(
+			m.workflowActive,
 			1,
 			metric.WithAttributes(attribute.String("workflow.id", workflowID)),
 		)
@@ -259,41 +358,41 @@ func mibToBytes(value uint64) int64 {
 	return int64(value * bytesPerMiB)
 }
 
-func (m *hostMetrics) startExecution(metadata executionMetadata) func(string) {
+func (m *hostMetrics) startExecution(metadata executionMetadata, quorumWait time.Duration) func(string, string) {
 	ctx := context.Background()
+	baseAttrs := executionMetricAttributes(metadata)
+	m.executionsStarted.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
+	m.quorumWaitDuration.Record(ctx, quorumWait.Seconds(), metric.WithAttributes(baseAttrs...))
 
 	m.mu.Lock()
+	startedAt := m.now()
 	m.inflight++
-	m.executionsInflight.Record(ctx, m.inflight)
+	if m.inflight > m.inflightMax {
+		m.inflightMax = m.inflight
+	}
 	if metadata.workflowID != "" {
 		m.workflowRefs[metadata.workflowID]++
+		if active := int64(len(m.workflowRefs)); active > m.workflowCountMax {
+			m.workflowCountMax = active
+		}
 	}
 	m.mu.Unlock()
 
-	startedAt := time.Now()
 	var once sync.Once
-	return func(outcome string) {
+	return func(outcome, failureReason string) {
 		once.Do(func() {
 			if outcome != executionOutcomeSuccess {
 				outcome = executionOutcomeError
+				if failureReason == "" {
+					failureReason = executionFailureUnknown
+				}
+			} else {
+				failureReason = ""
 			}
-
-			attrs := []attribute.KeyValue{
-				attribute.String("app.id", metadata.appID),
-				attribute.String("outcome", outcome),
-			}
-			if metadata.requestKind != "" {
-				attrs = append(attrs, attribute.String("request.kind", metadata.requestKind))
-			}
-			m.executionDuration.Record(
-				ctx,
-				time.Since(startedAt).Seconds(),
-				metric.WithAttributes(attrs...),
-			)
 
 			m.mu.Lock()
+			finishedAt := m.now()
 			m.inflight--
-			m.executionsInflight.Record(ctx, m.inflight)
 			if metadata.workflowID != "" {
 				m.workflowRefs[metadata.workflowID]--
 				if m.workflowRefs[metadata.workflowID] == 0 {
@@ -301,6 +400,53 @@ func (m *hostMetrics) startExecution(metadata executionMetadata) func(string) {
 				}
 			}
 			m.mu.Unlock()
+
+			duration := finishedAt.Sub(startedAt)
+			if duration < 0 {
+				duration = 0
+			}
+			attrs := executionResultAttributes(metadata, outcome, failureReason)
+			options := metric.WithAttributes(attrs...)
+			m.executionDuration.Record(ctx, duration.Seconds(), options)
+			m.totalDuration.Record(ctx, (quorumWait + duration).Seconds(), options)
+			if failureReason == executionFailureCapacity {
+				m.executionsRejected.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
+			}
 		})
 	}
+}
+
+func executionMetricAttributes(metadata executionMetadata) []attribute.KeyValue {
+	attrs := []attribute.KeyValue{attribute.String("app.id", metadata.appID)}
+	if metadata.requestKind != "" {
+		attrs = append(attrs, attribute.String("request.kind", metadata.requestKind))
+	}
+	return attrs
+}
+
+func executionResultAttributes(metadata executionMetadata, outcome, failureReason string) []attribute.KeyValue {
+	attrs := executionMetricAttributes(metadata)
+	attrs = append(attrs, attribute.String("outcome", outcome))
+	if failureReason != "" {
+		attrs = append(attrs, attribute.String("failure.reason", failureReason))
+	}
+	return attrs
+}
+
+func executionFailureReasonForStatus(status int) string {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+		return executionFailureTimeout
+	case http.StatusConflict:
+		return executionFailureConflict
+	case http.StatusTooManyRequests:
+		return executionFailureCapacity
+	}
+	if status >= 400 && status < 500 {
+		return executionFailureInvalid
+	}
+	if status >= 500 && status < 600 {
+		return executionFailureInternal
+	}
+	return executionFailureUnknown
 }
