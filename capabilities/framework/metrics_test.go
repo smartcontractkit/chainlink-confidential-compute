@@ -11,7 +11,7 @@ func TestAllowedAttribute(t *testing.T) {
 		"component", "enclave.id", "endpoint", "outcome", "status_code",
 		"capability_id", "method", "step_ref", "success", "error_type",
 		"num_signatures", "num_ciphertexts", "num_requests",
-		"max_concurrent", "metric_type",
+		"max_concurrent", "metric_type", "workflow_id",
 	}
 	for _, k := range allowed {
 		assert.True(t, allowedAttribute(k), "expected %q to be allowed", k)
@@ -20,7 +20,7 @@ func TestAllowedAttribute(t *testing.T) {
 	// High-cardinality / author-controlled / free-text keys must be dropped.
 	dropped := []string{
 		"request_id", "message", "error", "name", "value",
-		"workflow_id", "execution_id", "label.foo", "label.tx_hash",
+		"execution_id", "label.foo", "label.tx_hash",
 		"output_bytes",
 	}
 	for _, k := range dropped {

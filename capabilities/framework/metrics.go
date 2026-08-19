@@ -61,6 +61,7 @@ var allowedMetricAttributes = map[string]struct{}{
 	"num_requests":    {},
 	"max_concurrent":  {},
 	"metric_type":     {},
+	"workflow_id":     {},
 }
 
 // allowedAttribute returns true if k is a low-cardinality key that may become an
