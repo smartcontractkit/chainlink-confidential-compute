@@ -72,10 +72,6 @@
       Level = 'info'
       JSONConsole = true
 
-      [Telemetry]
-      Enabled = false
-      LogStreamingEnabled = false
-
       [Tracing]
       Enabled = false
 
@@ -120,10 +116,6 @@
       Level = 'info'
       JSONConsole = true
 
-      [Telemetry]
-      Enabled = false
-      LogStreamingEnabled = false
-
       [Tracing]
       Enabled = false
 
@@ -142,10 +134,6 @@
       [Log]
       Level = 'info'
       JSONConsole = true
-
-      [Telemetry]
-      Enabled = false
-      LogStreamingEnabled = false
 
       [Tracing]
       Enabled = false
@@ -166,10 +154,6 @@
       Level = 'info'
       JSONConsole = true
 
-      [Telemetry]
-      Enabled = false
-      LogStreamingEnabled = false
-
       [Tracing]
       Enabled = false
 
@@ -188,10 +172,6 @@
       [Log]
       Level = 'info'
       JSONConsole = true
-
-      [Telemetry]
-      Enabled = false
-      LogStreamingEnabled = false
 
       [Tracing]
       Enabled = false
@@ -228,10 +208,6 @@
       [Log]
       Level = 'info'
       JSONConsole = true
-
-      [Telemetry]
-      Enabled = false
-      LogStreamingEnabled = false
 
       [Tracing]
       Enabled = false
