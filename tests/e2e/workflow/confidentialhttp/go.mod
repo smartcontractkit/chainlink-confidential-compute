@@ -5,7 +5,7 @@ go 1.25.5
 require (
 	github.com/smartcontractkit/cre-sdk-go v1.17.0-capdev.1
 	github.com/smartcontractkit/cre-sdk-go/capabilities/networking/confidentialhttp v0.0.0-20260330200534-964c8354b78b
-	github.com/smartcontractkit/cre-sdk-go/capabilities/networking/http v1.3.0
+	github.com/smartcontractkit/cre-sdk-go/capabilities/networking/http v1.3.1-0.20260504162314-fbfac1c36bec
 	google.golang.org/protobuf v1.36.11
 )
 

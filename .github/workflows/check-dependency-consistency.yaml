@@ -1,0 +1,23 @@
+name: Check dependency consistency
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - 'release/**'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Verify smartcontractkit deps are aligned across modules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check dependency consistency
+        run: python3 scripts/check_dependency_consistency.py
