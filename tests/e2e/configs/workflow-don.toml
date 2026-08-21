@@ -71,10 +71,6 @@
       Level = 'warn'
       JSONConsole = true
 
-      [Telemetry]
-      Enabled = false
-      LogStreamingEnabled = false
-
       [Tracing]
       Enabled = false
 
@@ -120,10 +116,6 @@
       [Log]
       Level = 'warn'
       JSONConsole = true
-
-      [Telemetry]
-      Enabled = false
-      LogStreamingEnabled = false
 
       [Tracing]
       Enabled = false
