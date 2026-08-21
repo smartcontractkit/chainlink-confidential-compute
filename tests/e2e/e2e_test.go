@@ -793,6 +793,32 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				testLogger.Info().Msg("SSRF private address sub-test passed")
 			})
 
+			t.Run("upstream TLS handshake rejection returns 502", func(t *testing.T) {
+				if useLegacyEnclaves {
+					t.Skip("skipping: legacy/remote enclaves lack the TLS-handshake-to-502 handling")
+				}
+
+				// Reset recipient to isolate this sub-test's results
+				recipient.mu.Lock()
+				recipient.requests = nil
+				recipient.mu.Unlock()
+
+				tlsInput, err := getConfidentialHTTPTLSHandshakeFailureInput(names, workflowOwner)
+				require.NoError(t, err, "failed to build TLS handshake failure input")
+
+				sendHTTPTrigger(t, testLogger, gatewayURL, uniqueWorkflowName, workflowID, workflowOwnerAddr, signingKey, tlsInput)
+
+				tlsExpected := numNodes // one trigger, each node POSTs
+				testLogger.Info().Msgf("TLS handshake test: waiting for %d results...", tlsExpected)
+				require.Eventually(t, func() bool {
+					return recipient.requestCount() >= tlsExpected
+				}, 3*time.Minute, 5*time.Second, "TLS handshake failure results should arrive at recipient")
+
+				err = validateTLSHandshakeFailureResponse(testLogger, recipient.getRequests())
+				require.NoError(t, err, "TLS handshake failure response validation failed")
+				testLogger.Info().Msg("Upstream TLS handshake rejection sub-test passed")
+			})
+
 			t.Run("zeroed enclave config is routed around and recovers", func(t *testing.T) {
 				if useLegacyEnclaves {
 					t.Skip("skipping: remote/legacy enclaves cannot be reconfigured by the test")

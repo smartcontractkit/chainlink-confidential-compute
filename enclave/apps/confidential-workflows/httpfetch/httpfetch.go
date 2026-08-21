@@ -124,9 +124,10 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request) (*httpcap.Resp
 
 	resp, err := f.client.Do(httpReq)
 	if err != nil {
-		// Timeout (504), host-unreachable (502), and SSRF-policy blocks (400) are
-		// caller-facing conditions returned as HTTP status responses rather than
-		// capability failures, matching the standalone confidential-http path.
+		// Caller-facing conditions (timeouts, unreachable hosts, SSRF-policy
+		// blocks) and faults at the upstream endpoint (refused/reset connections,
+		// TLS handshake failures) are returned as HTTP status responses rather
+		// than capability failures, matching the standalone confidential-http path.
 		if he := util.ClassifyOutboundHTTPError(err); he != nil {
 			return &httpcap.Response{
 				StatusCode: uint32(he.StatusCode), //nolint:gosec // status codes are always in-range
