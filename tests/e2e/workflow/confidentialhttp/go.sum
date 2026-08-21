@@ -30,8 +30,8 @@ github.com/smartcontractkit/cre-sdk-go v1.17.0-capdev.1 h1:8ts9cl7bOopbOALhXHMTg
 github.com/smartcontractkit/cre-sdk-go v1.17.0-capdev.1/go.mod h1:FDmcK/My08vBNWqpKUQGtSxVEmECzPye3tpGOzVxw/k=
 github.com/smartcontractkit/cre-sdk-go/capabilities/networking/confidentialhttp v0.0.0-20260330200534-964c8354b78b h1:LZTwIACflKde39aoLr/yPT3iEavhdPnaXpdd0wvCmJ8=
 github.com/smartcontractkit/cre-sdk-go/capabilities/networking/confidentialhttp v0.0.0-20260330200534-964c8354b78b/go.mod h1:KOn3NK4AbtvuMs2oKlNRxL2fACSuuGI114xPqO5igtQ=
-github.com/smartcontractkit/cre-sdk-go/capabilities/networking/http v1.3.0 h1:m0OkXuaLtIcYvBrLtxSfygrGtBJvPwaSoANe48434BA=
-github.com/smartcontractkit/cre-sdk-go/capabilities/networking/http v1.3.0/go.mod h1:QpLhMGMa//e4G9qMmmCK4NPMcadRBaWC2FDV9hniMrI=
+github.com/smartcontractkit/cre-sdk-go/capabilities/networking/http v1.3.1-0.20260504162314-fbfac1c36bec h1:kI0ztRukhdYHOjhuioOH3asJIDgB+4BZxXtMeIuW6q4=
+github.com/smartcontractkit/cre-sdk-go/capabilities/networking/http v1.3.1-0.20260504162314-fbfac1c36bec/go.mod h1:nMbi32+ChPiQQS4Rk/HEFeDZ3SFtY5YUPR9bgPoNZdI=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 golang.org/x/sys v0.40.0 h1:DBZZqJ2Rkml6QMQsZywtnjnnGvHza6BTfYFWY9kjEWQ=
