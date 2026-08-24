@@ -11,7 +11,8 @@ func TestAllowedAttribute(t *testing.T) {
 		"component", "enclave.id", "endpoint", "outcome", "status_code",
 		"capability_id", "method", "step_ref", "success", "error_type",
 		"num_signatures", "num_ciphertexts", "num_requests",
-		"max_concurrent", "metric_type", "workflow_id",
+		"max_concurrent", "metric_type",
+		"node.id", "workflow.id", "workflow.name", "workflow.owner", "org.id",
 	}
 	for _, k := range allowed {
 		assert.True(t, allowedAttribute(k), "expected %q to be allowed", k)
