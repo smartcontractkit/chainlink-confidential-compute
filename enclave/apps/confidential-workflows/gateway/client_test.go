@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -133,6 +134,16 @@ func TestSendRequest_RPCError(t *testing.T) {
 	}
 	if got := err.Error(); got != "JSON-RPC error -32600: invalid request" {
 		t.Errorf("error = %q, want JSON-RPC error message", got)
+	}
+	var rpcErr *RPCError
+	if !errors.As(err, &rpcErr) {
+		t.Fatalf("expected *RPCError, got %T", err)
+	}
+	if rpcErr.Code != jsonrpc2.ErrInvalidRequest {
+		t.Errorf("RPCError.Code = %d, want %d", rpcErr.Code, jsonrpc2.ErrInvalidRequest)
+	}
+	if rpcErr.Message != "invalid request" {
+		t.Errorf("RPCError.Message = %q, want %q", rpcErr.Message, "invalid request")
 	}
 }
 
