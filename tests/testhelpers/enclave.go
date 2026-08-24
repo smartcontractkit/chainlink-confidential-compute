@@ -264,70 +264,6 @@ func SetupLocalEnclaves(t *testing.T, config LocalEnclaveSetupConfig) *LocalEncl
 	return result
 }
 
-// RemoteEnclaveSetupConfig describes a set of already-deployed enclaves.
-type RemoteEnclaveSetupConfig struct {
-	// URLsCSV is a comma-separated list of enclave data-plane URLs.
-	URLsCSV string
-
-	// ConfigURLsCSV is a comma-separated list of config-plane URLs. When
-	// empty, URLsCSV is used for both planes.
-	ConfigURLsCSV string
-
-	// PCRMeasurementsJSON is the contents of a pcr_measurements.json file, in
-	// the format produced by `nitro-cli describe-eif`.
-	PCRMeasurementsJSON []byte
-
-	// EnclaveType is the enclave type recorded on each returned descriptor.
-	// If empty, it is derived from UseFakeEnclave.
-	EnclaveType types.EnclaveType
-
-	// Region is the AWS region recorded on each returned descriptor.
-	Region string
-}
-
-// ParseRemoteEnclaves parses enclave URLs and a PCR measurements JSON document
-// into Enclave descriptors and config URLs. This is the counterpart to
-// SetupLocalEnclaves for pre-deployed enclaves.
-func ParseRemoteEnclaves(config RemoteEnclaveSetupConfig) (enclaves []types.Enclave, configURLs []string, err error) {
-	var pcrMeasurements nitro.Measurements
-	if err := json.Unmarshal(config.PCRMeasurementsJSON, &pcrMeasurements); err != nil {
-		return nil, nil, fmt.Errorf("failed to unmarshal PCR measurements: %w", err)
-	}
-	mBytes, err := json.Marshal(pcrMeasurements.Measurements)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to re-marshal PCR measurements: %w", err)
-	}
-
-	if config.EnclaveType == "" {
-		config.EnclaveType = types.EnclaveTypeNitro
-		if UseFakeEnclave() {
-			config.EnclaveType = types.EnclaveTypeFake
-		}
-	}
-
-	urls := strings.Split(config.URLsCSV, ",")
-	cfgURLs := urls
-	if config.ConfigURLsCSV != "" {
-		cfgURLs = strings.Split(config.ConfigURLsCSV, ",")
-		if len(cfgURLs) != len(urls) {
-			return nil, nil, fmt.Errorf("enclave URLs (%d) and config URLs (%d) must have the same number of entries", len(urls), len(cfgURLs))
-		}
-	}
-
-	for i, u := range urls {
-		enclaves = append(enclaves, types.Enclave{
-			EnclaveType:      config.EnclaveType,
-			EnclaveExtraData: []byte{},
-			EnclaveID:        [32]byte{uint8(i + 1)},
-			TrustedValues:    [][]byte{mBytes},
-			EnclaveURL:       strings.TrimSpace(u),
-			Region:           config.Region,
-		})
-		configURLs = append(configURLs, strings.TrimSpace(cfgURLs[i]))
-	}
-	return enclaves, configURLs, nil
-}
-
 // ---------------------------------------------------------------------------
 // Low-level helpers
 // ---------------------------------------------------------------------------
@@ -351,6 +287,15 @@ func UseFakeEnclave() bool {
 		}
 	}
 	return false
+}
+
+// UseLegacyEnclaves reports whether the e2e should provision a legacy release
+// enclave (checked out at LEGACY_ENCLAVE_REPO_ROOT) instead of the current
+// tree. Legacy enclaves boot with a misaligned signer set to exercise the
+// executor's boot-time reconcile, and skip the sub-tests for behaviors the
+// legacy app lacks.
+func UseLegacyEnclaves() bool {
+	return os.Getenv("LEGACY_ENCLAVE_REPO_ROOT") != ""
 }
 
 // Match the CID so sibling enclave processes are not mistaken for leaks.

@@ -234,7 +234,7 @@ make clean-e2e-nitro
 - **Pull requests** run the full module test suite — including `tests/` and `tests/e2e` — against **fake enclaves** on GitHub-hosted runners. The three heavy CRE images (chainlink, job-distributor, chip-router/ingress/config) are built once and cached in GHCR, keyed on their pinned refs.
 - **Nightly** (scheduled) and **release-branch pushes** re-run `tests/` and `tests/e2e` against **real Nitro enclaves** on self-hosted runners, catching hardware/attestation regressions the fake environment can't.
 - The **`e2e-real-enclaves`** label adds a real Nitro e2e + integration run on top of the usual fake-enclave suite. Re-applying the label triggers a fresh run.
-- A **backwards-compatibility** variant runs the suite with prior-release capability binaries, and a **legacy-enclaves** variant runs the e2e against deployed staging enclaves over Tailscale.
+- A **backwards-compatibility** variant runs the suite with prior-release capability binaries, and a **legacy-enclaves** variant checks out a prior release and runs its enclave app locally as a fake enclave to exercise protocol compatibility.
 
 ## Verifying Enclave Images
 
