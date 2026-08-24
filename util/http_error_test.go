@@ -27,6 +27,13 @@ func wrap(err error) error {
 	return &url.Error{Op: "Get", URL: "https://upstream.example.com/v1", Err: err}
 }
 
+// peerAlert builds the error crypto/tls produces on receiving a fatal alert from
+// the peer. crypto/tls uses an unexported alert type, but it renders identically
+// to tls.AlertError of the same code, which is what the classifier matches on.
+func peerAlert(code uint8) error {
+	return &net.OpError{Op: "remote error", Err: tls.AlertError(code)}
+}
+
 func TestClassifyOutboundHTTPError(t *testing.T) {
 	tests := map[string]struct {
 		err            error
@@ -85,16 +92,63 @@ func TestClassifyOutboundHTTPError(t *testing.T) {
 			wantBodySubstr: "closed the connection",
 		},
 		// crypto/tls reports a fatal alert from the peer as a *net.OpError with
-		// Op "remote error"; the wrapped alert type is unexported.
+		// Op "remote error"; the wrapped alert type is unexported but renders
+		// identically to the exported tls.AlertError of the same code.
 		"peer rejected handshake": {
-			err:            wrap(&net.OpError{Op: "remote error", Err: errors.New("tls: handshake failure")}),
+			err:            wrap(peerAlert(40)), // handshake_failure
 			wantStatus:     http.StatusBadGateway,
 			wantBodySubstr: "upstream rejected the TLS handshake: tls: handshake failure",
 		},
-		"peer sent unrecognized name alert": {
-			err:            wrap(&net.OpError{Op: "remote error", Err: errors.New("tls: unrecognized name")}),
+		"peer refused the TLS version": {
+			err:            wrap(peerAlert(70)), // protocol_version
+			wantStatus:     http.StatusBadGateway,
+			wantBodySubstr: "upstream rejected the TLS handshake: tls: protocol version not supported",
+		},
+		"peer ciphers below its security floor": {
+			err:            wrap(peerAlert(71)), // insufficient_security
+			wantStatus:     http.StatusBadGateway,
+			wantBodySubstr: "upstream rejected the TLS handshake: tls: insufficient security level",
+		},
+		"peer does not serve the requested SNI": {
+			err:            wrap(peerAlert(112)), // unrecognized_name
 			wantStatus:     http.StatusBadGateway,
 			wantBodySubstr: "upstream rejected the TLS handshake: tls: unrecognized name",
+		},
+		"peer demands a client certificate": {
+			err:            wrap(peerAlert(116)), // certificate_required
+			wantStatus:     http.StatusBadGateway,
+			wantBodySubstr: "upstream rejected the TLS handshake: tls: certificate required",
+		},
+		"peer found no shared ALPN protocol": {
+			err:            wrap(peerAlert(120)), // no_application_protocol
+			wantStatus:     http.StatusBadGateway,
+			wantBodySubstr: "upstream rejected the TLS handshake: tls: no application protocol",
+		},
+		// Integrity alerts can arrive after the handshake and can indicate
+		// tampering, so they must not be softened into a gateway status.
+		"bad record MAC stays a hard error": {
+			err: wrap(peerAlert(20)), // bad_record_mac
+		},
+		"record overflow stays a hard error": {
+			err: wrap(peerAlert(22)), // record_overflow
+		},
+		"decrypt error stays a hard error": {
+			err: wrap(peerAlert(51)), // decrypt_error
+		},
+		// Ambiguous alerts do not pin the fault on the upstream.
+		"illegal parameter stays a hard error": {
+			err: wrap(peerAlert(47)), // illegal_parameter
+		},
+		"peer internal error stays a hard error": {
+			err: wrap(peerAlert(80)), // internal_error
+		},
+		"peer certificate alert stays a hard error": {
+			err: wrap(peerAlert(48)), // unknown_ca
+		},
+		// A local record-layer fault is corruption in the stream, not an upstream
+		// negotiation refusal.
+		"local decode error stays a hard error": {
+			err: wrap(&net.OpError{Op: "local error", Err: tls.AlertError(50)}),
 		},
 		// Certificate failures stay hard errors: an untrusted or mismatched
 		// chain may indicate interception, so it is not softened to a status.
@@ -163,6 +217,10 @@ func TestClassifyOutboundHTTPErrorRealTLSFailures(t *testing.T) {
 			serve:          writeThenClose([]byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 40}),
 			wantBodySubstr: "upstream rejected the TLS handshake: tls: handshake failure",
 		},
+		"peer sends fatal protocol_version alert": {
+			serve:          writeThenClose([]byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 70}),
+			wantBodySubstr: "upstream rejected the TLS handshake: tls: protocol version not supported",
+		},
 		"peer is not speaking TLS": {
 			serve:          writeThenClose([]byte("definitely not a TLS record\r\n\r\n")),
 			wantBodySubstr: "did not speak TLS",
@@ -222,6 +280,45 @@ func writeThenClose(payload []byte) func(net.Conn) {
 		_, _ = conn.Read(make([]byte, 1024))
 		_, _ = conn.Write(payload)
 	}
+}
+
+// TestClassifyOutboundHTTPErrorRealNonRejectionAlerts pins the narrowing: fatal
+// alerts that are not a negotiation refusal stay hard failures even though
+// crypto/tls reports them through the same *net.OpError as a rejection. An
+// integrity alert can signal tampering, and crypto/tls surfaces it the same way
+// whether it arrives during or after the handshake, so it must not become a 502.
+func TestClassifyOutboundHTTPErrorRealNonRejectionAlerts(t *testing.T) {
+	alerts := map[string]byte{
+		"bad_record_mac":    20,
+		"record_overflow":   22,
+		"illegal_parameter": 47,
+		"unknown_ca":        48,
+		"decrypt_error":     51,
+		"internal_error":    80,
+	}
+	for name, code := range alerts {
+		t.Run(name, func(t *testing.T) {
+			addr := serveRaw(t, writeThenClose([]byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, code}))
+			_, err := NewUnrestrictedClient().Get("https://" + addr)
+			require.Error(t, err)
+			assert.Nil(t, ClassifyOutboundHTTPError(err), "alert %d must stay a hard failure", code)
+		})
+	}
+}
+
+// TestClassifyOutboundHTTPErrorRealLocalRecordFault pins that a corrupt record
+// from the upstream ("local error: tls: error decoding message") stays a hard
+// failure rather than being reported as a handshake rejection.
+func TestClassifyOutboundHTTPErrorRealLocalRecordFault(t *testing.T) {
+	// A handshake record announcing a ServerHello with an invalid body.
+	addr := serveRaw(t, writeThenClose([]byte{0x16, 0x03, 0x03, 0x00, 0x04, 0x02, 0x00, 0x00, 0x00}))
+	_, err := NewUnrestrictedClient().Get("https://" + addr)
+	require.Error(t, err)
+
+	var opErr *net.OpError
+	require.True(t, errors.As(err, &opErr), "expected a *net.OpError, got %v", err)
+	require.Equal(t, "local error", opErr.Op)
+	assert.Nil(t, ClassifyOutboundHTTPError(err))
 }
 
 func TestClassifyOutboundProxyPolicyError(t *testing.T) {
