@@ -1078,6 +1078,52 @@ func TestHTTPEnclaveApp_Execute_SSRFBlockedReturns400(t *testing.T) {
 	assert.Equal(t, "upstream request blocked by enclave network policy", string(response.Body))
 }
 
+func TestHTTPEnclaveApp_Execute_TLSHandshakeRejectedReturns502(t *testing.T) {
+	// A listener that answers every ClientHello with a fatal handshake_failure
+	// alert, i.e. an upstream refusing to negotiate. The fault is at the
+	// upstream, so the app returns a 502 response instead of an error.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+	go func() {
+		for {
+			conn, aErr := listener.Accept()
+			if aErr != nil {
+				return
+			}
+			_, _ = conn.Read(make([]byte, 1024))
+			// TLS record: alert(21), version 3.3, length 2, level fatal(2),
+			// description handshake_failure(40).
+			_, _ = conn.Write([]byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 40})
+			_ = conn.Close()
+		}
+	}()
+
+	// Loopback-reaching client so the failure comes from the handshake, not the
+	// SSRF policy blocking 127.0.0.1.
+	app := &httpEnclaveApp{httpClient: util.NewUnrestrictedClient()}
+
+	request := enclavetypes.Request{
+		Method: http.MethodGet,
+		Url:    "https://" + listener.Addr().String(),
+	}
+
+	inputDataBytes, err := proto.Marshal(&request)
+	require.NoError(t, err)
+
+	var requestID [32]byte
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, &testEmitter{})
+
+	require.Nil(t, execError)
+	require.NotNil(t, output)
+
+	var response enclavetypes.Response
+	err = proto.Unmarshal(output, &response)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(http.StatusBadGateway), response.StatusCode)
+	assert.Contains(t, string(response.Body), "upstream rejected the TLS handshake")
+}
+
 func TestHTTPEnclaveApp_Execute_TimeoutNotReached(t *testing.T) {
 	// Create a mock HTTP client that responds quickly
 	fastClient := httpsmocks.NewMockHTTPClientWithCustomResponse(func(req *http.Request) (*http.Response, error) {
