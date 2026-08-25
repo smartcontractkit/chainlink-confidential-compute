@@ -417,7 +417,7 @@ func startFakeStorageService(t *testing.T, enclaveHost string) (string, *fakeSto
 
 func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, buildLocalBinaries func() error) {
 	t.Helper()
-	if os.Getenv("REMOTE_ENCLAVE_URLS") != "" {
+	if os.Getenv("REMOTE_ENCLAVE_URLS") != "" || tests.UseLegacyEnclaves() {
 		t.Skip("engine test does not run against remote/legacy enclaves")
 	}
 	if os.Getenv("PRIOR_VERSION_BINARY_PATHS") != "" {
@@ -905,7 +905,7 @@ func deployConfidentialWorkflowForEngine(
 		0, // donID unused for v2
 		testEnv.Dons.MustWorkflowDON().DonFamily,
 		"engine-test-confidential",
-		"", // workflowTag
+		"some-tag", // workflowTag
 		binaryURL,
 		configURLPtr,
 		nil, // no secrets URL
