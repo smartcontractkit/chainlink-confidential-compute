@@ -38,11 +38,61 @@ func NewMetricsEmitter(name string, lggr logger.Logger) *MetricsEmitter {
 	return m
 }
 
+// allowedMetricAttributes is the set of detail keys promoted to OTel attributes.
+// Only low-cardinality keys (bounded enums, small ints, categorical flags, fixed
+// host tags) are allowed; everything else is dropped to prevent Prometheus series
+// explosion from per-request or workflow-author-controlled values (request_id,
+// message, free-text error strings, execution_id, user_metric name/value/labels).
+// ScopedEmitter defaults merge into details before Emit, so every key the executor
+// puts in its scoped defaults must be listed here or the labels are silently dropped.
+var allowedMetricAttributes = map[string]struct{}{
+	"component":       {},
+	"enclave.id":      {},
+	"endpoint":        {},
+	"outcome":         {},
+	"status_code":     {},
+	"capability_id":   {},
+	"method":          {},
+	"step_ref":        {},
+	"success":         {},
+	"error_type":      {},
+	"num_signatures":  {},
+	"num_ciphertexts": {},
+	"num_requests":    {},
+	"max_concurrent":  {},
+	"metric_type":     {},
+	"node.id":         {},
+	"workflow.id":     {},
+	"workflow.name":   {},
+	"workflow.owner":  {},
+	"org.id":          {},
+}
+
+// allowedAttribute returns true if k is a low-cardinality key that may become an
+// OTel attribute. Extracted from Emit so the filter is unit-testable without an
+// OTel meter.
+func allowedAttribute(k string) bool {
+	_, ok := allowedMetricAttributes[k]
+	return ok
+}
+
+// droppedMetricEvents are events whose entire payload is high-cardinality and
+// therefore must never become an OTel metric. "request_id" carries only the
+// per-request ID, which would mint one series per request.
+var droppedMetricEvents = map[string]struct{}{
+	"request_id": {},
+}
+
 // Emit implements types.Emitter. It converts the event and details into OTel metrics.
 // - If details contains "duration_seconds" (float64), it records a histogram with that value.
 // - Otherwise, it increments a counter by 1.
-// - String and numeric values in details are converted to OTel attributes.
+// - Events in droppedMetricEvents are skipped entirely.
+// - Only allowlisted, low-cardinality detail keys become OTel attributes; all
+//   other keys are dropped to bound the number of distinct time series.
 func (m *MetricsEmitter) Emit(event string, details map[string]any) {
+	if _, drop := droppedMetricEvents[event]; drop {
+		return
+	}
 	ctx := context.Background()
 
 	var attrs []attribute.KeyValue
@@ -55,6 +105,9 @@ func (m *MetricsEmitter) Emit(event string, details map[string]any) {
 				durationSeconds = d
 				hasDuration = true
 			}
+			continue
+		}
+		if !allowedAttribute(k) {
 			continue
 		}
 		switch val := v.(type) {

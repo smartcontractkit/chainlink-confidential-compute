@@ -169,6 +169,55 @@ func getConfidentialHTTPSSRFBlockedInput(secretNames []string, owner string) (js
 	return b, nil
 }
 
+// tlsHandshakeRejectingURL offers only RC4 cipher suites, which Go's TLS client
+// does not support, so the server answers the ClientHello with a fatal
+// handshake_failure alert. That reproduces an upstream rejecting the handshake
+// without a purpose-built server, which the restricted client's SSRF policy
+// would refuse to reach on loopback anyway.
+const tlsHandshakeRejectingURL = "https://rc4.badssl.com/"
+
+// getConfidentialHTTPTLSHandshakeFailureInput builds a trigger input that targets
+// an endpoint which rejects the TLS handshake, to exercise the enclave app's
+// handshake-failure handling. The fault is at the upstream, not in the enclave,
+// so the app converts it to a 502 instead of a generic 500.
+func getConfidentialHTTPTLSHandshakeFailureInput(secretNames []string, owner string) (json.RawMessage, error) {
+	input := TriggerInput{
+		URL:    tlsHandshakeRejectingURL,
+		Method: "GET",
+		VaultSecrets: []VaultSecretRef{{
+			Key:   secretNames[0],
+			Owner: owner,
+		}},
+	}
+	b, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal TLS handshake failure input: %w", err)
+	}
+	return b, nil
+}
+
+// validateTLSHandshakeFailureResponse checks that the recipient received a 502
+// response naming the upstream's handshake rejection.
+func validateTLSHandshakeFailureResponse(logger zerolog.Logger, bodies [][]byte) error {
+	if len(bodies) == 0 {
+		return fmt.Errorf("expected at least 1 recipient request for TLS handshake failure, got 0")
+	}
+	for i, body := range bodies {
+		var output ResponseOutput
+		if err := json.Unmarshal(body, &output); err != nil {
+			return fmt.Errorf("response %d: failed to unmarshal: %w", i, err)
+		}
+		if output.StatusCode != 502 {
+			return fmt.Errorf("response %d: expected statusCode 502, got %d (body: %s)", i, output.StatusCode, output.Body)
+		}
+		if !strings.Contains(output.Body, "upstream rejected the TLS handshake") {
+			return fmt.Errorf("response %d: expected body to contain 'upstream rejected the TLS handshake', got: %s", i, output.Body)
+		}
+		logger.Info().Msgf("TLS handshake failure response %d: statusCode=%d, body=%s", i, output.StatusCode, output.Body)
+	}
+	return nil
+}
+
 // validateSSRFBlockedResponse checks that the recipient received a 400 response
 // with the sanitized network-policy message from the enclave.
 func validateSSRFBlockedResponse(logger zerolog.Logger, bodies [][]byte) error {

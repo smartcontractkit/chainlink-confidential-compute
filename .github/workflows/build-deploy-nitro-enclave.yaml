@@ -365,6 +365,18 @@ jobs:
           path: /tmp/${{ matrix.app.name }}-plugin-insecure-image-${{ matrix.arch }}.tar
           retention-days: 1
 
+      # Secure (pcr_measurements.json) and insecure (pcr_measurements_insecure.json)
+      # measurements, published as release assets by the publish-measurements job so
+      # go-tests can fetch them by tag instead of scraping build logs.
+      - name: Upload PCR measurements
+        uses: actions/upload-artifact@v4
+        with:
+          name: pcr-measurements-${{ matrix.app.name }}-${{ matrix.arch }}
+          path: |
+            pcr_measurements.json
+            pcr_measurements_insecure.json
+          retention-days: 7
+
   push-images:
     needs: build-enclave-and-plugin
     strategy:
@@ -493,3 +505,62 @@ jobs:
         run: |
           echo "### Docker Images Pushed (${{ matrix.app.name }})" >> $GITHUB_STEP_SUMMARY
           echo "Images pushed to all accounts as multi-arch manifests (linux/amd64, linux/arm64)." >> $GITHUB_STEP_SUMMARY
+
+  # Publish secure + insecure PCR measurements (all arch/app legs) as release
+  # assets, so go-tests can fetch them by tag instead of scraping build-run logs.
+  # Only release-branch pushes cut a release with a tag pointing at this commit;
+  # PR builds skip this job.
+  publish-measurements:
+    needs: build-enclave-and-plugin
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download all measurement artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pcr-measurements-*
+          path: measurements
+
+      - name: Rename and upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Find the release tag whose tag points at this commit. Releases are
+          # cut by pushing release/** + creating the tag together, so the tag
+          # exists by the time this build runs; matching by SHA is robust to
+          # target_commitish being either main or release/x.
+          TAG=$(gh api "repos/${{ github.repository }}/tags?per_page=100" \
+            --jq '.[] | select(.commit.sha=="${{ github.sha }}") | .name' | head -1)
+          if [ -z "$TAG" ]; then
+            echo "No tag points at ${{ github.sha }}; skipping release upload."
+            exit 0
+          fi
+          echo "Uploading measurements to release $TAG"
+
+          cd measurements
+          assets=()
+          for d in pcr-measurements-*/; do
+            # dir name: pcr-measurements-<app>-<arch>/
+            base="${d#pcr-measurements-}"; base="${base%/}"
+            if [ -f "$d/pcr_measurements.json" ]; then
+              cp "$d/pcr_measurements.json" "../${base}-secure.json"
+              assets+=("${base}-secure.json")
+            fi
+            if [ -f "$d/pcr_measurements_insecure.json" ]; then
+              cp "$d/pcr_measurements_insecure.json" "../${base}-insecure.json"
+              assets+=("${base}-insecure.json")
+            fi
+          done
+          cd ..
+
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::No measurement files found in pcr-measurements-* artifacts"
+            exit 1
+          fi
+
+          gh release upload "$TAG" "${assets[@]}" --clobber --repo "${{ github.repository }}"
+          echo "Uploaded ${#assets[@]} measurement assets to release $TAG:" "${assets[@]}"
