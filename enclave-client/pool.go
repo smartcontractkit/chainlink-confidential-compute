@@ -337,6 +337,10 @@ func (c *enclavePool) ExecuteBatch(ctx context.Context, reqs []types.SignedCompu
 				return fmt.Errorf("could not set auth header for enclave %s %w", enclave.EnclaveID, err)
 			}
 
+			// Consistent-hash routing key so an edge LB routes all DON nodes'
+			// calls for this workflow execution to the same pod.
+			httpReq.Header.Set(types.RoutingHeader, hex.EncodeToString(req.RequestID[:]))
+
 			c.applySession(req.EnclaveEphemeralPublicKey, httpReq)
 
 			resp, err := c.httpClient.Do(httpReq)
@@ -785,6 +789,12 @@ func (c *enclavePool) getSingleEnclavePublicKey(ctx context.Context, enclave typ
 	err = util.SetAuthHeader(enclave, httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("could not set auth header for enclave %s %w", enclave.EnclaveID, err)
+	}
+
+	// Consistent-hash routing key matching the /requests call so both legs of
+	// one workflow execution land on the same pod behind an edge LB.
+	if requestID != ([32]byte{}) {
+		httpReq.Header.Set(types.RoutingHeader, hex.EncodeToString(requestID[:]))
 	}
 
 	resp, err := c.httpClient.Do(httpReq)
