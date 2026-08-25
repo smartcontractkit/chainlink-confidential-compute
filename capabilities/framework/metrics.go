@@ -42,9 +42,9 @@ func NewMetricsEmitter(name string, lggr logger.Logger) *MetricsEmitter {
 // Only low-cardinality keys (bounded enums, small ints, categorical flags, fixed
 // host tags) are allowed; everything else is dropped to prevent Prometheus series
 // explosion from per-request or workflow-author-controlled values (request_id,
-// message, free-text error strings, workflow_id/execution_id, user_metric name/
-// value/labels). ScopedEmitter defaults ("component", "enclave.id") merge into
-// details before Emit, so they must be allowed here to keep enclave tagging.
+// message, free-text error strings, execution_id, user_metric name/value/labels).
+// ScopedEmitter defaults merge into details before Emit, so every key the executor
+// puts in its scoped defaults must be listed here or the labels are silently dropped.
 var allowedMetricAttributes = map[string]struct{}{
 	"component":       {},
 	"enclave.id":      {},
@@ -61,7 +61,11 @@ var allowedMetricAttributes = map[string]struct{}{
 	"num_requests":    {},
 	"max_concurrent":  {},
 	"metric_type":     {},
-	"workflow_id":     {},
+	"node.id":         {},
+	"workflow.id":     {},
+	"workflow.name":   {},
+	"workflow.owner":  {},
+	"org.id":          {},
 }
 
 // allowedAttribute returns true if k is a low-cardinality key that may become an
