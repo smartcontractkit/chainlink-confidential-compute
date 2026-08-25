@@ -548,11 +548,11 @@ jobs:
             base="${d#pcr-measurements-}"; base="${base%/}"
             if [ -f "$d/pcr_measurements.json" ]; then
               cp "$d/pcr_measurements.json" "../${base}-secure.json"
-              assets+=("../${base}-secure.json")
+              assets+=("${base}-secure.json")
             fi
             if [ -f "$d/pcr_measurements_insecure.json" ]; then
               cp "$d/pcr_measurements_insecure.json" "../${base}-insecure.json"
-              assets+=("../${base}-insecure.json")
+              assets+=("${base}-insecure.json")
             fi
           done
           cd ..
