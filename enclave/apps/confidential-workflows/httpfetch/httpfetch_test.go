@@ -10,6 +10,7 @@ import (
 	"time"
 
 	httpcap "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -80,4 +81,42 @@ func TestDefaultPolicy_RejectsHTTPLoopback(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, uint32(http.StatusBadRequest), resp.StatusCode)
+}
+
+func TestFetch_UpstreamRejectsTLSHandshakeReturns502(t *testing.T) {
+	// A fatal alert from the peer is an upstream fault, so it surfaces as a 502
+	// response rather than a capability failure. The unrestricted client is
+	// needed because the shipping one refuses loopback.
+	addr := serveFatalTLSAlert(t)
+	f := NewFetcherWithClient(DefaultPolicy(), util.NewUnrestrictedClient())
+
+	resp, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://" + addr, Method: "GET"})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, uint32(http.StatusBadGateway), resp.StatusCode)
+	assert.Contains(t, string(resp.Body), "upstream rejected the TLS handshake")
+}
+
+// serveFatalTLSAlert starts a listener that answers every ClientHello with a
+// fatal handshake_failure alert, and returns its address.
+func serveFatalTLSAlert(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = conn.Read(make([]byte, 1024))
+			// TLS record: alert(21), version 3.3, length 2, level fatal(2),
+			// description handshake_failure(40).
+			_, _ = conn.Write([]byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 40})
+			_ = conn.Close()
+		}
+	}()
+	return listener.Addr().String()
 }

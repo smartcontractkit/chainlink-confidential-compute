@@ -299,9 +299,10 @@ func (a *httpEnclaveApp) executeHTTPRequest(request *enclavetypes.Request, templ
 
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
-		// Timeout (504), host-unreachable (502), and SSRF-policy blocks (400) are
-		// caller-facing conditions returned as HTTP status responses rather than
-		// enclave failures. See util.ClassifyOutboundHTTPError.
+		// Caller-facing conditions (timeouts, unreachable hosts, SSRF-policy
+		// blocks) and faults at the upstream endpoint (refused/reset connections,
+		// TLS handshake failures) are returned as HTTP status responses rather
+		// than enclave failures. See util.ClassifyOutboundHTTPError.
 		if he := util.ClassifyOutboundHTTPError(err); he != nil {
 			return enclavetypes.Response{
 				StatusCode: uint32(he.StatusCode),
