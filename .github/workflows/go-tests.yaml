@@ -22,7 +22,7 @@ on:
     - cron: '0 7 * * *'
 env:
   CHAINLINK_COMMIT_SHA: 6837c88a297f18ee4e36919c8ebf5bf22ff83406
-  LEGACY_COMMIT_SHA: 7d70fcf65d8b5af102d8267b54d31ea163dea203 # initial commit, the commit pointing to whatever is capability gitref is deployed in Chainlink's plugins.private.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.private.yaml#L50.
+  LEGACY_COMMIT_SHA: ae83249b877468e08d71e3da538661ff58fca79b # release/1.4.0 tip, matching the capability gitRef deployed in Chainlink's plugins.public.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.public.yaml#L121.
   LEGACY_ENCLAVE_RELEASE: v1.3.0 # The release tag whose enclave app the legacy-enclaves leg checks out and runs locally as a fake enclave. Update this when the deployed production enclave release changes.
   # Pinned refs for the supporting CRE Docker images, used as GHCR cache keys.
   JD_VERSION: 0.22.1 # job-distributor release (checked out as v${JD_VERSION})
