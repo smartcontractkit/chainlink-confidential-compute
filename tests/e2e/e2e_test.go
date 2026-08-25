@@ -468,7 +468,9 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 	}
 
 	for _, app := range apps {
-		// Skip building if using a prior version binary
+		// Skip building if using a prior version binary (backwards-compat leg).
+		// The legacy-enclave leg still builds the current capability binary: it
+		// tests that the current client/capability can talk to an old enclave.
 		if priorPath, usePrior := priorVersionPaths[app.Name]; usePrior {
 			testLogger.Info().Msgf("Skipping build for %s, using prior version from: %s", app.Name, priorPath)
 			continue
@@ -502,25 +504,20 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			var enclaves []types.Enclave
 			var configURLs []string
 			var enclaveCleanups []func()
-			if os.Getenv("REMOTE_ENCLAVE_URLS") != "" && os.Getenv("PCR_MEASUREMENTS_FILE") != "" {
-				mBytes, err := os.ReadFile(os.Getenv("PCR_MEASUREMENTS_FILE"))
-				require.NoError(t, err, "failed to read PCR measurements file")
-
-				enclaves, configURLs, err = testhelpers.ParseRemoteEnclaves(testhelpers.RemoteEnclaveSetupConfig{
-					URLsCSV:             os.Getenv("REMOTE_ENCLAVE_URLS"),
-					ConfigURLsCSV:       os.Getenv("REMOTE_ENCLAVE_CONFIG_URLS"),
-					PCRMeasurementsJSON: mBytes,
-					EnclaveType:         enclaveType,
-					Region:              enclaveRegion,
-				})
-				require.NoError(t, err, "failed to parse remote enclaves")
-				for i, enclave := range enclaves {
-					testLogger.Info().Msgf("Added remote enclave %d: %s (config: %s)", i, enclave.EnclaveURL, configURLs[i])
-				}
-			} else {
+			// Legacy-enclave runs provision a local fake enclave sourced from a
+			// prior release checkout (LEGACY_ENCLAVE_REPO_ROOT) instead of the
+			// current tree, exercising protocol compatibility against the older
+			// enclave app. The capability binary stays the current one — this leg
+			// tests that the current client/capability can talk to an old enclave.
+			useLegacyEnclaves := tests.UseLegacyEnclaves()
+			{
 				testLogger.Info().Msgf("Starting local enclave for app: %s", app.Name)
 				rootDir, err := util.GetRepoRoot()
 				require.NoError(t, err)
+				if useLegacyEnclaves {
+					rootDir = os.Getenv("LEGACY_ENCLAVE_REPO_ROOT")
+					require.NotEmpty(t, rootDir, "LEGACY_ENCLAVE_REPO_ROOT must be set for legacy-enclave runs")
+				}
 
 				cfg := testhelpers.DefaultLocalEnclaveSetupConfig(rootDir, app.Name)
 				cfg.EnclaveType = enclaveType
@@ -529,7 +526,8 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				if !tests.UseFakeEnclave() {
 					cfg.EnclaveCount = 1
 				}
-				// Check if we should use a prior version binary
+				// Use a prior-version capability binary when one is supplied
+				// (backwards-compat leg only).
 				if priorPath, usePrior := priorVersionPaths[app.Name]; usePrior {
 					testLogger.Info().Msgf("Using prior version binary from: %s", priorPath)
 					cfg.BinaryPath = priorPath
@@ -653,7 +651,6 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			// These exercise the enclave app's error-to-response conversion
 			// for DNS failures and upstream timeouts. Results are POSTed to
 			// the same recipient server (workflow config is fixed at deploy time).
-			useLegacyEnclaves := os.Getenv("REMOTE_ENCLAVE_URLS") != "" && os.Getenv("PCR_MEASUREMENTS_FILE") != ""
 
 			// Rotate a node out of the DON and back in, asserting the executor
 			// reconfigures every enclave's signer set to follow DON membership and
@@ -914,7 +911,9 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			})
 
 			// Test enclave failover: take down the first enclave and verify requests still succeed.
-			if len(enclaveCleanups) > 1 {
+			// Skipped for legacy enclaves — the reconfig sub-tests that precede it are skipped,
+			// and failover against a fake legacy enclave pool isn't a meaningful compat check.
+			if len(enclaveCleanups) > 1 && !useLegacyEnclaves {
 				testLogger.Info().Msgf("Taking down first enclave to test failover...")
 				enclaveCleanups[0]()
 				enclaveCleanups = enclaveCleanups[1:]
@@ -1075,10 +1074,10 @@ func mustInitializeCapabilitySetup(
 	testLogger.Info().Msgf("Storing secret in Vault...")
 	mustStoreEnclaveSecrets(t, gatewayURL, vaultPublicKey, secretNames, secretValues, secretOwner, func() *bind.TransactOpts { return sethClient.NewTXOpts() }, wfRegistryContract)
 
-	// Legacy/remote enclaves boot with a deliberately misaligned signer set so
-	// they exercise the boot-then-set-config auto-update path; local enclaves
-	// boot aligned so the other sub-tests run against a settled config.
-	useLegacyEnclaves := os.Getenv("REMOTE_ENCLAVE_URLS") != "" && os.Getenv("PCR_MEASUREMENTS_FILE") != ""
+	// Legacy enclaves boot with a deliberately misaligned signer set so they
+	// exercise the boot-then-set-config auto-update path; current-tree local
+	// enclaves boot aligned so the other sub-tests run against a settled config.
+	useLegacyEnclaves := testhelpers.UseLegacyEnclaves()
 	testLogger.Info().Msgf("Configuring enclaves...")
 	for i := range configURLs {
 		// workflow-don.toml is a 4-node DON with F=1. Pass don.F here;

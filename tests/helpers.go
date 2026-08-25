@@ -515,6 +515,12 @@ func UseFakeEnclave() bool {
 	return testhelpers.UseFakeEnclave()
 }
 
+// UseLegacyEnclaves reports whether the e2e should provision a legacy release
+// enclave instead of the current tree. Delegates to testhelpers.UseLegacyEnclaves.
+func UseLegacyEnclaves() bool {
+	return testhelpers.UseLegacyEnclaves()
+}
+
 // MustSetupEnclave starts a single local enclave and returns a cleanup function.
 // Delegates to testhelpers.MustSetupEnclave.
 func MustSetupEnclave(t *testing.T, rootDir string, enclaveCID string, httpPort string, configHttpPort string, app string, enclaveName string, isFirstEnclave bool) func() {
