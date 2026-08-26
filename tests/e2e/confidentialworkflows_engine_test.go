@@ -673,13 +673,21 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// 85MB across both enclaves. Flag if we start consuming substantially more.
 	require.Less(t, memAfter, uint64(100), "total enclave memory should stay under 100MB; a large jump may indicate a leak or regression")
 
-	// 9. Missing-secret → user-error classification. Deploy a second workflow
-	//    whose config requests a secret ("MISSING_SECRET") that was never uploaded
-	//    to the vault. The relay DON maps the vault's "key does not exist" to a
+	// 9. Missing-secret → user-error classification. Deploy a workflow whose
+	//    config requests a secret ("MISSING_SECRET") that was never uploaded to
+	//    the vault. The relay DON maps the vault's "key does not exist" to a
 	//    JSON-RPC ErrInvalidParams (a user error) once the relay-node fix ships;
-	//    the enclave surfaces the cause in the engine's "Workflow execution failed"
-	//    log. This sub-case reuses the already-running CRE env and the same WASM
-	//    binary (the secret name is config-driven via the SecretID field).
+	//    the enclave surfaces the cause in the engine's "Workflow execution
+	//    failed" log. This sub-case reuses the already-running CRE env and the
+	//    same WASM binary (the secret name is config-driven via the SecretID
+	//    field).
+	//
+	//    The happy-path workflow is torn down first: running two concurrent
+	//    confidential workflows in one enclave starves the second workflow's
+	//    gateway/relay dispatch (its GetSecrets calls hit outbound-proxy
+	//    resets and never reach the relay), so its executions never produce an
+	//    engine failure log. Deleting the first workflow and briefly letting
+	//    the engine wind it down leaves the enclave servicing a single workflow.
 	//
 	//    NOTE: this asserts the post-fix behavior (error message contains
 	//    "key does not exist"). Against a chainlink version predating the
@@ -687,6 +695,10 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	//    with an "internal error" code, so this assertion is the gate that
 	//    confirms the fix is live. Bump tests/go.mod to the chainlink commit
 	//    carrying the fix before expecting this to pass.
+	deleteConfidentialWorkflowForEngine(t, testEnv, testLogger, "engine-test-confidential")
+	// Give the engine a beat to stop triggering the deleted workflow before the
+	// next one starts, so the two never overlap on the enclave's gateway path.
+	time.Sleep(15 * time.Second)
 	missingSecretConfigURL := configURL[:len(configURL)-len(engineTestConfigFilename)] + engineTestMissingSecretConfigFilename
 	missingSecretWorkflowID := deployConfidentialWorkflowForEngineWithID(t, testEnv, testLogger, wasmURL, missingSecretConfigURL, "engine-test-missing-secret")
 	failureLine := waitForWorkflowExecutionFailure(t, testEnv, testLogger, missingSecretWorkflowID, "key does not exist", 5*time.Minute)
@@ -1022,4 +1034,37 @@ func deployConfidentialWorkflowForEngineWithID(
 	})
 
 	return workflowID
+}
+
+// deleteConfidentialWorkflowForEngine removes a workflow from the on-chain
+// registry so the engine stops triggering it. Used to tear down the happy-path
+// workflow before the missing-secret sub-case deploys its own, so the enclave
+// only services one workflow at a time.
+func deleteConfidentialWorkflowForEngine(
+	t *testing.T,
+	testEnv *ttypes.TestEnvironment,
+	testLogger zerolog.Logger,
+	workflowName string,
+) {
+	t.Helper()
+
+	require.IsType(t, &evm.Blockchain{}, testEnv.CreEnvironment.Blockchains[0])
+	sethClient := testEnv.CreEnvironment.Blockchains[0].(*evm.Blockchain).SethClient
+
+	wfRegistryRef := crecontracts.MustGetAddressRefFromDataStore(
+		testEnv.CreEnvironment.CldfEnvironment.DataStore,
+		testEnv.CreEnvironment.Blockchains[0].ChainSelector(),
+		keystone_changeset.WorkflowRegistry.String(),
+		testEnv.CreEnvironment.ContractVersions[keystone_changeset.WorkflowRegistry.String()],
+		"",
+	)
+
+	testLogger.Info().Msgf("Deleting confidential workflow %q...", workflowName)
+	require.NoError(t, creworkflow.DeleteWithContract(
+		context.Background(),
+		sethClient,
+		common.HexToAddress(wfRegistryRef.Address),
+		wfRegistryRef.Version,
+		workflowName,
+	), "failed to delete confidential workflow")
 }
