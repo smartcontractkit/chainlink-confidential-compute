@@ -429,7 +429,7 @@ func startFakeStorageService(t *testing.T, enclaveHost string) (string, *fakeSto
 	return fmt.Sprintf("%s:%d", enclaveHost, port), svc
 }
 
-func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, buildLocalBinaries func() error) {
+func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, buildLocalBinaries func() error, missingSecretOnly bool) {
 	t.Helper()
 	if os.Getenv("REMOTE_ENCLAVE_URLS") != "" || tests.UseLegacyEnclaves() {
 		t.Skip("engine test does not run against remote/legacy enclaves")
@@ -622,6 +622,30 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	memBefore := totalEnclaveMemoryMB(t, authedEnclaves, testLogger)
 	testLogger.Info().Uint64("totalUsedMB", memBefore).Msg("Total enclave memory before workflow deploy")
 
+	if missingSecretOnly {
+		// Missing-secret → user-error classification. Deploy a workflow whose
+		// config requests a secret ("MISSING_SECRET") that was never uploaded to
+		// the vault. The relay DON maps the vault's "key does not exist" to a
+		// JSON-RPC ErrInvalidParams (a user error) once the relay-node fix ships;
+		// the enclave surfaces the cause in the engine's "Workflow execution
+		// failed" log. This runs as its own test (own CRE env + enclave) rather
+		// than alongside the happy-path workflow, because two concurrent
+		// confidential workflows in one enclave starve the second one's
+		// gateway/relay dispatch.
+		//
+		// NOTE: asserts the post-fix behavior (error message contains
+		// "key does not exist" + ErrInvalidParams code -32602). Against a
+		// chainlink version predating the relay-node user-error fix, the message
+		// is "relay quorum unreachable" with an "internal error" code.
+		missingSecretConfigURL := configURL[:len(configURL)-len(engineTestConfigFilename)] + engineTestMissingSecretConfigFilename
+		missingSecretWorkflowID := deployConfidentialWorkflowForEngineWithID(t, testEnv, testLogger, wasmURL, missingSecretConfigURL, "engine-test-missing-secret")
+		failureLine := waitForWorkflowExecutionFailure(t, testEnv, testLogger, missingSecretWorkflowID, "key does not exist", 5*time.Minute)
+		require.Contains(t, string(failureLine), "JSON-RPC error -32602", "missing-secret failure must carry the ErrInvalidParams code, not an internal error")
+		require.NotContains(t, string(failureLine), "internal error", "missing-secret failure must be classified as a user error, not an internal error")
+		testLogger.Info().Msg("Missing-secret E2E test passed: vault user-error surfaced as ErrInvalidParams")
+		return
+	}
+
 	// 6. Deploy the confidential workflow with attributes and configURL.
 	workflowID := deployConfidentialWorkflowForEngine(t, testEnv, testLogger, wasmURL, configURL)
 
@@ -672,42 +696,6 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// around ~67MB (idle ~18MB + WASM runtime/binary/execution), for a total near
 	// 85MB across both enclaves. Flag if we start consuming substantially more.
 	require.Less(t, memAfter, uint64(100), "total enclave memory should stay under 100MB; a large jump may indicate a leak or regression")
-
-	// 9. Missing-secret → user-error classification. Deploy a workflow whose
-	//    config requests a secret ("MISSING_SECRET") that was never uploaded to
-	//    the vault. The relay DON maps the vault's "key does not exist" to a
-	//    JSON-RPC ErrInvalidParams (a user error) once the relay-node fix ships;
-	//    the enclave surfaces the cause in the engine's "Workflow execution
-	//    failed" log. This sub-case reuses the already-running CRE env and the
-	//    same WASM binary (the secret name is config-driven via the SecretID
-	//    field).
-	//
-	//    The happy-path workflow is torn down first: running two concurrent
-	//    confidential workflows in one enclave starves the second workflow's
-	//    gateway/relay dispatch (its GetSecrets calls hit outbound-proxy
-	//    resets and never reach the relay), so its executions never produce an
-	//    engine failure log. Deleting the first workflow and briefly letting
-	//    the engine wind it down leaves the enclave servicing a single workflow.
-	//
-	//    NOTE: this asserts the post-fix behavior (error message contains
-	//    "key does not exist"). Against a chainlink version predating the
-	//    relay-node user-error fix, the message is "relay quorum unreachable"
-	//    with an "internal error" code, so this assertion is the gate that
-	//    confirms the fix is live. Bump tests/go.mod to the chainlink commit
-	//    carrying the fix before expecting this to pass.
-	deleteConfidentialWorkflowForEngine(t, testEnv, testLogger, "engine-test-confidential")
-	// Give the engine a beat to stop triggering the deleted workflow before the
-	// next one starts, so the two never overlap on the enclave's gateway path.
-	time.Sleep(15 * time.Second)
-	missingSecretConfigURL := configURL[:len(configURL)-len(engineTestConfigFilename)] + engineTestMissingSecretConfigFilename
-	missingSecretWorkflowID := deployConfidentialWorkflowForEngineWithID(t, testEnv, testLogger, wasmURL, missingSecretConfigURL, "engine-test-missing-secret")
-	failureLine := waitForWorkflowExecutionFailure(t, testEnv, testLogger, missingSecretWorkflowID, "key does not exist", 5*time.Minute)
-	// The relay fix surfaces the actual vault cause and carries the
-	// ErrInvalidParams code (-32602): a user error. Assert both the positive
-	// (invalid-params code + vault cause present) and the negative (the generic
-	// "internal error" masking, errorCode -32603, must not appear).
-	require.Contains(t, string(failureLine), "JSON-RPC error -32602", "missing-secret failure must carry the ErrInvalidParams code, not an internal error")
-	require.NotContains(t, string(failureLine), "internal error", "missing-secret failure must be classified as a user error, not an internal error")
 
 	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write validated")
 }
@@ -1034,37 +1022,4 @@ func deployConfidentialWorkflowForEngineWithID(
 	})
 
 	return workflowID
-}
-
-// deleteConfidentialWorkflowForEngine removes a workflow from the on-chain
-// registry so the engine stops triggering it. Used to tear down the happy-path
-// workflow before the missing-secret sub-case deploys its own, so the enclave
-// only services one workflow at a time.
-func deleteConfidentialWorkflowForEngine(
-	t *testing.T,
-	testEnv *ttypes.TestEnvironment,
-	testLogger zerolog.Logger,
-	workflowName string,
-) {
-	t.Helper()
-
-	require.IsType(t, &evm.Blockchain{}, testEnv.CreEnvironment.Blockchains[0])
-	sethClient := testEnv.CreEnvironment.Blockchains[0].(*evm.Blockchain).SethClient
-
-	wfRegistryRef := crecontracts.MustGetAddressRefFromDataStore(
-		testEnv.CreEnvironment.CldfEnvironment.DataStore,
-		testEnv.CreEnvironment.Blockchains[0].ChainSelector(),
-		keystone_changeset.WorkflowRegistry.String(),
-		testEnv.CreEnvironment.ContractVersions[keystone_changeset.WorkflowRegistry.String()],
-		"",
-	)
-
-	testLogger.Info().Msgf("Deleting confidential workflow %q...", workflowName)
-	require.NoError(t, creworkflow.DeleteWithContract(
-		context.Background(),
-		sethClient,
-		common.HexToAddress(wfRegistryRef.Address),
-		wfRegistryRef.Version,
-		workflowName,
-	), "failed to delete confidential workflow")
 }

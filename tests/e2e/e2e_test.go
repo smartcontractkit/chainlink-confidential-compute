@@ -990,7 +990,43 @@ func TestConfidentialWorkflowsEngineE2E(t *testing.T) {
 		testLogger.Info().Msgf("Local capability binary confidential-workflows built successfully")
 		return nil
 	}
-	testConfidentialWorkflowsEngine(t, testLogger, buildLocalBinaries)
+	testConfidentialWorkflowsEngine(t, testLogger, buildLocalBinaries, false)
+}
+
+// TestConfidentialWorkflowsMissingSecretE2E exercises the missing-secret →
+// user-error classification path in its own CRE environment + enclave, rather
+// than alongside the happy-path workflow (two concurrent confidential workflows
+// in one enclave starve the second one's gateway/relay dispatch). Runs as a
+// separate matrix portion in CI so it parallelizes with the happy-path suite.
+func TestConfidentialWorkflowsMissingSecretE2E(t *testing.T) {
+	var testLogger = framework.L
+	requireE2EEnvVars(t)
+	if os.Getenv("LOAD_TEST") == "true" {
+		t.Skip("engine test does not run in load-test mode")
+	}
+	t.Cleanup(func() { nukeDockerState(testLogger) })
+
+	buildLocalBinaries := func() error {
+		projectPath := "../../enclave/apps/confidential-workflows/capability/cmd/confidential-workflows"
+		outputBinary := "binaries/confidential-workflows"
+		absoluteBinaryPath, err := filepath.Abs(outputBinary)
+		if err != nil {
+			return fmt.Errorf("failed to get absolute path: %w", err)
+		}
+		targetArch := runtime.GOARCH
+		testLogger.Info().Msgf("Building local capability binary confidential-workflows for %s...", targetArch)
+		cmd := exec.Command("go", "build", "-gcflags", "all=-N -l", "-o", absoluteBinaryPath)
+		cmd.Dir = projectPath
+		cmd.Env = os.Environ()
+		cmd.Env = append(cmd.Env, "GOOS=linux", "GOARCH="+targetArch)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("failed to build confidential-workflows binary: %s", string(output))
+		}
+		testLogger.Info().Msgf("Local capability binary confidential-workflows built successfully")
+		return nil
+	}
+	testConfidentialWorkflowsEngine(t, testLogger, buildLocalBinaries, true)
 }
 
 func mustInitializeCapabilitySetup(
