@@ -796,15 +796,18 @@ func (c *enclavePool) getSingleEnclavePublicKey(ctx context.Context, enclave typ
 	var (
 		resp          *http.Response
 		successCancel context.CancelFunc
+		errs          []error
 	)
 	for attempt := 0; attempt <= c.publicKeyRetriesMax && resp == nil; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(ctx, reqTimeout)
 		resp, err = c.httpClient.Do(httpReq.Clone(attemptCtx))
 		if err != nil && resp == nil {
 			cancel()
+			errs = append(errs, err)
 			if attempt < c.publicKeyRetriesMax && ctx.Err() == nil {
 				select {
 				case <-ctx.Done():
+					return nil, errors.Join(append(errs, ctx.Err())...)
 				case <-time.After(c.publicKeyRetriesBackoff):
 				}
 			}
@@ -817,7 +820,7 @@ func (c *enclavePool) getSingleEnclavePublicKey(ctx context.Context, enclave typ
 		defer successCancel()
 	}
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(errs...)
 	}
 	defer util.SafeClose(resp)
 
