@@ -1,6 +1,6 @@
 module github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework
 
-go 1.26.4
+go 1.26.6
 
 replace github.com/smartcontractkit/chainlink-confidential-compute => ../../
 
@@ -8,13 +8,13 @@ replace github.com/smartcontractkit/chainlink-confidential-compute/enclave-clien
 
 require (
 	github.com/smartcontractkit/capabilities/libs v0.0.0-20260114123817-a22dd91e9d9d
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260811140401-3fb1738abb75
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260826175334-c1aa3d03197c
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20260415113950-0671a5b829b6
 	github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-00010101000000-000000000000
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260804191526-b7a850ae7648
 	github.com/smartcontractkit/chainlink-protos/workflows/go v0.0.0-20260528173149-f5b8336b19d9
 	github.com/smartcontractkit/libocr v0.0.0-20260810200708-618b5bf7f342
-	github.com/stretchr/testify v1.11.1
+	github.com/stretchr/testify v1.12.0
 	go.opentelemetry.io/otel/metric v1.43.0
 	google.golang.org/protobuf v1.36.11
 )
@@ -36,7 +36,6 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudevents/sdk-go/binding/format/protobuf/v2 v2.16.1 // indirect
 	github.com/cloudevents/sdk-go/v2 v2.16.1 // indirect
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/ethereum/go-ethereum v1.17.4
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.8 // indirect
@@ -59,7 +58,6 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect

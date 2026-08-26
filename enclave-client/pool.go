@@ -78,6 +78,15 @@ type PoolConfig struct {
 	// publicKey is true for GetPublicKeys and false otherwise.
 	// It is invoked on each enclave-client operation
 	RequestTimeoutResolverFn func(ctx context.Context, publicKey bool) (time.Duration, error)
+
+	// PublicKeyRetriesMax is the number of extra attempts the pool makes on a
+	// transport error when fetching a single enclave's public keys (used by
+	// GetPublicKeys, GetConfigs, and the proactive cache refresh). Fetches are
+	// GETs with no body, so replaying is safe; keep-alives are disabled so each
+	// attempt opens a fresh connection.
+	PublicKeyRetriesMax int
+	// PublicKeyRetriesBackoff is the wait between public-key fetch retry attempts.
+	PublicKeyRetriesBackoff time.Duration
 }
 
 type scopedEmitter struct {
@@ -140,6 +149,10 @@ type enclavePool struct {
 	lggr types.Logger
 
 	requestTimeoutResolverFn func(ctx context.Context, publicKey bool) (time.Duration, error)
+
+	// Public-key fetch retry settings.
+	publicKeyRetriesMax     int
+	publicKeyRetriesBackoff time.Duration
 }
 
 var _ EnclaveClient = (*enclavePool)(nil)
@@ -182,6 +195,8 @@ func NewPoolWithConfig(
 		metrics:                  config.Metrics,
 		lggr:                     config.Logger,
 		requestTimeoutResolverFn: config.RequestTimeoutResolverFn,
+		publicKeyRetriesMax:      config.PublicKeyRetriesMax,
+		publicKeyRetriesBackoff:  config.PublicKeyRetriesBackoff,
 	}
 
 	if pool.lggr == nil {
@@ -787,9 +802,26 @@ func (c *enclavePool) getSingleEnclavePublicKey(ctx context.Context, enclave typ
 		return nil, fmt.Errorf("could not set auth header for enclave %s %w", enclave.EnclaveID, err)
 	}
 
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, err
+	// Retry on transport errors. This is a GET with no body, so replaying is
+	// safe, and keep-alives are disabled so each attempt opens a fresh conn — a
+	// failure is almost always a transient reset/GOAWAY during setup.
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		resp, err = c.httpClient.Do(httpReq)
+		if err == nil || resp != nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		if attempt >= c.publicKeyRetriesMax {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(c.publicKeyRetriesBackoff):
+		}
 	}
 	defer util.SafeClose(resp)
 

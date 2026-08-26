@@ -1,6 +1,6 @@
 module github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/capability
 
-go 1.26.4
+go 1.26.6
 
 replace github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework => ../../../../capabilities/framework
 
@@ -10,11 +10,11 @@ replace github.com/smartcontractkit/chainlink-confidential-compute => ../../../.
 
 require (
 	github.com/smartcontractkit/capabilities/libs v0.0.0-20260223172632-a716db2e04a0
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260811140401-3fb1738abb75
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260826175334-c1aa3d03197c
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20260422000908-67af9e15fe65
 	github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework v0.0.0-20260422000908-67af9e15fe65
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260804191526-b7a850ae7648
-	github.com/stretchr/testify v1.11.1
+	github.com/stretchr/testify v1.12.0
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -28,7 +28,6 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudevents/sdk-go/binding/format/protobuf/v2 v2.16.1 // indirect
 	github.com/cloudevents/sdk-go/v2 v2.16.1 // indirect
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/doyensec/safeurl v0.2.4 // indirect
 	github.com/ethereum/go-ethereum v1.17.4 // indirect
 	github.com/fatih/color v1.18.0 // indirect
@@ -77,7 +76,6 @@ require (
 	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
