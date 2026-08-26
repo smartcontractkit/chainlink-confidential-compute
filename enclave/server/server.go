@@ -1,3 +1,8 @@
+// Package server implements the HTTP server that runs INSIDE the Nitro
+// enclave VM (the EIF image), listening on vsock. It is the counterpart of
+// the parent-instance host in enclave/nitro/host, which proxies selected
+// endpoints to external callers. Everything here executes guest-side, so
+// e.g. memory and sysinfo reads report the enclave guest, not the host.
 package server
 
 import (
@@ -11,10 +16,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
-	"runtime/metrics"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -250,8 +251,9 @@ func (s *enclaveServer) handleMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := types.MemoryEstimateResponse{
-		UsedMB: bytesToMB(readRuntimeMemoryBytes()),
-		RSSMB:  bytesToMB(readProcessRSSBytes()),
+		UsedMB:  bytesToMB(readRuntimeMemoryBytes()),
+		RSSMB:   bytesToMB(readProcessRSSBytes()),
+		TotalMB: bytesToMB(readTotalMemoryBytes()),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -259,61 +261,6 @@ func (s *enclaveServer) handleMemory(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("error encoding response: %v", err), http.StatusInternalServerError)
 		return
 	}
-}
-
-// readRuntimeMemoryBytes returns the total memory mapped by the Go runtime, in
-// bytes. It uses runtime/metrics rather than runtime.ReadMemStats to avoid the
-// stop-the-world pause the latter incurs, since this endpoint may be polled
-// frequently.
-func readRuntimeMemoryBytes() uint64 {
-	samples := []metrics.Sample{
-		{Name: "/memory/classes/total:bytes"},
-	}
-	metrics.Read(samples)
-	if samples[0].Value.Kind() == metrics.KindUint64 {
-		return samples[0].Value.Uint64()
-	}
-	return 0
-}
-
-// readProcessRSSBytes returns the enclave process's resident set size in bytes,
-// from /proc/self/status (VmRSS). Unlike readRuntimeMemoryBytes, which sees only
-// Go-runtime-mapped memory, RSS includes native allocations such as the wasmtime
-// WASM linear memory that dominate the enclave's footprint under load. Returns 0
-// if unavailable (e.g. non-Linux dev builds, where /proc is absent).
-func readProcessRSSBytes() uint64 {
-	data, err := os.ReadFile("/proc/self/status")
-	if err != nil {
-		return 0
-	}
-	return parseVmRSSBytes(data)
-}
-
-// parseVmRSSBytes extracts VmRSS from /proc/<pid>/status content and returns it
-// in bytes (the file reports kB). Returns 0 if the line is absent or malformed.
-func parseVmRSSBytes(status []byte) uint64 {
-	for _, line := range strings.Split(string(status), "\n") {
-		rest, ok := strings.CutPrefix(line, "VmRSS:")
-		if !ok {
-			continue
-		}
-		fields := strings.Fields(rest) // e.g. ["123456", "kB"]
-		if len(fields) < 1 {
-			return 0
-		}
-		kb, err := strconv.ParseUint(fields[0], 10, 64)
-		if err != nil {
-			return 0
-		}
-		return kb * 1024
-	}
-	return 0
-}
-
-// bytesToMB rounds a byte count to the nearest megabyte.
-func bytesToMB(b uint64) uint64 {
-	const mb = 1024 * 1024
-	return (b + mb/2) / mb
 }
 
 // handleSetConfig handles the /config endpoint.

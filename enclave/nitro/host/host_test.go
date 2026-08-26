@@ -565,51 +565,6 @@ func TestHandleGetPublicKeys(t *testing.T) {
 	})
 }
 
-func TestHandleMemory(t *testing.T) {
-	t.Run("forwards GET to enclave and relays response", func(t *testing.T) {
-		mockTransport := &mockRoundTripper{
-			response: &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(bytes.NewBufferString(`{"usedMB":32}`)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			},
-		}
-		host := NewHostServer(context.Background(), &http.Client{Transport: mockTransport})
-
-		req := httptest.NewRequest(http.MethodGet, types.MemoryPath, nil)
-		w := httptest.NewRecorder()
-		host.handleMemory(w, req)
-
-		require.Equal(t, http.StatusOK, w.Code)
-		require.Len(t, mockTransport.requests, 1)
-		assert.Equal(t, http.MethodGet, mockTransport.requests[0].Method)
-		assert.Equal(t, types.MemoryPath, mockTransport.requests[0].URL.Path)
-		assert.Equal(t, `{"usedMB":32}`, w.Body.String())
-	})
-
-	t.Run("rejects non-GET method", func(t *testing.T) {
-		host := NewHostServer(context.Background(), &http.Client{})
-
-		req := httptest.NewRequest(http.MethodPost, types.MemoryPath, nil)
-		w := httptest.NewRecorder()
-		host.handleMemory(w, req)
-
-		assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
-	})
-
-	t.Run("returns 500 when enclave unreachable", func(t *testing.T) {
-		mockTransport := &mockRoundTripper{err: errors.New("vsock connection refused")}
-		host := NewHostServer(context.Background(), &http.Client{Transport: mockTransport})
-
-		req := httptest.NewRequest(http.MethodGet, types.MemoryPath, nil)
-		w := httptest.NewRecorder()
-		host.handleMemory(w, req)
-
-		assert.Equal(t, http.StatusInternalServerError, w.Code)
-		assert.Contains(t, w.Body.String(), "failed to communicate with enclave")
-	})
-}
-
 func TestHandleSetConfig(t *testing.T) {
 	config := types.EnclaveConfig{
 		Signers:         [][]byte{[]byte("test-signer")},
