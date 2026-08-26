@@ -395,7 +395,7 @@ func TestRequestTimeoutResolver(t *testing.T) {
 			Session: enclaveclient.DefaultSessionConfig,
 			RequestTimeoutResolverFn: func(ctx context.Context, publicKey bool) (time.Duration, error) {
 				resolverCalls.Add(1)
-				assert.False(t, publicKey)
+				assert.True(t, publicKey)
 				return 100 * time.Millisecond, nil
 			},
 		},

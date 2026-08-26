@@ -255,17 +255,10 @@ func (c *enclavePool) GetPublicKeys(ctx context.Context, requestID [32]byte, che
 		responses   []types.EnclavePublicKeyData
 	)
 
-	// Apply a shorter timeout specifically for public key fetches so that
-	// requests to dead enclaves fail fast rather than blocking for the full
-	// httpClient timeout (e.g. 5s).
-	pkTimeout, err := c.resolveRequestTimeout(ctx, true)
-	if err != nil {
-		return nil, err
-	}
-	pkCtx, pkCancel := context.WithTimeout(ctx, pkTimeout)
-	defer pkCancel()
+	// Per-request timeouts are applied inside getSingleEnclavePublicKey so each
+	// fetch (and retry) gets its own budget; no outer timeout here.
 
-	g, gCtx := errgroup.WithContext(pkCtx)
+	g, gCtx := errgroup.WithContext(ctx)
 
 	for _, enclave := range enclaves {
 		enclave := enclave
@@ -481,12 +474,7 @@ func (c *enclavePool) UpdateConfig(ctx context.Context, update types.UpdateConfi
 // GetConfigs returns each enclave's current config, ordered the same as the pool's
 // node list. Configs are read from /publicKeys and attestation-validated.
 func (c *enclavePool) GetConfigs(ctx context.Context) ([]types.EnclaveConfig, error) {
-	timeout, err := c.resolveRequestTimeout(ctx, false)
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// Per-request timeouts are applied inside getSingleEnclavePublicKey.
 	c.nodesLock.RLock()
 	nodes := append([]types.Enclave{}, c.nodes...)
 	c.nodesLock.RUnlock()
@@ -628,13 +616,7 @@ func (c *enclavePool) UpdateNodes(ctx context.Context, nodes []types.Enclave) er
 // validating each response. It returns the first error encountered, leaving the
 // pool's node list untouched.
 func (c *enclavePool) validateNodes(ctx context.Context, nodes []types.Enclave) error {
-	timeout, err := c.resolveRequestTimeout(ctx, true)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
+	// Per-request timeouts are applied inside getSingleEnclavePublicKey.
 	g, gCtx := errgroup.WithContext(ctx)
 	for _, enclave := range nodes {
 		enclave := enclave
@@ -802,26 +784,40 @@ func (c *enclavePool) getSingleEnclavePublicKey(ctx context.Context, enclave typ
 		return nil, fmt.Errorf("could not set auth header for enclave %s %w", enclave.EnclaveID, err)
 	}
 
-	// Retry on transport errors. This is a GET with no body, so replaying is
-	// safe, and keep-alives are disabled so each attempt opens a fresh conn — a
-	// failure is almost always a transient reset/GOAWAY during setup.
-	var resp *http.Response
-	for attempt := 0; ; attempt++ {
-		resp, err = c.httpClient.Do(httpReq)
-		if err == nil || resp != nil {
-			break
+	// Each attempt gets its own per-request timeout (resolved per call) so a
+	// retry starts with a fresh budget; the backoff between attempts is bounded
+	// only by the caller's outer context. This is a GET with no body, so
+	// replaying is safe, and keep-alives are disabled so each attempt opens a
+	// fresh conn — a failure is almost always a transient reset/GOAWAY.
+	reqTimeout, err := c.resolveRequestTimeout(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		resp          *http.Response
+		successCancel context.CancelFunc
+	)
+	for attempt := 0; attempt <= c.publicKeyRetriesMax && resp == nil; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, reqTimeout)
+		resp, err = c.httpClient.Do(httpReq.Clone(attemptCtx))
+		if err != nil && resp == nil {
+			cancel()
+			if attempt < c.publicKeyRetriesMax && ctx.Err() == nil {
+				select {
+				case <-ctx.Done():
+				case <-time.After(c.publicKeyRetriesBackoff):
+				}
+			}
+			continue
 		}
-		if ctx.Err() != nil {
-			return nil, err
-		}
-		if attempt >= c.publicKeyRetriesMax {
-			return nil, err
-		}
-		select {
-		case <-ctx.Done():
-			return nil, err
-		case <-time.After(c.publicKeyRetriesBackoff):
-		}
+		// Keep the per-request context alive until the body is closed below.
+		successCancel = cancel
+	}
+	if successCancel != nil {
+		defer successCancel()
+	}
+	if err != nil {
+		return nil, err
 	}
 	defer util.SafeClose(resp)
 
