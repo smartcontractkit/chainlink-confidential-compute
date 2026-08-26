@@ -20,7 +20,7 @@ require (
 )
 
 require (
-	github.com/doyensec/safeurl v0.2.2 // indirect
+	github.com/doyensec/safeurl v0.2.4 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/jpillora/backoff v1.0.0 // indirect
 	github.com/pelletier/go-toml v1.9.5 // indirect
