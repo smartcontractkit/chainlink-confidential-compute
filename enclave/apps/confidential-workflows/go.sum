@@ -139,8 +139,8 @@ github.com/smartcontractkit/cre-sdk-go v1.17.0-capdev.1 h1:8ts9cl7bOopbOALhXHMTg
 github.com/smartcontractkit/cre-sdk-go v1.17.0-capdev.1/go.mod h1:FDmcK/My08vBNWqpKUQGtSxVEmECzPye3tpGOzVxw/k=
 github.com/smartcontractkit/libocr v0.0.0-20260810200708-618b5bf7f342 h1:pEcgcjTGA83MzpqbTbyIg9AJrOs62s77SooDdJGIg9w=
 github.com/smartcontractkit/libocr v0.0.0-20260810200708-618b5bf7f342/go.mod h1:5JPtsRwjugpyfsdEALC4RopfvohqK/G+3DHaR8uv+Bc=
-github.com/smartcontractkit/tdh2/go/tdh2 v0.0.0-20241009175230-e6634ab1b071 h1:61XjRtpf/PxAqGFF/U2PBMDhdsmJ1QRjnY4SKC2hQ8Q=
-github.com/smartcontractkit/tdh2/go/tdh2 v0.0.0-20241009175230-e6634ab1b071/go.mod h1:NSc7hgOQbXG3DAwkOdWnZzLTZENXSwDJ7Va1nBp0YU0=
+github.com/smartcontractkit/tdh2/go/tdh2 v0.0.0-20251120172354-e8ec0386b06c h1:S1AFIjfHT95ev6gqHKBGy1zj3Tz0fIN3XzkaDUn77wY=
+github.com/smartcontractkit/tdh2/go/tdh2 v0.0.0-20251120172354-e8ec0386b06c/go.mod h1:NSc7hgOQbXG3DAwkOdWnZzLTZENXSwDJ7Va1nBp0YU0=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.5.2 h1:xuMeJ0Sdp5ZMRXx/aWO6RZxdr3beISkG5/G/aIRr3pY=
 github.com/stretchr/objx v0.5.2/go.mod h1:FRsXN1f5AsAjCGJKqEizvkpNtU+EGNCLh3NxZ/8L+MA=

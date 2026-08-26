@@ -184,10 +184,10 @@ github.com/smartcontractkit/cre-sdk-go v1.17.0-capdev.1 h1:8ts9cl7bOopbOALhXHMTg
 github.com/smartcontractkit/cre-sdk-go v1.17.0-capdev.1/go.mod h1:FDmcK/My08vBNWqpKUQGtSxVEmECzPye3tpGOzVxw/k=
 github.com/smartcontractkit/cre-sdk-go/capabilities/blockchain/evm v1.0.0-beta.0 h1:t2bzRHnqkyxvcrJKSsKPmCGLMjGO97ESgrtLCnTIEQw=
 github.com/smartcontractkit/cre-sdk-go/capabilities/blockchain/evm v1.0.0-beta.0/go.mod h1:VVJ4mvA7wOU1Ic5b/vTaBMHEUysyxd0gdPPXkAu8CmY=
-github.com/smartcontractkit/cre-sdk-go/capabilities/networking/confidentialhttp v0.0.0-20260211203328-1f3721436119 h1:P69M59tBeLevOldspLxedrYNyAu+vtaD6wnpWwhstxM=
-github.com/smartcontractkit/cre-sdk-go/capabilities/networking/confidentialhttp v0.0.0-20260211203328-1f3721436119/go.mod h1:KOn3NK4AbtvuMs2oKlNRxL2fACSuuGI114xPqO5igtQ=
-github.com/smartcontractkit/cre-sdk-go/capabilities/scheduler/cron v1.0.0-beta.0 h1:Tui4xQVln7Qtk3CgjBRgDfihgEaAJy2t2MofghiGIDA=
-github.com/smartcontractkit/cre-sdk-go/capabilities/scheduler/cron v1.0.0-beta.0/go.mod h1:PWyrIw16It4TSyq6mDXqmSR0jF2evZRKuBxu7pK1yDw=
+github.com/smartcontractkit/cre-sdk-go/capabilities/networking/confidentialhttp v0.0.0-20260330200534-964c8354b78b h1:LZTwIACflKde39aoLr/yPT3iEavhdPnaXpdd0wvCmJ8=
+github.com/smartcontractkit/cre-sdk-go/capabilities/networking/confidentialhttp v0.0.0-20260330200534-964c8354b78b/go.mod h1:KOn3NK4AbtvuMs2oKlNRxL2fACSuuGI114xPqO5igtQ=
+github.com/smartcontractkit/cre-sdk-go/capabilities/scheduler/cron v1.3.1-0.20260504162314-fbfac1c36bec h1:K5c66SeYJ9Psa14SkShBjmXiST5UctigQIxDsREoGt0=
+github.com/smartcontractkit/cre-sdk-go/capabilities/scheduler/cron v1.3.1-0.20260504162314-fbfac1c36bec/go.mod h1:RHfcLS022PoBg1mOB8ObuzHrTJ+ZEh4rQdeuNfheBsI=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/supranational/blst v0.3.16 h1:bTDadT+3fK497EvLdWRQEjiGnUtzJ7jjIUMF0jqwYhE=

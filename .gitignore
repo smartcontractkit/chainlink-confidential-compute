@@ -8,7 +8,7 @@
 **/logs/*
 **/test.state.yaml
 **/host-server.log
-**/config_tracker
+**/config-tracker
 **/.DS_Store
 **/node_modules/
 **/.tmp-capability*

@@ -214,8 +214,8 @@ github.com/scylladb/go-reflectx v1.0.1 h1:b917wZM7189pZdlND9PbIJ6NQxfDPfBvUaQ7cj
 github.com/scylladb/go-reflectx v1.0.1/go.mod h1:rWnOfDIRWBGN0miMLIcoPt/Dhi2doCMZqwMCJ3KupFc=
 github.com/shopspring/decimal v1.4.0 h1:bxl37RwXBklmTi0C79JfXCEBD1cqqHt0bbgBAGFp81k=
 github.com/shopspring/decimal v1.4.0/go.mod h1:gawqmDU56v4yIKSwfBSFip1HdCCXN8/+DMd9qYNcwME=
-github.com/smartcontractkit/capabilities/libs v0.0.0-20260114123817-a22dd91e9d9d h1:ZyZyj53gzWczjIxZgGBQk9tFaAMH31sr2XqOwaMipaY=
-github.com/smartcontractkit/capabilities/libs v0.0.0-20260114123817-a22dd91e9d9d/go.mod h1:fLJt3ZuMPXoIfd1WQp2RxtLWrqQbzKwjYp8Rq2HBqEw=
+github.com/smartcontractkit/capabilities/libs v0.0.0-20260223172632-a716db2e04a0 h1:FXr4PieKZ5KLm8+kScb2SortgOkYrnu+Pd0jjRh3Hns=
+github.com/smartcontractkit/capabilities/libs v0.0.0-20260223172632-a716db2e04a0/go.mod h1:v0O0Au8RE00Z89QxBE6I2q9bR9r3+RO1gLD3oaO2WB0=
 github.com/smartcontractkit/chain-selectors v1.0.104 h1:/n9pPGM5W/+r1eHoWZv4VwX9LNS1af4+ICyhM8zKRNM=
 github.com/smartcontractkit/chain-selectors v1.0.104/go.mod h1:qy7whtgG5g+7z0jt0nRyii9bLND9m15NZTzuQPkMZ5w=
 github.com/smartcontractkit/chainlink-common v0.11.2-0.20260811140401-3fb1738abb75 h1:4qx+jlAlYLaVNs3iJTRZGZ0qowPlXL7tKEsTO7oE8PU=
@@ -238,8 +238,8 @@ github.com/smartcontractkit/grpc-proxy v0.0.0-20240830132753-a7e17fec5ab7 h1:12i
 github.com/smartcontractkit/grpc-proxy v0.0.0-20240830132753-a7e17fec5ab7/go.mod h1:FX7/bVdoep147QQhsOPkYsPEXhGZjeYx6lBSaSXtZOA=
 github.com/smartcontractkit/libocr v0.0.0-20260810200708-618b5bf7f342 h1:pEcgcjTGA83MzpqbTbyIg9AJrOs62s77SooDdJGIg9w=
 github.com/smartcontractkit/libocr v0.0.0-20260810200708-618b5bf7f342/go.mod h1:5JPtsRwjugpyfsdEALC4RopfvohqK/G+3DHaR8uv+Bc=
-github.com/smartcontractkit/tdh2/go/tdh2 v0.0.0-20241009175230-e6634ab1b071 h1:61XjRtpf/PxAqGFF/U2PBMDhdsmJ1QRjnY4SKC2hQ8Q=
-github.com/smartcontractkit/tdh2/go/tdh2 v0.0.0-20241009175230-e6634ab1b071/go.mod h1:NSc7hgOQbXG3DAwkOdWnZzLTZENXSwDJ7Va1nBp0YU0=
+github.com/smartcontractkit/tdh2/go/tdh2 v0.0.0-20251120172354-e8ec0386b06c h1:S1AFIjfHT95ev6gqHKBGy1zj3Tz0fIN3XzkaDUn77wY=
+github.com/smartcontractkit/tdh2/go/tdh2 v0.0.0-20251120172354-e8ec0386b06c/go.mod h1:NSc7hgOQbXG3DAwkOdWnZzLTZENXSwDJ7Va1nBp0YU0=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.4.0/go.mod h1:YvHI0jy2hoMjB+UWwv71VJQ9isScKT/TqJzVSSt89Yw=
 github.com/stretchr/objx v0.5.0/go.mod h1:Yh+to48EsGEfYuaHDzXPcE3xhTkx73EhmCGUpEOglKo=
