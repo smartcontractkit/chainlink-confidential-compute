@@ -2189,7 +2189,7 @@ func TestGetPublicKeys_RetriesAfterConnectionReset(t *testing.T) {
 			require.True(t, ok, "httptest server must support hijacking")
 			conn, _, err := hj.Hijack()
 			require.NoError(t, err)
-			conn.Close()
+			assert.NoError(t, conn.Close())
 			return
 		}
 		resp := fixture.createPublicKeyResponse()
@@ -2211,7 +2211,9 @@ func TestGetPublicKeys_RetriesAfterConnectionReset(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	defer pool.Close()
+	defer func() {
+		require.NoError(t, pool.Close())
+	}()
 
 	pks, err := pool.GetPublicKeys(context.Background(), fixture.RequestID, nil)
 	require.NoError(t, err, "retry should recover after the first connection reset")
@@ -2231,7 +2233,7 @@ func TestGetPublicKeys_RetriesExhaustedReturnsError(t *testing.T) {
 		require.True(t, ok)
 		conn, _, err := hj.Hijack()
 		require.NoError(t, err)
-		conn.Close()
+		assert.NoError(t, conn.Close())
 	}))
 	defer server.Close()
 
@@ -2248,7 +2250,9 @@ func TestGetPublicKeys_RetriesExhaustedReturnsError(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	defer pool.Close()
+	defer func() {
+		require.NoError(t, pool.Close())
+	}()
 
 	_, err = pool.GetPublicKeys(context.Background(), fixture.RequestID, nil)
 	require.Error(t, err, "exhausted retries should surface an error")
