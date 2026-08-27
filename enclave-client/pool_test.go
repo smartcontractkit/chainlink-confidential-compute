@@ -1611,6 +1611,74 @@ func TestSessionPersistence(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestRoutingHeader(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+
+	testPublicKeyResponse := types.PublicKeyResponse{
+		PublicKeys:    [][]byte{fixture.EphemeralPublicKey},
+		CreationTimes: []time.Time{time.Now()},
+		TTLs:          []time.Duration{5 * time.Minute},
+		Config:        testEnclaveConfig(),
+		Attestation:   fixture.Attestation,
+	}
+
+	t.Run("/publicKeys carries hex(requestID)", func(t *testing.T) {
+		t.Parallel()
+		var gotHeader string
+		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotHeader = r.Header.Get(types.RoutingHeader)
+			require.NoError(t, json.NewEncoder(w).Encode(&testPublicKeyResponse))
+		}))
+		defer mockServer.Close()
+
+		pool, err := newTestPool(fixture.createNodes(mockServer.URL, 1), &mockSingleEnclaveSelector{}, nil)
+		require.NoError(t, err)
+
+		_, err = pool.GetPublicKeys(context.Background(), fixture.RequestID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, hex.EncodeToString(fixture.RequestID[:]), gotHeader)
+	})
+
+	t.Run("/requests carries hex(requestID)", func(t *testing.T) {
+		t.Parallel()
+		var gotHeader string
+		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == types.PublicKeyPath {
+				require.NoError(t, json.NewEncoder(w).Encode(&testPublicKeyResponse))
+				return
+			}
+			gotHeader = r.Header.Get(types.RoutingHeader)
+			var reqBody types.SignedComputeRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&reqBody))
+			require.NoError(t, json.NewEncoder(w).Encode(&types.ExecuteResponse{
+				RequestID:   reqBody.RequestID,
+				Output:      fixture.PublicData,
+				Attestation: fixture.Attestation,
+				RequestHash: reqBody.Hash(),
+			}))
+		}))
+		defer mockServer.Close()
+
+		pool, err := newTestPool(fixture.createNodes(mockServer.URL, 1), &mockSingleEnclaveSelector{}, nil)
+		require.NoError(t, err)
+
+		_, err = pool.GetPublicKeys(context.Background(), fixture.RequestID, nil)
+		require.NoError(t, err)
+
+		req := types.SignedComputeRequest{
+			ComputeRequest: types.ComputeRequest{
+				RequestID:                 fixture.RequestID,
+				PublicData:                fixture.PublicData,
+				EnclaveEphemeralPublicKey: fixture.EphemeralPublicKey,
+			},
+		}
+		_, err = pool.ExecuteBatch(context.Background(), []types.SignedComputeRequest{req}, [][32]byte{fixture.EnclaveID1})
+		require.NoError(t, err)
+		assert.Equal(t, hex.EncodeToString(fixture.RequestID[:]), gotHeader)
+	})
+}
+
 func TestExecuteBatchRejectsMismatchedApplicationRequestIDForNonLegacy(t *testing.T) {
 	t.Parallel()
 	fixture := newTestFixture(t)

@@ -18,6 +18,10 @@ type Logger interface {
 const (
 	PostmanEchoURL      = "https://postman-echo.com/"
 	StickySessionHeader = "Sticky-Session-A"
+	// RoutingHeader carries hex(requestID) so an edge load balancer can
+	// consistently hash all DON nodes' /publicKeys and /requests calls for one
+	// workflow execution onto the same pod.
+	RoutingHeader = "X-CC-Request-ID"
 )
 
 const DomainSeparator = "CONFIDENTIAL_COMPUTE_PAYLOAD"
