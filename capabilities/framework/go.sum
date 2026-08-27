@@ -18,8 +18,8 @@ github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dominikbraun/graph v0.23.0 h1:TdZB4pPqCLFxYhdyMFb1TBdFxp8XLcJfTTBQucVPgCo=
 github.com/dominikbraun/graph v0.23.0/go.mod h1:yOjYyogZLY1LSG9E33JWZJiq5k83Qy2C6POAuiViluc=
-github.com/doyensec/safeurl v0.2.2 h1:+sFUqwOnqqmtUAC85/sGdOKfJh8zOacyghkaLzsOk40=
-github.com/doyensec/safeurl v0.2.2/go.mod h1:3H0cgRpPYPSpgxRRn5yGD35Ns/LgGX/BVWSBbzUqXtY=
+github.com/doyensec/safeurl v0.2.4 h1:ldwQEPsr1WQbB3rL0pramhG2NBLfCk5y+V4zSeyN/w0=
+github.com/doyensec/safeurl v0.2.4/go.mod h1:3H0cgRpPYPSpgxRRn5yGD35Ns/LgGX/BVWSBbzUqXtY=
 github.com/ethereum/go-ethereum v1.17.4 h1:uA4q+qiLp7QImBsjdRbINu8iX6OEVmj4DPc5/E5Fsxc=
 github.com/ethereum/go-ethereum v1.17.4/go.mod h1:qMdgwqqRAen+aT8P7KKQKi0Qt6RzG4cfejVAbCpJgqA=
 github.com/fxamacker/cbor/v2 v2.9.0 h1:NpKPmjDBgUfBms6tr6JZkTHtfFGcMKsw3eGcmD/sapM=
