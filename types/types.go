@@ -18,6 +18,10 @@ type Logger interface {
 const (
 	PostmanEchoURL      = "https://postman-echo.com/"
 	StickySessionHeader = "Sticky-Session-A"
+	// RoutingHeader carries hex(requestID) so an edge load balancer can
+	// consistently hash all DON nodes' /publicKeys and /requests calls for one
+	// workflow execution onto the same pod.
+	RoutingHeader = "X-CC-Request-ID"
 )
 
 const DomainSeparator = "CONFIDENTIAL_COMPUTE_PAYLOAD"
@@ -451,4 +455,12 @@ type MemoryEstimateResponse struct {
 	// Go runtime, notably the wasmtime WASM linear memory, so it reflects the
 	// enclave's true footprint under load. 0 if unavailable (e.g. non-Linux).
 	RSSMB uint64 `json:"rssMB"`
+	// TotalMB is the enclave guest's total RAM (/proc/meminfo MemTotal),
+	// rounded to the nearest megabyte. It is the denominator for
+	// memory-pressure ratios (RSSMB / TotalMB) and tracks the actual running
+	// allocation even when it differs per enclave variant or drifts from the
+	// requested infra config. The endpoint is only served over vsock, so this
+	// never leaves the host. 0 if unavailable (e.g. non-Linux). Omitted from
+	// the JSON when zero.
+	TotalMB uint64 `json:"totalMB,omitempty"`
 }

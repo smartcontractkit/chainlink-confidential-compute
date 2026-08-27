@@ -217,56 +217,6 @@ func (h *hostServer) handleGetPublicKeys(w http.ResponseWriter, r *http.Request)
 		"waitDuration", time.Since(arrivalTime).String())
 }
 
-// handleMemory handles GET on the /memory endpoint, forwarding the request to the
-// enclave over vsock and relaying its memory estimate. The estimate is produced
-// inside the enclave; the host is a transparent proxy.
-func (h *hostServer) handleMemory(w http.ResponseWriter, r *http.Request) {
-	arrivalTime := time.Now()
-
-	logger := h.logger.With("remoteAddr", r.RemoteAddr)
-
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, vsockPrefix+types.MemoryPath, nil)
-	if err != nil {
-		logger.Errorw("failed to create memory request", "event", "MEMORY_ERR", "error", err)
-		http.Error(w, "failed to create request", http.StatusInternalServerError)
-		return
-	}
-
-	resp, err := h.enclaveClient.Do(req)
-	if err != nil {
-		if r.Context().Err() != nil {
-			http.Error(w, "client disconnected", http.StatusRequestTimeout)
-			return
-		}
-		logger.Errorw("failed to communicate with enclave for memory", "event", "MEMORY_ERR", "error", err)
-		http.Error(w, "failed to communicate with enclave", http.StatusInternalServerError)
-		return
-	}
-	defer util.SafeClose(resp)
-
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		logger.Errorw("error copying memory response", "event", "MEMORY_ERR", "error", err)
-		return
-	}
-
-	logger.Infow("memory response sent",
-		"event", "RESPONSE_OK_MEMORY",
-		"statusCode", resp.StatusCode,
-		"waitDuration", time.Since(arrivalTime).String())
-}
-
 // handleSetConfig handles POST on the /config endpoint, which sets the enclave's
 // configuration for the first time.
 func (h *hostServer) handleSetConfig(w http.ResponseWriter, r *http.Request) {
@@ -888,7 +838,7 @@ func instrumentEndpointLatency(metrics *hostMetrics, next http.Handler) http.Han
 
 func hostEndpoint(path string) string {
 	switch path {
-	case types.PublicKeyPath, types.ExecutePath, types.MemoryPath, types.SetConfigPath, types.SettingsPath:
+	case types.PublicKeyPath, types.ExecutePath, types.SetConfigPath, types.SettingsPath:
 		return path
 	default:
 		return "unmatched"
@@ -999,7 +949,6 @@ func main() {
 	mainMux.HandleFunc("PATCH "+types.SetConfigPath, host.handleUpdateConfig)
 	mainMux.HandleFunc(types.PublicKeyPath, host.handleGetPublicKeys)
 	mainMux.HandleFunc(types.ExecutePath, host.handleExecute)
-	mainMux.HandleFunc("GET "+types.MemoryPath, host.handleMemory)
 
 	mainServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", *httpPort),

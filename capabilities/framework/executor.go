@@ -184,6 +184,8 @@ type ParsedConfig struct {
 	PublicKeyRequestTimeout time.Duration
 	EnclaveRefreshInterval  time.Duration
 	InsecureSkipTLSVerify   bool
+	PublicKeyRetriesMax     int
+	PublicKeyRetriesBackoff time.Duration
 	CacheConfig             enclaveclient.CacheConfig
 	SessionConfig           enclaveclient.SessionConfig
 }
@@ -251,6 +253,8 @@ func (e *RealExecutor) applyLimitSettings(ctx context.Context, parsed *ParsedCon
 	publicKeyRequestTimeout, _ := cc.PublicKeyRequestTimeout.GetOrDefault(ctx, g)
 	insecureSkipTLSVerify, _ := cc.InsecureSkipTLSVerify.GetOrDefault(ctx, g)
 	enclaveRefreshInterval, _ := cc.EnclaveRefreshInterval.GetOrDefault(ctx, g)
+	publicKeyRetriesMax, _ := cc.PublicKeyRetriesMax.GetOrDefault(ctx, g)
+	publicKeyRetriesBackoff, _ := cc.PublicKeyRetriesBackoff.GetOrDefault(ctx, g)
 	cacheEnabled, _ := pkc.Enabled.GetOrDefault(ctx, g)
 	cacheTTL, _ := pkc.TTL.GetOrDefault(ctx, g)
 	cacheMaxTTL, _ := pkc.MaxTTL.GetOrDefault(ctx, g)
@@ -274,6 +278,8 @@ func (e *RealExecutor) applyLimitSettings(ctx context.Context, parsed *ParsedCon
 	parsed.PublicKeyRequestTimeout = publicKeyRequestTimeout
 	parsed.InsecureSkipTLSVerify = insecureSkipTLSVerify
 	parsed.EnclaveRefreshInterval = enclaveRefreshInterval
+	parsed.PublicKeyRetriesMax = publicKeyRetriesMax
+	parsed.PublicKeyRetriesBackoff = publicKeyRetriesBackoff
 	parsed.CacheConfig = enclaveclient.CacheConfig{
 		EnableCache:            cacheEnabled,
 		DefaultTTL:             cacheTTL,
@@ -867,12 +873,17 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 	e.lggr.Infow("enclave nodes loaded", "nodeCount", len(nodes))
 	sortEnclaveNodes(nodes)
 
-	httpClient := &http.Client{}
+	// Disable keep-alives so every request uses a fresh connection. Long-lived
+	// pooled connections get killed by intermediate layers (NLB/Envoy/Cloudflare
+	// idle reclamation, GOAWAY during rollouts), and reusing a stale conn turns a
+	// cheap idle close into a request failure. A fresh conn per request avoids
+	// discovering a dead conn mid-request at the cost of a TLS handshake per call.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableKeepAlives = true
 	if parsedConfig.InsecureSkipTLSVerify {
-		httpClient.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
+	httpClient := &http.Client{Transport: transport}
 
 	// Per-call timeouts are resolved by the executor's RequestTimeout callback.
 	pool, err := enclaveclient.NewPoolWithConfig(nodes, nil, httpClient, enclaveclient.PoolConfig{
@@ -881,6 +892,8 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 		Metrics:                  e.metrics,
 		Logger:                   e.lggr,
 		RequestTimeoutResolverFn: e.newRequestTimeoutResolver(),
+		PublicKeyRetriesMax:      parsedConfig.PublicKeyRetriesMax,
+		PublicKeyRetriesBackoff:  parsedConfig.PublicKeyRetriesBackoff,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create enclave pool: %w", err)
@@ -914,7 +927,9 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 		"retryBackoffSeconds", parsedConfig.RetryBackoffSeconds,
 		"enableSecretsCache", parsedConfig.EnableSecretsCache,
 		"vaultDONThreshold", e.vaultDON.CryptographyThreshold,
-		"insecureSkipTLS", parsedConfig.InsecureSkipTLSVerify)
+		"insecureSkipTLS", parsedConfig.InsecureSkipTLSVerify,
+		"publicKeyRetriesMax", parsedConfig.PublicKeyRetriesMax,
+		"publicKeyRetriesBackoff", parsedConfig.PublicKeyRetriesBackoff)
 	return nil
 }
 

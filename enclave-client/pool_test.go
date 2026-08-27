@@ -395,7 +395,7 @@ func TestRequestTimeoutResolver(t *testing.T) {
 			Session: enclaveclient.DefaultSessionConfig,
 			RequestTimeoutResolverFn: func(ctx context.Context, publicKey bool) (time.Duration, error) {
 				resolverCalls.Add(1)
-				assert.False(t, publicKey)
+				assert.True(t, publicKey)
 				return 100 * time.Millisecond, nil
 			},
 		},
@@ -1611,6 +1611,74 @@ func TestSessionPersistence(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestRoutingHeader(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+
+	testPublicKeyResponse := types.PublicKeyResponse{
+		PublicKeys:    [][]byte{fixture.EphemeralPublicKey},
+		CreationTimes: []time.Time{time.Now()},
+		TTLs:          []time.Duration{5 * time.Minute},
+		Config:        testEnclaveConfig(),
+		Attestation:   fixture.Attestation,
+	}
+
+	t.Run("/publicKeys carries hex(requestID)", func(t *testing.T) {
+		t.Parallel()
+		var gotHeader string
+		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotHeader = r.Header.Get(types.RoutingHeader)
+			require.NoError(t, json.NewEncoder(w).Encode(&testPublicKeyResponse))
+		}))
+		defer mockServer.Close()
+
+		pool, err := newTestPool(fixture.createNodes(mockServer.URL, 1), &mockSingleEnclaveSelector{}, nil)
+		require.NoError(t, err)
+
+		_, err = pool.GetPublicKeys(context.Background(), fixture.RequestID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, hex.EncodeToString(fixture.RequestID[:]), gotHeader)
+	})
+
+	t.Run("/requests carries hex(requestID)", func(t *testing.T) {
+		t.Parallel()
+		var gotHeader string
+		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == types.PublicKeyPath {
+				require.NoError(t, json.NewEncoder(w).Encode(&testPublicKeyResponse))
+				return
+			}
+			gotHeader = r.Header.Get(types.RoutingHeader)
+			var reqBody types.SignedComputeRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&reqBody))
+			require.NoError(t, json.NewEncoder(w).Encode(&types.ExecuteResponse{
+				RequestID:   reqBody.RequestID,
+				Output:      fixture.PublicData,
+				Attestation: fixture.Attestation,
+				RequestHash: reqBody.Hash(),
+			}))
+		}))
+		defer mockServer.Close()
+
+		pool, err := newTestPool(fixture.createNodes(mockServer.URL, 1), &mockSingleEnclaveSelector{}, nil)
+		require.NoError(t, err)
+
+		_, err = pool.GetPublicKeys(context.Background(), fixture.RequestID, nil)
+		require.NoError(t, err)
+
+		req := types.SignedComputeRequest{
+			ComputeRequest: types.ComputeRequest{
+				RequestID:                 fixture.RequestID,
+				PublicData:                fixture.PublicData,
+				EnclaveEphemeralPublicKey: fixture.EphemeralPublicKey,
+			},
+		}
+		_, err = pool.ExecuteBatch(context.Background(), []types.SignedComputeRequest{req}, [][32]byte{fixture.EnclaveID1})
+		require.NoError(t, err)
+		assert.Equal(t, hex.EncodeToString(fixture.RequestID[:]), gotHeader)
+	})
+}
+
 func TestExecuteBatchRejectsMismatchedApplicationRequestIDForNonLegacy(t *testing.T) {
 	t.Parallel()
 	fixture := newTestFixture(t)
@@ -2165,4 +2233,95 @@ func TestExecuteBatch_AttestationValidationFailure(t *testing.T) {
 	require.Len(t, records, 1)
 	assert.Equal(t, "execute", records[0]["endpoint"])
 	assert.Contains(t, records[0]["error"], "invalid fake attestation")
+}
+
+// TestGetPublicKeys_RetriesAfterConnectionReset verifies the public-key fetch
+// retry loop: the server force-closes the connection on the first hit (a
+// transport-level reset, the kind GOAWAY/RST produces), then succeeds on the
+// retry. The retry only fires on transport errors (resp == nil), not on 5xx.
+func TestGetPublicKeys_RetriesAfterConnectionReset(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != types.PublicKeyPath {
+			http.NotFound(w, r)
+			return
+		}
+		if hits.Add(1) == 1 {
+			// Force a transport-level reset: hijack and close without writing a
+			// response. This surfaces as resp == nil, err != nil at the pool,
+			// which is the retry trigger (a 5xx would not be retried).
+			hj, ok := w.(http.Hijacker)
+			require.True(t, ok, "httptest server must support hijacking")
+			conn, _, err := hj.Hijack()
+			require.NoError(t, err)
+			assert.NoError(t, conn.Close())
+			return
+		}
+		resp := fixture.createPublicKeyResponse()
+		err := json.NewEncoder(w).Encode(&resp)
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	pool, err := enclaveclient.NewPoolWithConfig(
+		[]types.Enclave{fixture.createNode(server.URL, fixture.EnclaveID1)},
+		&mockAllEnclaveSelector{},
+		nil,
+		enclaveclient.PoolConfig{
+			Cache:                    defaultCacheConfig(),
+			Session:                  enclaveclient.DefaultSessionConfig,
+			RequestTimeoutResolverFn: staticRequestTimeoutResolver(10 * time.Second),
+			PublicKeyRetriesMax:      2,
+			PublicKeyRetriesBackoff:  10 * time.Millisecond,
+		},
+	)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, pool.Close())
+	}()
+
+	pks, err := pool.GetPublicKeys(context.Background(), fixture.RequestID, nil)
+	require.NoError(t, err, "retry should recover after the first connection reset")
+	require.Len(t, pks, 1)
+	assert.Equal(t, fixture.EnclaveID1, pks[0].EnclaveID)
+	assert.GreaterOrEqual(t, hits.Load(), int32(2), "server should see at least a failed + successful hit")
+}
+
+// TestGetPublicKeys_RetriesExhaustedReturnsError verifies that when every
+// attempt resets the connection, the pool returns the joined transport errors.
+func TestGetPublicKeys_RetriesExhaustedReturnsError(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		require.True(t, ok)
+		conn, _, err := hj.Hijack()
+		require.NoError(t, err)
+		assert.NoError(t, conn.Close())
+	}))
+	defer server.Close()
+
+	pool, err := enclaveclient.NewPoolWithConfig(
+		[]types.Enclave{fixture.createNode(server.URL, fixture.EnclaveID1)},
+		&mockAllEnclaveSelector{},
+		nil,
+		enclaveclient.PoolConfig{
+			Cache:                    defaultCacheConfig(),
+			Session:                  enclaveclient.DefaultSessionConfig,
+			RequestTimeoutResolverFn: staticRequestTimeoutResolver(10 * time.Second),
+			PublicKeyRetriesMax:      2,
+			PublicKeyRetriesBackoff:  10 * time.Millisecond,
+		},
+	)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, pool.Close())
+	}()
+
+	_, err = pool.GetPublicKeys(context.Background(), fixture.RequestID, nil)
+	require.Error(t, err, "exhausted retries should surface an error")
 }

@@ -34,6 +34,7 @@ const (
 	executionsInflightMaxMetric = "confidential_compute.enclave.executions.inflight.max"
 	workflowActiveMetric        = "confidential_compute.enclave.workflow.active"
 	workflowsActiveMaxMetric    = "confidential_compute.enclave.workflows.active.max"
+	totalMemoryMetric           = "confidential_compute.enclave.memory.total"
 	goRuntimeMemoryMetric       = "confidential_compute.enclave.memory.go_runtime"
 	processRSSMemoryMetric      = "confidential_compute.enclave.memory.rss"
 )
@@ -439,20 +440,26 @@ func TestHostMetricsDoesNotRetainCompletedWorkflows(t *testing.T) {
 func TestHostMetricsEnclaveMemory(t *testing.T) {
 	metrics, reader := newTestHostMetrics(t)
 
-	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{UsedMB: 32, RSSMB: 96})
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{TotalMB: 11264, UsedMB: 32, RSSMB: 96})
 	data := collectHostMetrics(t, reader)
+	totalMetric := requireMetric(t, data, totalMemoryMetric)
 	goRuntimeMetric := requireMetric(t, data, goRuntimeMemoryMetric)
 	processRSSMetric := requireMetric(t, data, processRSSMemoryMetric)
+	assert.Equal(t, int64(11264*1024*1024), gaugeValue(t, data, totalMemoryMetric, nil))
 	assert.Equal(t, int64(32*1024*1024), gaugeValue(t, data, goRuntimeMemoryMetric, nil))
 	assert.Equal(t, int64(96*1024*1024), gaugeValue(t, data, processRSSMemoryMetric, nil))
+	assert.Equal(t, "By", totalMetric.Unit)
 	assert.Equal(t, "By", goRuntimeMetric.Unit)
 	assert.Equal(t, "By", processRSSMetric.Unit)
+	assert.Contains(t, totalMetric.Description, "quantized to the nearest MiB inside the enclave")
 	assert.Contains(t, goRuntimeMetric.Description, "quantized to the nearest MiB inside the enclave")
 	assert.Contains(t, processRSSMetric.Description, "quantized to the nearest MiB inside the enclave")
 
 	metrics.clearEnclaveMemory()
 	data = collectHostMetrics(t, reader)
-	_, found := findMetric(data, goRuntimeMemoryMetric)
+	_, found := findMetric(data, totalMemoryMetric)
+	assert.False(t, found)
+	_, found = findMetric(data, goRuntimeMemoryMetric)
 	assert.False(t, found)
 	_, found = findMetric(data, processRSSMemoryMetric)
 	assert.False(t, found)
@@ -461,10 +468,14 @@ func TestHostMetricsEnclaveMemory(t *testing.T) {
 func TestHostMetricsOmitsUnavailableMemoryValues(t *testing.T) {
 	metrics, reader := newTestHostMetrics(t)
 
+	// An enclave predating the totalMB field reports TotalMB=0; the host must
+	// omit the total series rather than export a bogus zero.
 	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{UsedMB: 32})
 	data := collectHostMetrics(t, reader)
 	assert.Equal(t, int64(32*1024*1024), gaugeValue(t, data, goRuntimeMemoryMetric, nil))
 	_, found := findMetric(data, processRSSMemoryMetric)
+	assert.False(t, found)
+	_, found = findMetric(data, totalMemoryMetric)
 	assert.False(t, found)
 }
 
@@ -497,7 +508,7 @@ func (t *memorySequenceTransport) RoundTrip(req *http.Request) (*http.Response, 
 func TestCollectEnclaveMemory(t *testing.T) {
 	transport := &mockRoundTripper{response: &http.Response{
 		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(`{"usedMB":32,"rssMB":96}`)),
+		Body:       io.NopCloser(strings.NewReader(`{"usedMB":32,"rssMB":96,"totalMB":11264}`)),
 		Header:     make(http.Header),
 	}}
 	metrics := &hostMetrics{}
@@ -511,6 +522,7 @@ func TestCollectEnclaveMemory(t *testing.T) {
 	require.NotNil(t, snapshot)
 	assert.Equal(t, int64(32*1024*1024), snapshot.goRuntimeBytes)
 	assert.Equal(t, int64(96*1024*1024), snapshot.processRSSBytes)
+	assert.Equal(t, int64(11264*1024*1024), snapshot.totalBytes)
 }
 
 func TestCollectEnclaveMemoryRejectsInvalidResponse(t *testing.T) {

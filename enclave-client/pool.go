@@ -78,6 +78,15 @@ type PoolConfig struct {
 	// publicKey is true for GetPublicKeys and false otherwise.
 	// It is invoked on each enclave-client operation
 	RequestTimeoutResolverFn func(ctx context.Context, publicKey bool) (time.Duration, error)
+
+	// PublicKeyRetriesMax is the number of extra attempts the pool makes on a
+	// transport error when fetching a single enclave's public keys (used by
+	// GetPublicKeys, GetConfigs, and the proactive cache refresh). Fetches are
+	// GETs with no body, so replaying is safe; keep-alives are disabled so each
+	// attempt opens a fresh connection.
+	PublicKeyRetriesMax int
+	// PublicKeyRetriesBackoff is the wait between public-key fetch retry attempts.
+	PublicKeyRetriesBackoff time.Duration
 }
 
 type scopedEmitter struct {
@@ -140,6 +149,10 @@ type enclavePool struct {
 	lggr types.Logger
 
 	requestTimeoutResolverFn func(ctx context.Context, publicKey bool) (time.Duration, error)
+
+	// Public-key fetch retry settings.
+	publicKeyRetriesMax     int
+	publicKeyRetriesBackoff time.Duration
 }
 
 var _ EnclaveClient = (*enclavePool)(nil)
@@ -182,6 +195,8 @@ func NewPoolWithConfig(
 		metrics:                  config.Metrics,
 		lggr:                     config.Logger,
 		requestTimeoutResolverFn: config.RequestTimeoutResolverFn,
+		publicKeyRetriesMax:      config.PublicKeyRetriesMax,
+		publicKeyRetriesBackoff:  config.PublicKeyRetriesBackoff,
 	}
 
 	if pool.lggr == nil {
@@ -240,17 +255,10 @@ func (c *enclavePool) GetPublicKeys(ctx context.Context, requestID [32]byte, che
 		responses   []types.EnclavePublicKeyData
 	)
 
-	// Apply a shorter timeout specifically for public key fetches so that
-	// requests to dead enclaves fail fast rather than blocking for the full
-	// httpClient timeout (e.g. 5s).
-	pkTimeout, err := c.resolveRequestTimeout(ctx, true)
-	if err != nil {
-		return nil, err
-	}
-	pkCtx, pkCancel := context.WithTimeout(ctx, pkTimeout)
-	defer pkCancel()
+	// Per-request timeouts are applied inside getSingleEnclavePublicKey so each
+	// fetch (and retry) gets its own budget; no outer timeout here.
 
-	g, gCtx := errgroup.WithContext(pkCtx)
+	g, gCtx := errgroup.WithContext(ctx)
 
 	for _, enclave := range enclaves {
 		enclave := enclave
@@ -336,6 +344,10 @@ func (c *enclavePool) ExecuteBatch(ctx context.Context, reqs []types.SignedCompu
 			if err != nil {
 				return fmt.Errorf("could not set auth header for enclave %s %w", enclave.EnclaveID, err)
 			}
+
+			// Consistent-hash routing key so an edge LB routes all DON nodes'
+			// calls for this workflow execution to the same pod.
+			httpReq.Header.Set(types.RoutingHeader, hex.EncodeToString(req.RequestID[:]))
 
 			c.applySession(req.EnclaveEphemeralPublicKey, httpReq)
 
@@ -466,12 +478,7 @@ func (c *enclavePool) UpdateConfig(ctx context.Context, update types.UpdateConfi
 // GetConfigs returns each enclave's current config, ordered the same as the pool's
 // node list. Configs are read from /publicKeys and attestation-validated.
 func (c *enclavePool) GetConfigs(ctx context.Context) ([]types.EnclaveConfig, error) {
-	timeout, err := c.resolveRequestTimeout(ctx, false)
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// Per-request timeouts are applied inside getSingleEnclavePublicKey.
 	c.nodesLock.RLock()
 	nodes := append([]types.Enclave{}, c.nodes...)
 	c.nodesLock.RUnlock()
@@ -613,13 +620,7 @@ func (c *enclavePool) UpdateNodes(ctx context.Context, nodes []types.Enclave) er
 // validating each response. It returns the first error encountered, leaving the
 // pool's node list untouched.
 func (c *enclavePool) validateNodes(ctx context.Context, nodes []types.Enclave) error {
-	timeout, err := c.resolveRequestTimeout(ctx, true)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
+	// Per-request timeouts are applied inside getSingleEnclavePublicKey.
 	g, gCtx := errgroup.WithContext(ctx)
 	for _, enclave := range nodes {
 		enclave := enclave
@@ -787,9 +788,49 @@ func (c *enclavePool) getSingleEnclavePublicKey(ctx context.Context, enclave typ
 		return nil, fmt.Errorf("could not set auth header for enclave %s %w", enclave.EnclaveID, err)
 	}
 
-	resp, err := c.httpClient.Do(httpReq)
+	// Consistent-hash routing key matching the /requests call so both legs of
+	// one workflow execution land on the same pod behind an edge LB.
+	if requestID != ([32]byte{}) {
+		httpReq.Header.Set(types.RoutingHeader, hex.EncodeToString(requestID[:]))
+	}
+
+	// Each attempt gets its own per-request timeout (resolved per call) so a
+	// retry starts with a fresh budget; the backoff between attempts is bounded
+	// only by the caller's outer context. This is a GET with no body, so
+	// replaying is safe, and keep-alives are disabled so each attempt opens a
+	// fresh conn — a failure is almost always a transient reset/GOAWAY.
+	reqTimeout, err := c.resolveRequestTimeout(ctx, true)
 	if err != nil {
 		return nil, err
+	}
+	var (
+		resp          *http.Response
+		successCancel context.CancelFunc
+		errs          []error
+	)
+	for attempt := 0; attempt <= c.publicKeyRetriesMax && resp == nil; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, reqTimeout)
+		resp, err = c.httpClient.Do(httpReq.Clone(attemptCtx))
+		if err != nil {
+			cancel()
+			errs = append(errs, err)
+			if attempt < c.publicKeyRetriesMax && ctx.Err() == nil {
+				select {
+				case <-ctx.Done():
+					return nil, errors.Join(append(errs, ctx.Err())...)
+				case <-time.After(c.publicKeyRetriesBackoff):
+				}
+			}
+			continue
+		}
+		// Keep the per-request context alive until the body is closed below.
+		successCancel = cancel
+	}
+	if successCancel != nil {
+		defer successCancel()
+	}
+	if err != nil {
+		return nil, errors.Join(errs...)
 	}
 	defer util.SafeClose(resp)
 
