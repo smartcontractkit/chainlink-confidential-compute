@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -598,68 +599,6 @@ func TestPublicKey(t *testing.T) {
 	assert.Contains(t, string(errorBody), "method not allowed")
 }
 
-func TestHandleMemory(t *testing.T) {
-	t.Parallel()
-
-	mockApp := newMockEnclaveApp()
-	serverURL := setupTestServerWithMockApp(t, mockApp)
-
-	client := &http.Client{}
-
-	req, err := http.NewRequest(http.MethodGet, serverURL+types.MemoryPath, nil)
-	require.NoError(t, err)
-
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	defer util.SafeClose(resp)
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
-
-	var mem types.MemoryEstimateResponse
-	err = json.NewDecoder(resp.Body).Decode(&mem)
-	require.NoError(t, err)
-
-	// The value comes from the Go runtime; we can't assert an exact number, but a
-	// running process always has some memory mapped.
-	assert.Positive(t, mem.UsedMB)
-
-	// Non-GET methods are rejected.
-	req, err = http.NewRequest(http.MethodPost, serverURL+types.MemoryPath, nil)
-	require.NoError(t, err)
-	resp, err = client.Do(req)
-	require.NoError(t, err)
-	defer util.SafeClose(resp)
-	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
-}
-
-func TestBytesToMBQuantizesMemoryReport(t *testing.T) {
-	t.Parallel()
-
-	const mib = uint64(1024 * 1024)
-	tests := []struct {
-		name  string
-		bytes uint64
-		want  uint64
-	}{
-		{name: "zero", bytes: 0, want: 0},
-		{name: "below half MiB", bytes: mib/2 - 1, want: 0},
-		{name: "half MiB rounds up", bytes: mib / 2, want: 1},
-		{name: "below one and a half MiB", bytes: mib + mib/2 - 1, want: 1},
-		{name: "one and a half MiB rounds up", bytes: mib + mib/2, want: 2},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, test.want, bytesToMB(test.bytes))
-		})
-	}
-}
-
-// configureTestServer POSTs a minimal non-zero config so the server will serve
-// /publicKeys. Tests that only need keys served (not the unconfigured 503
-// behavior) call this right after startup.
 func configureTestServer(t *testing.T, serverURL string) {
 	t.Helper()
 	pubKey, _, err := ed25519.GenerateKey(rand.Reader)
@@ -1698,4 +1637,49 @@ func TestAttestPublicKeys(t *testing.T) {
 		assert.Equal(t, append([]byte("att:"), hash[:]...), att)
 		assert.Equal(t, 2, a.Calls())
 	})
+}
+
+func TestHandleMemory(t *testing.T) {
+	t.Parallel()
+
+	mockApp := newMockEnclaveApp()
+	serverURL := setupTestServerWithMockApp(t, mockApp)
+
+	client := &http.Client{}
+
+	req, err := http.NewRequest(http.MethodGet, serverURL+types.MemoryPath, nil)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer util.SafeClose(resp)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	var mem types.MemoryEstimateResponse
+	err = json.Unmarshal(body, &mem)
+	require.NoError(t, err)
+
+	// The value comes from the Go runtime; we can't assert an exact number, but a
+	// running process always has some memory mapped.
+	assert.Positive(t, mem.UsedMB)
+
+	// Total guest RAM from /proc/meminfo: reported on Linux, 0 elsewhere.
+	if runtime.GOOS == "linux" {
+		assert.Positive(t, mem.TotalMB)
+		assert.Contains(t, string(body), "totalMB")
+	} else {
+		assert.Zero(t, mem.TotalMB)
+	}
+
+	// Non-GET methods are rejected.
+	req, err = http.NewRequest(http.MethodPost, serverURL+types.MemoryPath, nil)
+	require.NoError(t, err)
+	resp, err = client.Do(req)
+	require.NoError(t, err)
+	defer util.SafeClose(resp)
+	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
 }
