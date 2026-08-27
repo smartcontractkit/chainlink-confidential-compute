@@ -801,7 +801,7 @@ func (c *enclavePool) getSingleEnclavePublicKey(ctx context.Context, enclave typ
 	for attempt := 0; attempt <= c.publicKeyRetriesMax && resp == nil; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(ctx, reqTimeout)
 		resp, err = c.httpClient.Do(httpReq.Clone(attemptCtx))
-		if err != nil && resp == nil {
+		if err != nil {
 			cancel()
 			errs = append(errs, err)
 			if attempt < c.publicKeyRetriesMax && ctx.Err() == nil {
