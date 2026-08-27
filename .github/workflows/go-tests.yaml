@@ -21,7 +21,7 @@ on:
     # Nightly real-enclave run at 07:00 UTC.
     - cron: '0 7 * * *'
 env:
-  CHAINLINK_COMMIT_SHA: c4bca6ff6db1064b4fe4f9bda02fb1877276447b
+  CHAINLINK_COMMIT_SHA: 6837c88a297f18ee4e36919c8ebf5bf22ff83406
   LEGACY_COMMIT_SHA: 7d70fcf65d8b5af102d8267b54d31ea163dea203 # initial commit, the commit pointing to whatever is capability gitref is deployed in Chainlink's plugins.private.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.private.yaml#L50.
   LEGACY_ENCLAVE_RELEASE: v1.3.0 # The release tag whose enclave app the legacy-enclaves leg checks out and runs locally as a fake enclave. Update this when the deployed production enclave release changes.
   # Pinned refs for the supporting CRE Docker images, used as GHCR cache keys.
@@ -68,7 +68,6 @@ jobs:
           UNIT='{"name":"Unit tests (fake enclaves)","real":false,"legacy":false,"legacy-enclaves":false,"portion":"unit"}'
           E2E_HTTP='{"name":"E2E confidential HTTP (fake enclaves)","real":false,"legacy":false,"legacy-enclaves":false,"portion":"e2e-http"}'
           E2E_WORKFLOWS='{"name":"E2E workflow engine (fake enclaves)","real":false,"legacy":false,"legacy-enclaves":false,"portion":"e2e-workflows"}'
-          E2E_MISSING_SECRET='{"name":"E2E missing-secret (fake enclaves)","real":false,"legacy":false,"legacy-enclaves":false,"portion":"e2e-missing-secret"}'
           REAL_E2E='{"name":"e2e + integration (real enclaves)","real":true,"legacy":false,"legacy-enclaves":false}'
           BACKWARDS_COMPAT='{"name":"Test backwards compatibility (fake enclaves)","real":false,"legacy":true,"legacy-enclaves":false,"portion":"e2e-http"}'
           LEGACY_ENCLAVES='{"name":"Test against legacy enclaves","real":false,"legacy":false,"legacy-enclaves":true}'
@@ -79,7 +78,7 @@ jobs:
               # Fake-enclave suites for fast feedback (including backwards-compat),
               # plus the legacy-enclaves variant (local fake enclave from a prior
               # release checkout).
-              VARIANTS=("$UNIT" "$E2E_HTTP" "$E2E_WORKFLOWS" "$E2E_MISSING_SECRET" "$BACKWARDS_COMPAT" "$LEGACY_ENCLAVES")
+              VARIANTS=("$UNIT" "$E2E_HTTP" "$E2E_WORKFLOWS" "$BACKWARDS_COMPAT" "$LEGACY_ENCLAVES")
               # Opt-in: the "e2e-real-enclaves" label adds a real Nitro e2e +
               # integration run on the self-hosted runner.
               if [ "${{ contains(github.event.pull_request.labels.*.name, 'e2e-real-enclaves') }}" = "true" ]; then
@@ -166,7 +165,7 @@ jobs:
           echo "GOSUMDB=sum.golang.org" >> $GITHUB_ENV
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.7'
+          go-version: '1.26.5'
           cache: false
 
       # Explicit cache (not setup-go's built-in) so restore-keys gives a partial
@@ -331,7 +330,7 @@ jobs:
       - uses: actions/setup-go@v6
         if: steps.cache.outputs.chip_ingress_hit != 'true' || steps.cache.outputs.chip_config_hit != 'true'
         with:
-          go-version: '1.26.7'
+          go-version: '1.26.5'
           cache: false
 
       # ---- chainlink ----
@@ -560,7 +559,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.7'
+          go-version: '1.26.5'
           cache: false
 
       # Only cache on the ephemeral hosted (fake-enclave) runners. The self-hosted
@@ -799,12 +798,6 @@ jobs:
               cd tests/e2e
               CTF_CONFIGS=configs/workflow-don-engine.toml \
                 GOMAXPROCS=2 go test -v ./... -run '^TestConfidentialWorkflowsEngineE2E$' -timeout 90m -p 1
-              ;;
-            e2e-missing-secret)
-              echo "Fake-enclave run: missing-secret user-error e2e"
-              cd tests/e2e
-              CTF_CONFIGS=configs/workflow-don-engine.toml \
-                GOMAXPROCS=2 go test -v ./... -run '^TestConfidentialWorkflowsMissingSecretE2E$' -timeout 90m -p 1
               ;;
             unit|*)
               echo "Fake-enclave run: unit tests across all modules, plus the tests/ root integration suite (tests/e2e excluded)"

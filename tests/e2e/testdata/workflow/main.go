@@ -41,11 +41,6 @@ type config struct {
 	ChainSelector   uint64 `json:"chain_selector"`
 	FeedID          string `json:"feed_id"`
 	Price           uint64 `json:"price"`
-
-	// SecretID is the secret name handleTrigger fetches. Defaults to MOCK_SECRET
-	// so the happy path is unchanged; a test can set it to a name that was never
-	// uploaded to exercise the missing-secret → user-error path.
-	SecretID string `json:"secret_id"`
 }
 
 // feedReport matches PermissionlessFeedsConsumer's ReceivedFeedReport struct, which
@@ -71,11 +66,7 @@ func initWorkflow(_ *config, _ *slog.Logger, _ cre.SecretsProvider) (cre.Workflo
 }
 
 func handleTrigger(cfg *config, trt cre.TeeRuntime, payload *cron.Payload) (any, error) {
-	secretID := cfg.SecretID
-	if secretID == "" {
-		secretID = "MOCK_SECRET"
-	}
-	secret, err := trt.GetSecret(&sdkpb.SecretRequest{Id: secretID}).Await()
+	secret, err := trt.GetSecret(&sdkpb.SecretRequest{Id: "MOCK_SECRET"}).Await()
 	if err != nil {
 		return nil, err
 	}

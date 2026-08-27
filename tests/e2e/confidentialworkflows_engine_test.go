@@ -227,13 +227,6 @@ const engineTestBinaryPath = "/artifacts/" + engineTestBinaryFilename
 const engineTestConfigPath = "/artifacts/" + engineTestConfigFilename
 const engineTestArtifactPath = "/artifact/" + engineTestBinaryFilename
 
-// engineTestMissingSecretConfigFilename is a second workflow config that points
-// handleTrigger at a secret name ("MISSING_SECRET") that is never uploaded, so
-// the relay returns a user error (vault "key does not exist") and the workflow
-// fails with a user-classified error rather than a system failure.
-const engineTestMissingSecretConfigFilename = "workflow-test-config-missing-secret.json"
-const engineTestMissingSecretConfigPath = "/artifacts/" + engineTestMissingSecretConfigFilename
-
 // cwEngineTestServers holds the engine-test WASM binary server state.
 var cwEngineTestServers struct {
 	once         sync.Once
@@ -323,13 +316,6 @@ func initCWEngineTestServers(configJSON string) (wasmURL string, configURL strin
 		})
 		mux.HandleFunc(engineTestConfigPath, func(rw http.ResponseWriter, r *http.Request) {
 			_, _ = rw.Write([]byte(configJSON))
-		})
-		// Serve a second config that requests a secret never uploaded to the vault,
-		// exercising the missing-secret → user-error classification path. Echo and
-		// chain-write are disabled (empty fields) so the workflow fails at GetSecret
-		// before reaching the later legs.
-		mux.HandleFunc(engineTestMissingSecretConfigPath, func(rw http.ResponseWriter, r *http.Request) {
-			_, _ = rw.Write([]byte(`{"secret_id":"MISSING_SECRET"}`))
 		})
 		wasmListener, err := net.Listen("tcp", "0.0.0.0:0")
 		if err != nil {
@@ -429,7 +415,7 @@ func startFakeStorageService(t *testing.T, enclaveHost string) (string, *fakeSto
 	return fmt.Sprintf("%s:%d", enclaveHost, port), svc
 }
 
-func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, buildLocalBinaries func() error, missingSecretOnly bool) {
+func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, buildLocalBinaries func() error) {
 	t.Helper()
 	if os.Getenv("REMOTE_ENCLAVE_URLS") != "" || tests.UseLegacyEnclaves() {
 		t.Skip("engine test does not run against remote/legacy enclaves")
@@ -621,30 +607,6 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	}
 	memBefore := totalEnclaveMemoryMB(t, authedEnclaves, testLogger)
 	testLogger.Info().Uint64("totalUsedMB", memBefore).Msg("Total enclave memory before workflow deploy")
-
-	if missingSecretOnly {
-		// Missing-secret → user-error classification. Deploy a workflow whose
-		// config requests a secret ("MISSING_SECRET") that was never uploaded to
-		// the vault. The relay DON maps the vault's "key does not exist" to a
-		// JSON-RPC ErrInvalidParams (a user error) once the relay-node fix ships;
-		// the enclave surfaces the cause in the engine's "Workflow execution
-		// failed" log. This runs as its own test (own CRE env + enclave) rather
-		// than alongside the happy-path workflow, because two concurrent
-		// confidential workflows in one enclave starve the second one's
-		// gateway/relay dispatch.
-		//
-		// NOTE: asserts the post-fix behavior (error message contains
-		// "key does not exist" + ErrInvalidParams code -32602). Against a
-		// chainlink version predating the relay-node user-error fix, the message
-		// is "relay quorum unreachable" with an "internal error" code.
-		missingSecretConfigURL := configURL[:len(configURL)-len(engineTestConfigFilename)] + engineTestMissingSecretConfigFilename
-		missingSecretWorkflowID := deployConfidentialWorkflowForEngineWithID(t, testEnv, testLogger, wasmURL, missingSecretConfigURL, "engine-test-missing-secret")
-		failureLine := waitForWorkflowExecutionFailure(t, testEnv, testLogger, missingSecretWorkflowID, "key does not exist", 5*time.Minute)
-		require.Contains(t, string(failureLine), "JSON-RPC error -32602", "missing-secret failure must carry the ErrInvalidParams code, not an internal error")
-		require.NotContains(t, string(failureLine), "internal error", "missing-secret failure must be classified as a user error, not an internal error")
-		testLogger.Info().Msg("Missing-secret E2E test passed: vault user-error surfaced as ErrInvalidParams")
-		return
-	}
 
 	// 6. Deploy the confidential workflow with attributes and configURL.
 	workflowID := deployConfidentialWorkflowForEngine(t, testEnv, testLogger, wasmURL, configURL)
@@ -878,48 +840,6 @@ func waitForWorkflowExecutionComplete(
 	}
 }
 
-// waitForWorkflowExecutionFailure polls `docker logs` on every workflow-DON
-// container until a line contains the "Workflow execution failed" message, the
-// given workflowID, and the needle substring (e.g. the user-error marker
-// "key does not exist"). Matching it proves the workflow ran, hit the expected
-// failure, and that the failure message reached the engine logs with the
-// expected classification. Returns the matching log line.
-func waitForWorkflowExecutionFailure(
-	t *testing.T,
-	testEnv *ttypes.TestEnvironment,
-	testLogger zerolog.Logger,
-	workflowID string,
-	needleMsg string,
-	timeout time.Duration,
-) []byte {
-	t.Helper()
-
-	containers := workflowDONContainerNames(testEnv)
-	require.NotEmpty(t, containers, "no workflow-DON containers found to scrape")
-	needleFailed := []byte(`"msg":"Workflow execution failed"`)
-	needleID := []byte(workflowID)
-	needle := []byte(needleMsg)
-	testLogger.Info().Msgf("Waiting for failure log for workflowID %s with needle %q on %d container(s)", workflowID, needleMsg, len(containers))
-
-	deadline := time.Now().Add(timeout)
-	for {
-		for _, name := range containers {
-			out, _ := exec.Command("docker", "logs", "--tail", "10000", name).CombinedOutput()
-			for _, line := range bytes.Split(out, []byte{'\n'}) {
-				if bytes.Contains(line, needleFailed) && bytes.Contains(line, needleID) && bytes.Contains(line, needle) {
-					testLogger.Info().Msgf("Found failure log in container %s for workflowID %s", name, workflowID)
-					return line
-				}
-			}
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %s waiting for failure log with workflowID %s and needle %q", timeout, workflowID, needleMsg)
-		}
-		testLogger.Info().Msg("Failure log not found yet, retrying in 5s...")
-		time.Sleep(5 * time.Second)
-	}
-}
-
 // workflowDONContainerNames returns the chainlink container names for every
 // nodeset whose DON hosts the workflow DON flag.
 func workflowDONContainerNames(testEnv *ttypes.TestEnvironment) []string {
@@ -960,21 +880,6 @@ func deployConfidentialWorkflowForEngine(
 	configURL string,
 ) string {
 	t.Helper()
-	return deployConfidentialWorkflowForEngineWithID(t, testEnv, testLogger, binaryURL, configURL, "engine-test-confidential")
-}
-
-// deployConfidentialWorkflowForEngineWithID is the name-taking variant, used to
-// deploy a second workflow alongside the happy-path one without colliding on
-// the on-chain workflow name (e.g. the missing-secret sub-case).
-func deployConfidentialWorkflowForEngineWithID(
-	t *testing.T,
-	testEnv *ttypes.TestEnvironment,
-	testLogger zerolog.Logger,
-	binaryURL string,
-	configURL string,
-	workflowName string,
-) string {
-	t.Helper()
 
 	require.IsType(t, &evm.Blockchain{}, testEnv.CreEnvironment.Blockchains[0])
 	sethClient := testEnv.CreEnvironment.Blockchains[0].(*evm.Blockchain).SethClient
@@ -989,7 +894,7 @@ func deployConfidentialWorkflowForEngineWithID(
 
 	attributes := []byte(`{"confidential":true}`)
 
-	testLogger.Info().Msgf("Registering confidential workflow %q (binaryURL=%s, configURL=%s, attributes=%s)", workflowName, binaryURL, configURL, string(attributes))
+	testLogger.Info().Msgf("Registering confidential workflow (binaryURL=%s, configURL=%s, attributes=%s)", binaryURL, configURL, string(attributes))
 
 	configURLPtr := &configURL
 	workflowID, err := creworkflow.RegisterWithContract(
@@ -999,7 +904,7 @@ func deployConfidentialWorkflowForEngineWithID(
 		wfRegistryRef.Version,
 		0, // donID unused for v2
 		testEnv.Dons.MustWorkflowDON().DonFamily,
-		workflowName,
+		"engine-test-confidential",
 		"some-tag", // workflowTag
 		binaryURL,
 		configURLPtr,
@@ -1008,16 +913,16 @@ func deployConfidentialWorkflowForEngineWithID(
 		nil, // keep HTTP URL on-chain; enclave fetches binary via HTTP, syncer file-fetcher extracts filename from URL path
 	)
 	require.NoError(t, err, "failed to register confidential workflow")
-	testLogger.Info().Msgf("Confidential workflow %q registered: %s", workflowName, workflowID)
+	testLogger.Info().Msgf("Confidential workflow registered: %s", workflowID)
 
 	t.Cleanup(func() {
-		testLogger.Info().Msgf("Cleaning up confidential workflow %q...", workflowName)
+		testLogger.Info().Msg("Cleaning up confidential workflow...")
 		_ = creworkflow.DeleteWithContract(
 			context.Background(),
 			sethClient,
 			common.HexToAddress(wfRegistryRef.Address),
 			wfRegistryRef.Version,
-			workflowName,
+			"engine-test-confidential",
 		)
 	})
 
