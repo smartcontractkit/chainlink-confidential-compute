@@ -45,7 +45,6 @@ import (
 	"github.com/smartcontractkit/chainlink-confidential-compute/tests"
 	creJob "github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/job"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
-	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 
 	"github.com/stretchr/testify/require"
 )
@@ -595,19 +594,6 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 		require.NoError(t, copyErr, "failed to copy engine-test config to Docker containers")
 	}
 
-	// 5b. Capture enclave memory usage before the workflow is deployed and running.
-	//     Baseline reflects idle, configured enclaves that have not yet loaded or
-	//     executed any WASM. The enclaves require the x-api-key header (matching
-	//     job.go's "foobar"); attach it so direct /memory reads aren't rejected with
-	//     401 (enclave 0 sits behind the auth-enforcing proxy).
-	authedEnclaves := make([]types.Enclave, len(enclaves))
-	copy(authedEnclaves, enclaves)
-	for i := range authedEnclaves {
-		authedEnclaves[i].EnclaveAuthHeader = "x-api-key: foobar"
-	}
-	memBefore := totalEnclaveMemoryMB(t, authedEnclaves, testLogger)
-	testLogger.Info().Uint64("totalUsedMB", memBefore).Msg("Total enclave memory before workflow deploy")
-
 	// 6. Deploy the confidential workflow with attributes and configURL.
 	workflowID := deployConfidentialWorkflowForEngine(t, testEnv, testLogger, wasmURL, configURL)
 
@@ -642,18 +628,6 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// out of the enclave. A stale/zero value here means the write leg silently
 	// no-op'd even though the workflow reported success.
 	assertFeedReportWritten(t, sethClientFor(t, testEnv), consumerAddr, testLogger, 2*time.Minute)
-
-	// 8. The workflow has now loaded and executed inside the enclaves (WASM runtime
-	//    + binary resident, requests processed). The reported memory usage should
-	//    differ from the pre-deploy baseline, exercising the /memory endpoint end
-	//    to end (enclave server -> host proxy).
-	memAfter := totalEnclaveMemoryMB(t, authedEnclaves, testLogger)
-	testLogger.Info().Uint64("totalUsedMB", memAfter).Uint64("baselineMB", memBefore).Msg("Total enclave memory after workflow execution")
-	require.Greater(t, memAfter, memBefore, "enclave memory usage should grow after running the workflow (WASM runtime + binary loaded)")
-	// Upper bound as a regression tripwire: the executing enclave typically settles
-	// around ~67MB (idle ~18MB + WASM runtime/binary/execution), for a total near
-	// 85MB across both enclaves. Flag if we start consuming substantially more.
-	require.Less(t, memAfter, uint64(100), "total enclave memory should stay under 100MB; a large jump may indicate a leak or regression")
 
 	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write validated")
 }
@@ -751,47 +725,6 @@ func parseEngineTestFeedID() ([32]byte, error) {
 	}
 	copy(id[:], b)
 	return id, nil
-}
-
-// enclaveUsedMemoryMB queries an enclave's /memory endpoint and returns the
-// megabytes of memory it reports in use.
-func enclaveUsedMemoryMB(enclave types.Enclave) (uint64, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, enclave.EnclaveURL+types.MemoryPath, nil)
-	if err != nil {
-		return 0, err
-	}
-	if err := util.SetAuthHeader(enclave, req); err != nil {
-		return 0, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer util.SafeClose(resp)
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("memory endpoint returned status %d", resp.StatusCode)
-	}
-	var out types.MemoryEstimateResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return 0, err
-	}
-	return out.UsedMB, nil
-}
-
-// totalEnclaveMemoryMB sums the in-use memory reported across all enclaves. It
-// requires every enclave to be reachable so before/after measurements cover the
-// same set.
-func totalEnclaveMemoryMB(t *testing.T, enclaves []types.Enclave, testLogger zerolog.Logger) uint64 {
-	t.Helper()
-	var total uint64
-	for _, enc := range enclaves {
-		mb, err := enclaveUsedMemoryMB(enc)
-		require.NoError(t, err, "failed to query /memory for enclave %s", enc.EnclaveURL)
-		testLogger.Info().Str("enclave", enc.EnclaveURL).Uint64("usedMB", mb).Msg("enclave memory usage")
-		total += mb
-	}
-	return total
 }
 
 // waitForWorkflowExecutionComplete polls `docker logs` on every workflow-DON

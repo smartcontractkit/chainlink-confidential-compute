@@ -50,6 +50,7 @@ func (noopExecutionMetrics) startExecution(executionMetadata, time.Duration) fun
 }
 
 type enclaveMemorySnapshot struct {
+	totalBytes      int64
 	goRuntimeBytes  int64
 	processRSSBytes int64
 }
@@ -69,6 +70,7 @@ type hostMetrics struct {
 	executionsInflightMax metric.Int64ObservableGauge
 	workflowActive        metric.Int64ObservableGauge
 	workflowsActiveMax    metric.Int64ObservableGauge
+	totalMemory           metric.Int64ObservableGauge
 	goRuntimeMemory       metric.Int64ObservableGauge
 	processRSSMemory      metric.Int64ObservableGauge
 
@@ -191,6 +193,15 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	if err != nil {
 		return nil, fmt.Errorf("create enclave Go runtime memory gauge: %w", err)
 	}
+	totalMemory, err := meter.Int64ObservableGauge(
+		"confidential_compute.enclave.memory.total",
+		metric.WithDescription("Total RAM of the enclave guest (/proc/meminfo MemTotal), quantized to the nearest MiB inside the enclave; the denominator for memory-pressure ratios"),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(metrics.observeTotalMemory),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave total memory gauge: %w", err)
+	}
 	processRSSMemory, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.memory.rss",
 		metric.WithDescription("Resident memory of the enclave process, including native Wasmtime allocations, quantized to the nearest MiB inside the enclave"),
@@ -203,6 +214,7 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 
 	metrics.workflowActive = active
 	metrics.workflowsActiveMax = activeMax
+	metrics.totalMemory = totalMemory
 	metrics.goRuntimeMemory = goRuntimeMemory
 	metrics.processRSSMemory = processRSSMemory
 	_, err = meter.RegisterCallback(
@@ -256,6 +268,16 @@ func (m *hostMetrics) observeExecutionLoad(_ context.Context, observer metric.Ob
 
 // Memory is sampled over vsock in a background goroutine. These callbacks only
 // load the latest immutable snapshot, so metric collection never waits on the enclave.
+// observeTotalMemory skips zero values so hosts polling an enclave that
+// predates the totalMB field export no series instead of a bogus zero.
+func (m *hostMetrics) observeTotalMemory(_ context.Context, observer metric.Int64Observer) error {
+	snapshot := m.memory.Load()
+	if snapshot != nil && snapshot.totalBytes > 0 {
+		observer.Observe(snapshot.totalBytes)
+	}
+	return nil
+}
+
 func (m *hostMetrics) observeGoRuntimeMemory(_ context.Context, observer metric.Int64Observer) error {
 	snapshot := m.memory.Load()
 	if snapshot != nil && snapshot.goRuntimeBytes > 0 {
@@ -274,6 +296,7 @@ func (m *hostMetrics) observeProcessRSSMemory(_ context.Context, observer metric
 
 func (m *hostMetrics) recordEnclaveMemory(estimate types.MemoryEstimateResponse) {
 	m.memory.Store(&enclaveMemorySnapshot{
+		totalBytes:      mibToBytes(estimate.TotalMB),
 		goRuntimeBytes:  mibToBytes(estimate.UsedMB),
 		processRSSBytes: mibToBytes(estimate.RSSMB),
 	})
