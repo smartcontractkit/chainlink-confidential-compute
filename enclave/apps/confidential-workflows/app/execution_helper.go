@@ -2,19 +2,22 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	httpcap "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http"
 	httpserver "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http/server"
 	consensusserver "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/consensus/server"
+	jsonrpc2 "github.com/smartcontractkit/chainlink-common/pkg/jsonrpc2"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	valuespb "github.com/smartcontractkit/chainlink-protos/cre/go/values/pb"
 	wfpb "github.com/smartcontractkit/chainlink-protos/workflows/go/v2"
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
-	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -200,16 +203,38 @@ func (h *enclaveExecutionHelper) GetSecrets(ctx context.Context, req *sdkpb.GetS
 	h.logger.Infof("[ExecutionHelper.GetSecrets] called, remoteDispatcher=%v, numRequests=%d", h.remoteDispatcher != nil, len(req.GetRequests()))
 	start := time.Now()
 	defer func() {
-		h.emit("get_secrets", map[string]any{
+		details := map[string]any{
 			"success":          err == nil,
 			"num_requests":     len(req.GetRequests()),
 			"duration_seconds": time.Since(start).Seconds(),
-		})
+		}
+		if err != nil {
+			// Classify the failure so the get_secrets success-rate alert can
+			// exclude user-caused errors (e.g. a missing secret, surfaced by the
+			// relay as jsonrpc2.ErrInvalidParams) from system-level paging. A
+			// missing error_type means success.
+			details["error_type"] = secretErrorOrigin(err)
+		}
+		h.emit("get_secrets", details)
 	}()
 	if h.remoteDispatcher == nil {
 		return nil, fmt.Errorf("remote dispatcher is required for secret fetching")
 	}
 	return h.remoteDispatcher.GetSecrets(ctx, h.workflowID, h.requestID, req, h.owner, h.executionID, h.orgID, h.signedRequests)
+}
+
+// secretErrorOrigin classifies a GetSecrets failure as user- or system-caused
+// for the get_secrets error_type metric attribute. The relay DON maps a
+// user-caused vault failure (e.g. "key does not exist") to a JSON-RPC
+// ErrInvalidParams; everything else (ErrInternal, transport, attestation,
+// quorum-verify, unmarshal) is a system failure. errors.As unwraps through the
+// dispatcher's fmt.Errorf("sending secrets request: %w", ...) wrap.
+func secretErrorOrigin(err error) string {
+	var rpcErr *gateway.RPCError
+	if errors.As(err, &rpcErr) && rpcErr.Code == jsonrpc2.ErrInvalidParams {
+		return "user"
+	}
+	return "system"
 }
 
 func (h *enclaveExecutionHelper) GetWorkflowExecutionID() string { return h.executionID }
