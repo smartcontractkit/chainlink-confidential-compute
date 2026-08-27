@@ -2,24 +2,27 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	jsonrpc2 "github.com/smartcontractkit/chainlink-common/pkg/jsonrpc2"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 
 	httpcap "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http"
 	httpserver "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http/server"
 	consensusserver "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/consensus/server"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/smartcontractkit/chainlink-protos/cre/go/values"
 	valuespb "github.com/smartcontractkit/chainlink-protos/cre/go/values/pb"
 	wfpb "github.com/smartcontractkit/chainlink-protos/workflows/go/v2"
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
-	"github.com/smartcontractkit/chainlink-confidential-compute/types"
-	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -145,6 +148,73 @@ func TestGetSecrets_EmitsMetricOnFailure(t *testing.T) {
 	ev := em.events[0]
 	assert.Equal(t, false, ev.Details["success"])
 	assert.Equal(t, 1, ev.Details["num_requests"])
+	// A non-RPC failure (nil dispatcher) is a system error.
+	assert.Equal(t, "system", ev.Details["error_type"])
+}
+
+func TestGetSecrets_ClassifiesErrorOrigin(t *testing.T) {
+	tests := []struct {
+		name          string
+		dispatcherErr error
+		wantOrigin    string
+	}{
+		{
+			name:          "user error: ErrInvalidParams wraps missing secret",
+			dispatcherErr: fmt.Errorf("sending secrets request: %w", &gateway.RPCError{Code: jsonrpc2.ErrInvalidParams, Message: "vault error for secret main/API_TOKEN: key does not exist"}),
+			wantOrigin:    "user",
+		},
+		{
+			name:          "system error: ErrInternal quorum unreachable",
+			dispatcherErr: fmt.Errorf("sending secrets request: %w", &gateway.RPCError{Code: jsonrpc2.ErrInternal, Message: "relay quorum unreachable"}),
+			wantOrigin:    "system",
+		},
+		{
+			name:          "system error: non-RPC transport failure",
+			dispatcherErr: fmt.Errorf("creating attestation: connection refused"),
+			wantOrigin:    "system",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			em := &recordingEmitter{}
+			dispatcher := &stubRemoteDispatcher{
+				getSecretsFn: func(_ context.Context, _ string, _ [32]byte, _ *sdkpb.GetSecretsRequest, _, _, _ string) ([]*sdkpb.SecretResponse, error) {
+					return nil, tc.dispatcherErr
+				},
+			}
+			h := &enclaveExecutionHelper{remoteDispatcher: dispatcher, logger: logger.Test(t), emitter: em}
+
+			_, err := h.GetSecrets(context.Background(), &sdkpb.GetSecretsRequest{
+				Requests: []*sdkpb.SecretRequest{{Id: "API_TOKEN", Namespace: "main"}},
+			})
+			require.Error(t, err)
+
+			require.Equal(t, 1, em.countOf("get_secrets"))
+			ev := em.events[0]
+			assert.Equal(t, false, ev.Details["success"])
+			assert.Equal(t, tc.wantOrigin, ev.Details["error_type"])
+		})
+	}
+}
+
+func TestGetSecrets_SuccessOmitsErrorType(t *testing.T) {
+	em := &recordingEmitter{}
+	dispatcher := &stubRemoteDispatcher{
+		getSecretsFn: func(_ context.Context, _ string, _ [32]byte, _ *sdkpb.GetSecretsRequest, _, _, _ string) ([]*sdkpb.SecretResponse, error) {
+			return []*sdkpb.SecretResponse{{Response: &sdkpb.SecretResponse_Secret{Secret: &sdkpb.Secret{Id: "API_TOKEN", Namespace: "main", Value: "v"}}}}, nil
+		},
+	}
+	h := &enclaveExecutionHelper{remoteDispatcher: dispatcher, logger: logger.Test(t), emitter: em}
+
+	_, err := h.GetSecrets(context.Background(), &sdkpb.GetSecretsRequest{
+		Requests: []*sdkpb.SecretRequest{{Id: "API_TOKEN", Namespace: "main"}},
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, 1, em.countOf("get_secrets"))
+	ev := em.events[0]
+	assert.Equal(t, true, ev.Details["success"])
+	assert.NotContains(t, ev.Details, "error_type")
 }
 
 func TestEmitUserLog_ForwardsToEmitter(t *testing.T) {

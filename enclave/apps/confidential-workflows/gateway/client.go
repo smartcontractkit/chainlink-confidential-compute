@@ -24,6 +24,20 @@ import (
 
 const attestationHeader = "X-Attestation-Document"
 
+// RPCError is a well-formed JSON-RPC error response returned by the relay.
+// It carries the wire error code so callers can classify failures (e.g. a
+// user-caused ErrInvalidParams vs a system ErrInternal) without parsing the
+// error string. Its Error() matches the prior fmt.Errorf format so logs and
+// existing assertions are unchanged.
+type RPCError struct {
+	Code    int64
+	Message string
+}
+
+func (e *RPCError) Error() string {
+	return fmt.Sprintf("JSON-RPC error %d: %s", e.Code, e.Message)
+}
+
 type GatewayClient struct {
 	gatewayURLs []string          // one or more; round-robined per request
 	attestor    attestor.Attestor // nil = skip attestation (local testing)
@@ -194,7 +208,7 @@ func (c *GatewayClient) sendOne(ctx context.Context, url string, body []byte, at
 	// fault, so surface it directly without failing over.
 	rpcResp, decErr := jsonrpc2.DecodeResponse[json.RawMessage](respBody)
 	if decErr == nil && rpcResp.Error != nil {
-		return nil, false, fmt.Errorf("JSON-RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+		return nil, false, &RPCError{Code: rpcResp.Error.Code, Message: rpcResp.Error.Message}
 	}
 
 	if resp.StatusCode != http.StatusOK {
