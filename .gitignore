@@ -42,3 +42,4 @@ enclave/apps/*/fake
 enclave/apps/*/nitro
 **/CLAUDE.md
 enclave/nitro/host/host
+enclave/config-tracker/config-tracker
