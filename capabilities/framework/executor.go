@@ -681,6 +681,9 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 				strings.Contains(err.Error(), types.ErrResponseBodyTooLarge) {
 				return caperrors.NewPublicUserError(fmt.Errorf("enclave request failed: %w", err), caperrors.InvalidArgument)
 			}
+			if strings.Contains(err.Error(), types.ErrWasmExecutionTimeout) {
+				return caperrors.NewPublicUserError(fmt.Errorf("enclave wasm execution timed out: %w", err), caperrors.DeadlineExceeded)
+			}
 			innerLggr.Warnw("enclave execution failed",
 				"duration_ms", enclaveExecuteErrDuration.Milliseconds(),
 				"error", err)

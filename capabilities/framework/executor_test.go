@@ -1269,6 +1269,48 @@ func TestExecutor_QuorumTimeout(t *testing.T) {
 	})
 }
 
+func TestExecutor_WasmExecutionTimeoutIsUserError(t *testing.T) {
+	t.Run("wasm execution timeout short-circuits retries as a user DeadlineExceeded error", func(t *testing.T) {
+		mockVaultDONCapability := &MockVaultDONCapability{}
+		mockVaultDONCapability.ExecuteFunc = func(ctx context.Context, req capabilities.CapabilityRequest) (capabilities.CapabilityResponse, error) {
+			respAny, _ := anypb.New(getValidGetSecretsResponse())
+			return capabilities.CapabilityResponse{Payload: respAny}, nil
+		}
+		mockVaultDON := framework.VaultDON{
+			CryptographyThreshold: 1,
+			Capability:            mockVaultDONCapability,
+		}
+
+		// Mirror the plain-text error string the enclave/host/pool chain produces:
+		// pool.go wraps the enclave's 500 body as "execute failed: <ExecuteError.Error>",
+		// where the app prepended the ErrWasmExecutionTimeout sentinel (app.go).
+		// The executor matches the sentinel substring to classify the failure.
+		wasmTimeoutErr := fmt.Errorf(
+			"failed to execute enclave request. enclave ID: %s, error: execute failed: %s: executing wasm: executing wasm: context deadline exceeded 504",
+			base64.StdEncoding.EncodeToString(mockEnclaveID[:]), enclavetypes.ErrWasmExecutionTimeout)
+
+		executeBatchCalls := 0
+		mockEnclaveClient := &MockEnclaveClient{}
+		mockEnclaveClient.ExecuteBatchFunc = func(ctx context.Context, reqs []enclavetypes.SignedComputeRequest, enclaveIDs [][32]byte) ([]enclavetypes.ExecuteResponse, error) {
+			executeBatchCalls++
+			return nil, wasmTimeoutErr
+		}
+
+		mockMetrics := NewMockMetrics()
+		_, err := setupAndExecuteExecutor(t, mockEnclaveClient, mockVaultDON, mockMetrics, getDefaultRateLimiter(), 3, 0)
+		require.Error(t, err)
+
+		// A user-classified error short-circuits the retry loop, so the enclave is
+		// contacted exactly once rather than 3 times.
+		assert.Equal(t, 1, executeBatchCalls, "wasm timeout must short-circuit as a user error, not retry")
+
+		var capErr caperrors.Error
+		require.True(t, errors.As(err, &capErr), "expected error to unwrap into caperrors.Error")
+		assert.Equal(t, caperrors.OriginUser, capErr.Origin())
+		assert.Equal(t, caperrors.DeadlineExceeded, capErr.Code())
+	})
+}
+
 func TestExecutor_DifferentEnclaveOnRetry(t *testing.T) {
 	t.Run("GetPublicKeys is called on each retry attempt", func(t *testing.T) {
 		mockVaultDONCapability := &MockVaultDONCapability{}
