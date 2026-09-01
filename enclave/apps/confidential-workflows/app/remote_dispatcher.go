@@ -16,7 +16,6 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialrelay"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/teeattestation"
-	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/attestor"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
@@ -24,6 +23,7 @@ import (
 	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
+	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -241,6 +241,7 @@ func (d *remoteDispatcher) GetSecrets(ctx context.Context, workflowID string, re
 		Owner:            owner,
 		ExecutionID:      executionID,
 		OrgID:            orgID,
+		CallbackID:       req.GetCallbackId(),
 		Secrets:          secrets,
 		EnclavePublicKey: hex.EncodeToString(kp.Public()),
 		EnclaveConfig:    enclaveConfigFor(cfg),
