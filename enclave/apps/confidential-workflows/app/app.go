@@ -429,13 +429,16 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to
-		// context.DeadlineExceeded.
+		// context.DeadlineExceeded. Set the sentinel so the executor classifies
+		// it as a user error (workflow ran over budget) instead of infrastructure.
 		code := http.StatusInternalServerError
+		errMsg := fmt.Sprintf("executing wasm: %s", err.Error())
 		if errors.Is(err, context.DeadlineExceeded) {
 			code = http.StatusGatewayTimeout
+			errMsg = fmt.Sprintf("%s: %s", types.ErrWasmExecutionTimeout, errMsg)
 		}
 		return nil, &types.ExecuteError{
-			Error: fmt.Sprintf("executing wasm: %s", err.Error()),
+			Error: errMsg,
 			Code:  code,
 		}
 	}

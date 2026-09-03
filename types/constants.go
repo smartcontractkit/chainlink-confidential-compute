@@ -123,6 +123,11 @@ const (
 	ErrKeyPresentNoEncryption   = "AES-GCM key present but encryption not requested"
 	ErrResponseBodyTooLarge     = "response body exceeds maximum allowed size"
 	ErrQuorumTimeout            = "quorum_timeout"
+	// ErrWasmExecutionTimeout marks a WASM execution that exceeded its deadline.
+	// The enclave app sets this on the ExecuteError when the guest hits the
+	// execution-timeout context; the executor matches it to classify the failure
+	// as a user error (workflow ran over budget) rather than infrastructure.
+	ErrWasmExecutionTimeout     = "wasm execution deadline exceeded"
 
 	// ErrVaultSystemErrorFallback is the literal string the chainlink core vault plugin returns
 	// in SecretResponse.Error for any non-user-classified failure. See userFacingError() in

@@ -325,6 +325,7 @@ func (d *remoteDispatcher) GetSecrets(ctx context.Context, workflowID string, re
 		Owner:            owner,
 		ExecutionID:      executionID,
 		OrgID:            orgID,
+		CallbackID:       req.GetCallbackId(),
 		Secrets:          secrets,
 		EnclavePublicKey: hex.EncodeToString(kp.Public()),
 		EnclaveConfig:    enclaveConfigFor(cfg),
