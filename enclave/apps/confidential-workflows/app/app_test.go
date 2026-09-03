@@ -55,7 +55,7 @@ func TestNewConfidentialWorkflowsAppRequiresProductionTransports(t *testing.T) {
 		StorageFetcherFactory: storageFetcherFactory(func() types.HTTPClient {
 			return util.NewUnrestrictedClient()
 		}),
-		RemoteDispatcherFactory: func(string, time.Duration) (RemoteDispatcher, error) {
+		RemoteDispatcherFactory: func(GatewayConfig) (RemoteDispatcher, error) {
 			return &testRemoteDispatcher{}, nil
 		},
 	}
@@ -497,8 +497,8 @@ func TestInjectSettings_Timeouts(t *testing.T) {
 	newApp := func() (*confidentialWorkflowsApp, *time.Duration) {
 		var got time.Duration
 		a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t),
-			WithRemoteDispatcherFactory(func(_ string, timeout time.Duration) (RemoteDispatcher, error) {
-				got = timeout
+			WithRemoteDispatcherFactory(func(gw GatewayConfig) (RemoteDispatcher, error) {
+				got = gw.RequestTimeout
 				return &testRemoteDispatcher{}, nil
 			}),
 		).(*confidentialWorkflowsApp)
@@ -539,7 +539,7 @@ func TestInjectSettings_Timeouts(t *testing.T) {
 // execution trips over the gap.
 func TestInjectSettings_RequiredFields(t *testing.T) {
 	a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t),
-		WithRemoteDispatcherFactory(func(string, time.Duration) (RemoteDispatcher, error) { return &testRemoteDispatcher{}, nil }),
+		WithRemoteDispatcherFactory(func(GatewayConfig) (RemoteDispatcher, error) { return &testRemoteDispatcher{}, nil }),
 	).(*confidentialWorkflowsApp)
 
 	err := a.InjectSettings([]byte(`{"requestTimeout":"80s"}`))

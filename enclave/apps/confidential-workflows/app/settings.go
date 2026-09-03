@@ -60,6 +60,16 @@ type WorkflowSettings struct {
 	MaxCacheBytes         int64    `json:"maxCacheBytes,omitempty"`
 	RequestTimeout        Duration `json:"requestTimeout,omitempty"`
 	GatewayRequestTimeout Duration `json:"gatewayRequestTimeout,omitempty"`
+	// GatewayRetryBackoff paces successive gateway round-trips when the enclave
+	// retries a capability call or secret fetch after a transient transport
+	// failure (gateway rotation, proxy 5xx). Zero falls back to the enclave's
+	// built-in default.
+	GatewayRetryBackoff Duration `json:"gatewayRetryBackoff,omitempty"`
+	// GatewayRetryTimeout bounds the full gateway retry window for one capability
+	// call or secret fetch (all attempts, including backoffs), independent of the
+	// per-attempt GatewayRequestTimeout. Zero falls back to the enclave's
+	// built-in default.
+	GatewayRetryTimeout Duration `json:"gatewayRetryTimeout,omitempty"`
 	ExecutionTimeout      Duration `json:"executionTimeout,omitempty"`
 	WorkflowGracePeriod   Duration `json:"workflowGracePeriod,omitempty"`
 }

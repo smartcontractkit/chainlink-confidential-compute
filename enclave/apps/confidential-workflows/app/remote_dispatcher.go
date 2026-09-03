@@ -7,16 +7,17 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialrelay"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/teeattestation"
-	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/attestor"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
@@ -24,6 +25,7 @@ import (
 	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
+	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -34,6 +36,65 @@ import (
 // relay-DON's params.Validate sees a non-empty namespace and the canonical
 // hash binds to the same value on both sides.
 const defaultSecretsNamespace = "main"
+
+// sendWithRetry sends a JSON-RPC relay request and decodes/verifies the
+// response bundle via verify, retrying on transient failures (gateway
+// rotation, per-request timeout, transport error). The retry window is bounded
+// by the dispatcher's injected retryTimeout (d.retryTimeout), independent of
+// the per-attempt HTTP timeout on the gateway client; the caller's ctx bounds
+// the overall call as usual.
+//
+// verify returns the quorum-verified result, or an error that is terminal: a
+// well-formed JSON-RPC error from the relay, a bundle that does not decode, or
+// a quorum-not-reached verdict — the relay answered, and an immediate retry
+// won't change which signatures arrived.
+//
+// Transient failures across attempts are gathered with errors.Join so the
+// final error carries the full history, not just the last failure.
+func sendWithRetry[T any](d *remoteDispatcher, ctx context.Context, what, method string, paramsJSON json.RawMessage, verify func(json.RawMessage) (T, error)) (T, error) {
+	// The retry window is its own deadline (d.retryTimeout), so a slow caller
+	// context does not stretch it and a short one still caps it.
+	retryCtx, cancel := context.WithTimeout(ctx, d.retryTimeout)
+	defer cancel()
+
+	var transientErrs []error
+	wrapErr := func(err error) error {
+		if len(transientErrs) == 0 {
+			return fmt.Errorf("sending %s: %w", what, err)
+		}
+		return fmt.Errorf("sending %s: %w (transient attempts: %w)", what, err, errors.Join(transientErrs...))
+	}
+
+	for {
+		if err := retryCtx.Err(); err != nil {
+			var zero T
+			return zero, wrapErr(err)
+		}
+
+		resultJSON, err := d.client.SendRequest(retryCtx, method, paramsJSON)
+		if err == nil {
+			return verify(resultJSON)
+		}
+
+		// A well-formed JSON-RPC error means the relay answered with a terminal
+		// condition; don't retry.
+		var rpcErr *gateway.RPCError
+		if errors.As(err, &rpcErr) {
+			var zero T
+			return zero, wrapErr(err)
+		}
+
+		// Transport-level failure (gateway rotation, proxy 5xx): retry.
+		transientErrs = append(transientErrs, err)
+		d.logger.Debugw("[remoteDispatcher] gateway attempt failed, retrying", "what", what, "err", err)
+		select {
+		case <-retryCtx.Done():
+			var zero T
+			return zero, wrapErr(retryCtx.Err())
+		case <-time.After(d.retryBackoff):
+		}
+	}
+}
 
 // RemoteDispatcher dispatches requests to a relay DON via the Gateway.
 // This enables WASM binaries to invoke remote capabilities and fetch secrets
@@ -58,6 +119,14 @@ type remoteDispatcher struct {
 	keychain keychain.Keychain
 	combiner combiner.Combiner
 	verifier signatureverifier.SignatureVerifier
+
+	// retryBackoff paces successive gateway round-trips after a transient
+	// transport failure (gateway rotation, proxy 5xx).
+	retryBackoff time.Duration
+	// retryTimeout bounds the full gateway retry window for one capability call
+	// or secret fetch (all attempts, including backoffs), independent of the
+	// per-attempt HTTP timeout on the gateway client.
+	retryTimeout time.Duration
 }
 
 var _ RemoteDispatcher = (*remoteDispatcher)(nil)
@@ -89,15 +158,24 @@ func NewRemoteDispatcher(
 	kc keychain.Keychain,
 	comb combiner.Combiner,
 	verifier signatureverifier.SignatureVerifier,
+	retryBackoff, retryTimeout time.Duration,
 ) RemoteDispatcher {
+	if retryBackoff <= 0 {
+		retryBackoff = types.DefaultGatewayRetryBackoff
+	}
+	if retryTimeout <= 0 {
+		retryTimeout = types.DefaultGatewayRetryTimeout
+	}
 	return &remoteDispatcher{
-		client:   client,
-		attestor: att,
-		config:   config,
-		logger:   lggr,
-		keychain: kc,
-		combiner: comb,
-		verifier: verifier,
+		client:       client,
+		attestor:     att,
+		config:       config,
+		logger:       lggr,
+		keychain:     kc,
+		combiner:     comb,
+		verifier:     verifier,
+		retryBackoff: retryBackoff,
+		retryTimeout: retryTimeout,
 	}
 }
 
@@ -139,23 +217,29 @@ func (d *remoteDispatcher) CallCapability(ctx context.Context, workflowID string
 		return nil, fmt.Errorf("marshalling params: %w", err)
 	}
 
-	resultJSON, err := d.client.SendRequest(ctx, confidentialrelay.MethodCapabilityExec, paramsJSON)
+	// Retry the gateway round-trip on a transient failure (gateway rotation,
+	// per-request timeout, or transport error). The next attempt re-fans-out,
+	// and relay-node memoization makes repeated attempts cheap (nodes return
+	// their already-signed result without re-executing). A well-formed JSON-RPC
+	// error or a quorum-not-reached verdict are terminal: the relay answered,
+	// and an immediate retry won't change which signatures arrived.
+	result, err := sendWithRetry(d, ctx, "capability request", confidentialrelay.MethodCapabilityExec, paramsJSON,
+		func(resultJSON json.RawMessage) (confidentialrelay.CapabilityResponseResult, error) {
+			var bundle confidentialrelay.SignedCapabilityResponseBundle
+			if err := json.Unmarshal(resultJSON, &bundle); err != nil {
+				return confidentialrelay.CapabilityResponseResult{}, fmt.Errorf("unmarshalling capability response bundle: %w", err)
+			}
+			d.logger.Debugw("[remoteDispatcher] received capability response bundle", "rawBundleSize", len(bundle.Responses))
+			entries, skipped := d.capabilityEntries(bundle, params)
+			idx, qErr := d.selectQuorumResult("CallCapability", len(bundle.Responses), skipped, entries, cfg)
+			if qErr != nil {
+				return confidentialrelay.CapabilityResponseResult{}, fmt.Errorf("verifying capability response: %w", qErr)
+			}
+			return bundle.Responses[idx].Result, nil
+		})
 	if err != nil {
-		return nil, fmt.Errorf("sending capability request: %w", err)
+		return nil, err
 	}
-
-	var bundle confidentialrelay.SignedCapabilityResponseBundle
-	if err := json.Unmarshal(resultJSON, &bundle); err != nil {
-		return nil, fmt.Errorf("unmarshalling capability response bundle: %w", err)
-	}
-
-	d.logger.Debugw("[remoteDispatcher] received capability response bundle", "rawBundleSize", len(bundle.Responses))
-	entries, skipped := d.capabilityEntries(bundle, params)
-	idx, err := d.selectQuorumResult("CallCapability", len(bundle.Responses), skipped, entries, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("verifying capability response: %w", err)
-	}
-	result := bundle.Responses[idx].Result
 
 	if result.Error != "" {
 		return &sdkpb.CapabilityResponse{
@@ -259,23 +343,24 @@ func (d *remoteDispatcher) GetSecrets(ctx context.Context, workflowID string, re
 		return nil, fmt.Errorf("marshalling params: %w", err)
 	}
 
-	resultJSON, err := d.client.SendRequest(ctx, confidentialrelay.MethodSecretsGet, paramsJSON)
+	// Retry the gateway round-trip on a transient failure. See sendWithRetry.
+	result, err := sendWithRetry(d, ctx, "secrets request", confidentialrelay.MethodSecretsGet, paramsJSON,
+		func(resultJSON json.RawMessage) (confidentialrelay.SecretsResponseResult, error) {
+			var bundle confidentialrelay.SignedSecretsResponseBundle
+			if err := json.Unmarshal(resultJSON, &bundle); err != nil {
+				return confidentialrelay.SecretsResponseResult{}, fmt.Errorf("unmarshalling secrets response bundle: %w", err)
+			}
+			d.logger.Debugw("[remoteDispatcher] received secrets response bundle", "rawBundleSize", len(bundle.Responses))
+			entries, skipped := d.secretsEntries(bundle, params)
+			idx, qErr := d.selectQuorumResult("GetSecrets", len(bundle.Responses), skipped, entries, cfg)
+			if qErr != nil {
+				return confidentialrelay.SecretsResponseResult{}, fmt.Errorf("verifying secrets response: %w", qErr)
+			}
+			return bundle.Responses[idx].Result, nil
+		})
 	if err != nil {
-		return nil, fmt.Errorf("sending secrets request: %w", err)
+		return nil, err
 	}
-
-	var bundle confidentialrelay.SignedSecretsResponseBundle
-	if err := json.Unmarshal(resultJSON, &bundle); err != nil {
-		return nil, fmt.Errorf("unmarshalling secrets response bundle: %w", err)
-	}
-
-	d.logger.Debugw("[remoteDispatcher] received secrets response bundle", "rawBundleSize", len(bundle.Responses))
-	entries, skipped := d.secretsEntries(bundle, params)
-	idx, err := d.selectQuorumResult("GetSecrets", len(bundle.Responses), skipped, entries, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("verifying secrets response: %w", err)
-	}
-	result := bundle.Responses[idx].Result
 
 	// Use the enclave's own master public key from config, not the relay response.
 	// The enclave already knows this from the on-chain DON config (populated after DKG).

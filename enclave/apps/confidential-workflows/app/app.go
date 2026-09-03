@@ -81,8 +81,24 @@ type Option func(*confidentialWorkflowsApp)
 
 type StorageFetcherFactory func(storageURL string, tls bool, privateKey string, maxBytes int64, timeout time.Duration, lggr logger.Logger) (RawFetcher, ed25519.PublicKey, error)
 
+// GatewayConfig carries the injected gateway tunables to the dispatcher
+// factory. Zero values mean "use the built-in default" (resolved by the
+// factory or the dispatcher).
+type GatewayConfig struct {
+	// URL is the Gateway endpoint(s) for remote dispatch, comma-separated.
+	URL string
+	// RequestTimeout caps a single enclave->gateway HTTP exchange.
+	RequestTimeout time.Duration
+	// RetryBackoff paces successive gateway round-trips after a transient
+	// transport failure (gateway rotation, proxy 5xx).
+	RetryBackoff time.Duration
+	// RetryTimeout bounds the full gateway retry window for one capability call
+	// or secret fetch (all attempts, including backoffs).
+	RetryTimeout time.Duration
+}
+
 // RemoteDispatcherFactory defers construction until the host injects the gateway URL.
-type RemoteDispatcherFactory func(gatewayURL string, timeout time.Duration) (RemoteDispatcher, error)
+type RemoteDispatcherFactory func(gateway GatewayConfig) (RemoteDispatcher, error)
 
 func storageFetcherFactory(newHTTPClient func() types.HTTPClient) StorageFetcherFactory {
 	return func(storageURL string, tls bool, privateKey string, maxBytes int64, timeout time.Duration, lggr logger.Logger) (RawFetcher, ed25519.PublicKey, error) {
@@ -202,7 +218,12 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 
 	a.mu.Lock()
 	if a.dispatcher == nil && a.dispatcherFactory != nil {
-		d, err := a.dispatcherFactory(req.GatewayURL, time.Duration(req.GatewayRequestTimeout))
+		d, err := a.dispatcherFactory(GatewayConfig{
+			URL:            req.GatewayURL,
+			RequestTimeout: time.Duration(req.GatewayRequestTimeout),
+			RetryBackoff:   time.Duration(req.GatewayRetryBackoff),
+			RetryTimeout:   time.Duration(req.GatewayRetryTimeout),
+		})
 		if err != nil {
 			a.mu.Unlock()
 			return fmt.Errorf("building remote dispatcher: %w", err)
