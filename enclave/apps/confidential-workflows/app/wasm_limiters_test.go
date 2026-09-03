@@ -39,6 +39,7 @@ func TestWASMModuleLimiters_Defaults(t *testing.T) {
 	memory, err := cfg.MemoryLimiter.Limit(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, defaultWASMMemoryLimit, memory)
+	assert.Equal(t, cresettings.Default.PerWorkflow.WASMMemoryLimit.DefaultValue, defaultWASMMemoryLimit)
 	compressed, err := cfg.MaxCompressedBinaryLimiter.Limit(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, defaultWASMCompressedBinaryLimit, compressed)

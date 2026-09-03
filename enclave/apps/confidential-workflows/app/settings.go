@@ -100,8 +100,6 @@ func (s *mutableSettings) SetGetter(getter settings.Getter) {
 	s.current = &mutableSettingsState{getter: getter}
 }
 
-// GetScoped treats lookup and parse failures as no override so callers retain
-// the named setting's default value.
 func (s *mutableSettings) GetScoped(ctx context.Context, scope settings.Scope, key string) (string, error) {
 	s.mu.RLock()
 	current := s.current

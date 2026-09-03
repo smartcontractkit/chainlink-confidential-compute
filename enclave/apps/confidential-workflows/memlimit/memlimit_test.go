@@ -8,7 +8,7 @@ func TestConcurrency(t *testing.T) {
 		totalMB, reserveMB, perExecMB uint64
 		want                          int64
 	}{
-		{"staging 2048 reproduces default 8", 2048, 1024, 128, 8},
+		{"staging 2048 yields 10", 2048, 1024, 100, 10},
 		{"introspected below 2048 stays close", 1950, 1024, 128, 7},
 		{"scales up on a 4096 enclave", 4096, 1024, 128, 24},
 		{"reserve exceeds total clamps to 1", 512, 1024, 128, 1},

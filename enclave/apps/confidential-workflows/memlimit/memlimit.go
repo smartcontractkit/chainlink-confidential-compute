@@ -14,15 +14,14 @@ const (
 	// ReserveMB is memory set aside for everything other than concurrent
 	// workflow executions: the Go runtime, the enclave server and host, TLS
 	// buffers, and the WASM host's base working set. On the 2048 MiB staging
-	// enclave this yields (2048-1024)/128 = 8, matching the previously
-	// load-tested default, and it re-derives automatically if the enclave's
-	// memory changes.
+	// enclave this yields (2048-1024)/100 = 10, and it re-derives automatically
+	// if the enclave's memory changes.
 	ReserveMB uint64 = 1024
 
-	// PerExecMB mirrors chainlink-common's defaultMinMemoryMBs, the per-module
-	// WASM linear-memory floor a workflow execution can grow into. Keep in sync
-	// if that default changes.
-	PerExecMB uint64 = 128
+	// PerExecMB tracks the default of the injected WASMMemoryLimit CRE setting
+	// (creSettings; the app package's defaultWASMMemoryLimit, 100 MB). An
+	// injected override above 100 MB can exceed this budget.
+	PerExecMB uint64 = 100
 
 	// FallbackConcurrency is used when total memory can't be read (non-Linux
 	// dev builds, or a sysinfo error). Conservative on purpose.
