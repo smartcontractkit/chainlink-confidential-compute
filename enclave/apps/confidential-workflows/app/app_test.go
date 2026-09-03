@@ -107,6 +107,28 @@ func TestExecute_HelloWasm(t *testing.T) {
 	assert.Equal(t, "hello from enclave wasm", errResult.Value.GetStringValue())
 }
 
+func TestExecute_LimiterSettingsFallBackWithoutOwner(t *testing.T) {
+	raw := buildTestWasm(t, "hello")
+	var compressed bytes.Buffer
+	w := brotli.NewWriter(&compressed)
+	_, err := w.Write(raw)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	binary := compressed.Bytes()
+	hash := sha256.Sum256(binary)
+	app, locator := newStorageBackedAppWithSettings(t, binary, func(s *WorkflowSettings) {
+		s.CRESettings = json.RawMessage(`{"global": {}}`)
+	})
+	execution := makeExecution(t, "wf-hello", locator, hash[:])
+	data, err := proto.Marshal(execution)
+	require.NoError(t, err)
+
+	output, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+	require.Nil(t, execErr, "expected limiter defaults, got: %+v", execErr)
+	require.NotEmpty(t, output)
+}
+
 // TestExecute_HttpCallWasm is the WASM-level integration test for the
 // in-enclave http-actions shortcircuit (tier 2 of execution_helper.go).
 // It compiles the http-call WASM, runs it through cwapp.Execute, and asserts
