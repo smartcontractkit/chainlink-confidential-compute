@@ -74,20 +74,20 @@ func main() {
 	// Runtime config is injected by the host over vsock (see host
 	// injectSettings -> app.InjectSettings); the factory builds the remote
 	// dispatcher once the gateway URL arrives.
-	dispatcherFactory := func(gatewayURL string, timeout time.Duration) (app.RemoteDispatcher, error) {
-		if timeout <= 0 {
-			timeout = *gatewayTimeout
+	dispatcherFactory := func(gw app.GatewayConfig) (app.RemoteDispatcher, error) {
+		if gw.RequestTimeout <= 0 {
+			gw.RequestTimeout = *gatewayTimeout
 		}
-		dialer, err := proxyclient.NewConfiguredEndpointDialer(types.ProxyParentCID, types.ProxyPort, gatewayURL)
+		dialer, err := proxyclient.NewConfiguredEndpointDialer(types.ProxyParentCID, types.ProxyPort, gw.URL)
 		if err != nil {
 			return nil, err
 		}
-		client := gateway.NewGatewayClient(gatewayURL, att, gateway.WithHTTPClient(&http.Client{
-			Timeout:   timeout,
+		client := gateway.NewGatewayClient(gw.URL, att, gateway.WithHTTPClient(&http.Client{
+			Timeout:   gw.RequestTimeout,
 			Transport: tunnelTransport(dialer, true),
 		}))
 		verifier := signatureverifier.NewEd25519SignatureVerifier()
-		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier), nil
+		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier, gw.RetryBackoff, gw.RetryTimeout), nil
 	}
 
 	storageFactory := func(storageURL string, useTLS bool, privateKey string, maxBytes int64, timeout time.Duration, lggr cllogger.Logger) (app.RawFetcher, ed25519.PublicKey, error) {
