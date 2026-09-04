@@ -14,6 +14,8 @@ import (
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/settings"
+	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/host"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -50,7 +52,8 @@ type confidentialWorkflowsApp struct {
 	// gracePeriod is how long a validated execution waits before it starts
 	// running (nanoseconds; non-positive = no wait). Same reasoning as above for
 	// the atomic.
-	gracePeriod atomic.Int64
+	gracePeriod     atomic.Int64
+	limiterSettings *mutableSettings
 
 	// Runtime config + secrets injected via InjectSettings (host over vsock). A
 	// Nitro EIF is measured (PCR), so environment-specific endpoints can't be
@@ -165,6 +168,16 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	if err := req.validate(); err != nil {
 		return err
 	}
+	var limiterSettings settings.Getter
+	if len(req.CRESettings) > 0 {
+		var err error
+		// The JSON getter logs a benign missing-org lookup at error level. Leave
+		// its logger nil; mutableSettings logs actual fallback conditions.
+		limiterSettings, err = (settings.GetterConfig{}).NewJSONGetter(req.CRESettings)
+		if err != nil {
+			return fmt.Errorf("parsing CRE settings: %w", err)
+		}
+	}
 
 	a.fetcher.SetMaxCacheBytes(int(req.MaxCacheBytes))
 	if a.httpFetcher != nil {
@@ -216,6 +229,7 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 		a.logger.Infof("[app] remote dispatch enabled (gateway=%s)", req.GatewayURL)
 	}
 	a.mu.Unlock()
+	a.limiterSettings.SetGetter(limiterSettings)
 	return nil
 }
 
@@ -253,6 +267,7 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 		httpFetcher:       config.HTTPFetcher,
 		tpe:               tpe,
 		limiter:           newExecutionLimiter(config.MaxConcurrentExecutions),
+		limiterSettings:   newMutableSettings(lggr),
 		storageFactory:    config.StorageFetcherFactory,
 		dispatcherFactory: config.RemoteDispatcherFactory,
 	}
@@ -264,11 +279,12 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 // NewTestConfidentialWorkflowsApp supplies direct clients for tests and fake environments.
 func NewTestConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, opts ...Option) types.EnclaveApp {
 	a := &confidentialWorkflowsApp{
-		logger:      lggr,
-		fetcher:     NewBinaryFetcher(lggr),
-		httpFetcher: httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
-		tpe:         tpe,
-		limiter:     newExecutionLimiter(0),
+		logger:          lggr,
+		fetcher:         NewBinaryFetcher(lggr),
+		httpFetcher:     httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
+		tpe:             tpe,
+		limiter:         newExecutionLimiter(0),
+		limiterSettings: newMutableSettings(lggr),
 		storageFactory: storageFetcherFactory(func() types.HTTPClient {
 			return util.NewRestrictedHTTPClient()
 		}),
@@ -404,7 +420,9 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		execCtx, cancel = context.WithTimeout(execCtx, execTimeout)
 		defer cancel()
 	}
-	result, err := executeWasm(execCtx, a.logger, binary, execution.SdkExecuteRequest, true, helper, execTimeout)
+	// The enclave has no OpenTelemetry provider, so Meter remains nil.
+	limitsFactory := limits.Factory{Logger: a.logger, Settings: a.limiterSettings}
+	result, err := executeWasm(execCtx, limitsFactory, binary, execution.SdkExecuteRequest, true, helper, execTimeout)
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to

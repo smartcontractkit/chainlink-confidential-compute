@@ -1,10 +1,15 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/settings"
 )
 
 // WorkflowSettings is the runtime config + secrets contract of this app. The
@@ -28,7 +33,7 @@ import (
 //   - GatewayURL: the Gateway endpoint(s) for remote dispatch (dynamic secrets +
 //     capability calls). Accepts a comma-separated list; the enclave round-robins
 //     across them and fails over to the next on a transport/proxy error.
-//   - MaxBinarySize: max decompressed workflow-binary size accepted from
+//   - MaxBinarySize: max still-compressed workflow-binary size accepted from
 //     storage, in bytes. Zero falls back to the enclave's built-in default.
 //   - BinaryFetchTimeout: per-fetch timeout for downloading a workflow binary.
 //     Zero falls back to the enclave's built-in default.
@@ -50,18 +55,85 @@ import (
 //   - WorkflowGracePeriod: how long each validated execution waits before it
 //     starts running. Zero falls back to types.DefaultWorkflowGracePeriod; a
 //     negative value disables the wait.
+//   - CRESettings: standard CRE scoped settings used by the WASM module
+//     limiters. The object may contain global, org, owner and workflow
+//     overrides and is replaced as a unit on every injection. Raising
+//     WASMCompressedBinarySizeLimit also requires raising MaxBinarySize because
+//     the storage download cap is enforced first. WASMMemoryLimit is truncated
+//     to whole megabytes by the WASM host. Owner- and workflow-scoped overrides
+//     require a non-empty execution owner; otherwise only org and global
+//     overrides are consulted.
 type WorkflowSettings struct {
-	StorageKey            string   `json:"storageKey"`
-	StorageServiceURL     string   `json:"storageServiceUrl"`
-	StorageServiceTLS     bool     `json:"storageServiceTls,omitempty"`
-	GatewayURL            string   `json:"gatewayUrl"`
-	MaxBinarySize         int64    `json:"maxBinarySize,omitempty"`
-	BinaryFetchTimeout    Duration `json:"binaryFetchTimeout,omitempty"`
-	MaxCacheBytes         int64    `json:"maxCacheBytes,omitempty"`
-	RequestTimeout        Duration `json:"requestTimeout,omitempty"`
-	GatewayRequestTimeout Duration `json:"gatewayRequestTimeout,omitempty"`
-	ExecutionTimeout      Duration `json:"executionTimeout,omitempty"`
-	WorkflowGracePeriod   Duration `json:"workflowGracePeriod,omitempty"`
+	StorageKey            string          `json:"storageKey"`
+	StorageServiceURL     string          `json:"storageServiceUrl"`
+	StorageServiceTLS     bool            `json:"storageServiceTls,omitempty"`
+	GatewayURL            string          `json:"gatewayUrl"`
+	MaxBinarySize         int64           `json:"maxBinarySize,omitempty"`
+	BinaryFetchTimeout    Duration        `json:"binaryFetchTimeout,omitempty"`
+	MaxCacheBytes         int64           `json:"maxCacheBytes,omitempty"`
+	RequestTimeout        Duration        `json:"requestTimeout,omitempty"`
+	GatewayRequestTimeout Duration        `json:"gatewayRequestTimeout,omitempty"`
+	ExecutionTimeout      Duration        `json:"executionTimeout,omitempty"`
+	WorkflowGracePeriod   Duration        `json:"workflowGracePeriod,omitempty"`
+	CRESettings           json.RawMessage `json:"creSettings,omitempty"`
+}
+
+type mutableSettings struct {
+	mu      sync.RWMutex
+	current *mutableSettingsState
+	lggr    logger.Logger
+	parsers map[string]settingParser
+}
+
+type mutableSettingsState struct {
+	getter settings.Getter
+	logged sync.Map
+}
+
+func newMutableSettings(lggr logger.Logger) *mutableSettings {
+	return &mutableSettings{lggr: lggr, parsers: wasmLimiterSettingParsers()}
+}
+
+func (s *mutableSettings) SetGetter(getter settings.Getter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.current = &mutableSettingsState{getter: getter}
+}
+
+func (s *mutableSettings) GetScoped(ctx context.Context, scope settings.Scope, key string) (string, error) {
+	s.mu.RLock()
+	current := s.current
+	s.mu.RUnlock()
+	if current == nil || current.getter == nil {
+		return "", nil
+	}
+	value, err := current.getter.GetScoped(ctx, scope, key)
+	if err != nil && scope > settings.ScopeOrg {
+		s.logOnce(current, "retry", "Failed to get CRE limiter setting. Retrying at org scope", scope, key, err)
+		value, err = current.getter.GetScoped(ctx, settings.ScopeOrg, key)
+	}
+	if err != nil {
+		s.logOnce(current, "lookup", "Failed to get CRE limiter setting. Using default value", scope, key, err)
+		return "", nil
+	}
+	if value != "" {
+		if parse, ok := s.parsers[key]; ok {
+			if err := parse(value); err != nil {
+				s.logOnce(current, "parse", "Failed to parse CRE limiter setting. Using default value", scope, key, err)
+				return "", nil
+			}
+		}
+	}
+	return value, nil
+}
+
+func (s *mutableSettings) logOnce(current *mutableSettingsState, kind, message string, scope settings.Scope, key string, err error) {
+	if s.lggr == nil {
+		return
+	}
+	if _, loaded := current.logged.LoadOrStore(kind+"|"+key, struct{}{}); !loaded {
+		s.lggr.Errorw(message, "scope", scope, "key", key, "err", err)
+	}
 }
 
 // validate reports the required settings the payload left empty. The enclave
