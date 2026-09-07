@@ -10,7 +10,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialrelay"
 	"github.com/smartcontractkit/chainlink-common/pkg/jsonrpc2"
@@ -119,6 +121,7 @@ func TestCallCapability_HappyPath(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
+		0, 0,
 	)
 
 	inputAny, err := anypb.New(wrapperspb.String("input-data"))
@@ -160,6 +163,7 @@ func TestCallCapability_RemoteError(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
+		0, 0,
 	)
 
 	resp, err := d.CallCapability(context.Background(), "wf-err", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
@@ -185,6 +189,7 @@ func TestCallCapability_RPCError(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
+		0, 0,
 	)
 
 	_, err := d.CallCapability(context.Background(), "wf-err", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
@@ -418,6 +423,7 @@ func TestCallCapability_VerificationFailures(t *testing.T) {
 				logger.Test(t),
 				nil, nil,
 				signatureverifier.NewEd25519SignatureVerifier(),
+				0, 0,
 			)
 			_, err := d.CallCapability(context.Background(), "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
 				Id:         "write_ethereum@1.0.0",
@@ -458,6 +464,7 @@ func TestCallCapability_TolerantToNoise(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
+		0, 0,
 	)
 	resp, err := d.CallCapability(context.Background(), "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
 		Id:         "write_ethereum@1.0.0",
@@ -499,6 +506,7 @@ func TestCallCapability_ForgedResultCannotWin(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
+		0, 0,
 	)
 	resp, err := d.CallCapability(context.Background(), "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
 		Id:         "write_ethereum@1.0.0",
@@ -543,6 +551,7 @@ func TestCallCapability_ReportSignaturesIgnoredForQuorum(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
+		0, 0,
 	)
 	resp, err := d.CallCapability(context.Background(), "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
 		Id:         "consensus@1.0.0-alpha",
@@ -590,6 +599,7 @@ func TestCallCapability_QuorumErrorReportsFields(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
+		0, 0,
 	)
 	_, err := d.CallCapability(context.Background(), "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
 		Id:         "consensus@1.0.0-alpha",
@@ -779,6 +789,7 @@ func TestCallCapability_PopulatesEnclaveConfig(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
+		0, 0,
 	)
 
 	_, err = d.CallCapability(context.Background(), "wf-cfg", "0xowner", "0000000000000000000000000000000000000000000000000000000000000001", "", &sdkpb.CapabilityRequest{
@@ -834,6 +845,7 @@ func TestCallCapability_SetConfigUpdatesOutgoingConfig(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
+		0, 0,
 	)
 
 	call := func() {
@@ -899,4 +911,88 @@ func TestOrderRelaySecrets(t *testing.T) {
 		assert.Nil(t, ordered[1].entry)
 		assert.Equal(t, "b", ordered[1].id.Key)
 	})
+}
+
+// TestCallCapability_RetriesAfterTransientGatewayFailure verifies the
+// dispatcher retries the gateway round-trip when the first attempt fails with a
+// transient transport error (e.g. a gateway rotation), and returns the result
+// once a later attempt reaches relay-DON quorum.
+func TestCallCapability_RetriesAfterTransientGatewayFailure(t *testing.T) {
+	wantValue := wrapperspb.String("result-value")
+	wantAny, err := anypb.New(wantValue)
+	require.NoError(t, err)
+	wantResp := &sdkpb.CapabilityResponse{
+		Response: &sdkpb.CapabilityResponse_Payload{Payload: wantAny},
+	}
+	wantRespBytes, err := proto.Marshal(wantResp)
+	require.NoError(t, err)
+
+	signers := newRelaySigners(t, 2)
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		req, err := jsonrpc2.DecodeRequest[json.RawMessage](body, "")
+		require.NoError(t, err)
+		assert.Equal(t, confidentialrelay.MethodCapabilityExec, req.Method)
+		var p confidentialrelay.CapabilityRequestParams
+		require.NoError(t, json.Unmarshal(*req.Params, &p))
+
+		if attempts.Add(1) == 1 {
+			// First attempt: simulate a transient gateway failure (503). The
+			// dispatcher's failover loop exhausts the single URL and returns a
+			// transport error, which the retry loop treats as retryable.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		// Second attempt: the full signed bundle reaches quorum.
+		result := confidentialrelay.CapabilityResponseResult{
+			Payload: base64.StdEncoding.EncodeToString(wantRespBytes),
+		}
+		bundle := signCapabilityBundle(t, result, p, signers)
+		resultJSON, _ := json.Marshal(bundle)
+		resultRaw := json.RawMessage(resultJSON)
+		resp := jsonrpc2.Response[json.RawMessage]{
+			Version: jsonrpc2.JsonRpcVersion,
+			ID:      req.ID,
+			Result:  &resultRaw,
+		}
+		respBytes, _ := jsonrpc2.EncodeResponse(&resp)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(respBytes)
+	}))
+	defer srv.Close()
+
+	d := NewRemoteDispatcher(
+		gateway.NewGatewayClient(srv.URL, nil),
+		nil,
+		relayDONConfig(signers, 1),
+		logger.Test(t),
+		nil, nil,
+		signatureverifier.NewEd25519SignatureVerifier(),
+		0, 0,
+	)
+
+	// retryBackoff is 1s; use a context that tolerates it.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	inputAny, err := anypb.New(wrapperspb.String("input-data"))
+	require.NoError(t, err)
+
+	resp, err := d.CallCapability(ctx, "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
+		Id:         "write_ethereum@1.0.0",
+		Method:     "Transmit",
+		Payload:    inputAny,
+		CallbackId: 17,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	var gotValue wrapperspb.StringValue
+	require.NoError(t, anypb.UnmarshalTo(resp.GetPayload(), &gotValue, proto.UnmarshalOptions{}))
+	assert.Equal(t, "result-value", gotValue.GetValue())
+	assert.GreaterOrEqual(t, attempts.Load(), int32(2), "dispatcher retried after the transient failure")
 }

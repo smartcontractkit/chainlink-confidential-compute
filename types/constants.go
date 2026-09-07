@@ -54,6 +54,19 @@ const (
 	// gateway.WithTimeout.
 	DefaultGatewayRequestTimeout = DefaultEnclaveRequestTimeout
 
+	// DefaultGatewayRetryBackoff paces successive gateway round-trips when the
+	// enclave retries a capability call or secret fetch after a transient
+	// transport failure (gateway rotation, proxy 5xx). Overridable per-deployment
+	// via the injected settings (gatewayRetryBackoff).
+	DefaultGatewayRetryBackoff = 1 * time.Second
+
+	// DefaultGatewayRetryTimeout bounds the full gateway retry window for one
+	// capability call or secret fetch (all attempts, including backoffs). It is
+	// the caller-side deadline for sendWithRetry, independent of the per-attempt
+	// DefaultGatewayRequestTimeout. Overridable per-deployment via the injected
+	// settings (gatewayRetryTimeout).
+	DefaultGatewayRetryTimeout = 2 * time.Minute
+
 	// DefaultWorkflowGracePeriod is how long a validated execution waits before
 	// it starts running. Overridable per-deployment via the injected settings
 	// (workflowGracePeriod); a negative setting disables the wait.

@@ -60,6 +60,16 @@ type deferredGatewayProxy struct {
 	target *url.URL
 	server *http.Server
 	hits   atomic.Int64
+
+	// down marks a simulated outage: while down, every request gets a 502 even
+	// when a target is set. Used by the gateway-outage subtest to take the
+	// healthy gateway down mid-workflow and prove the enclave's retry loop
+	// rides out the disruption.
+	down atomic.Bool
+
+	// downHits counts requests rejected during an outage, so the test can
+	// assert the outage was actually observed rather than passing vacuously.
+	downHits atomic.Int64
 }
 
 func newDeferredGatewayProxy(t *testing.T, port int) *deferredGatewayProxy {
@@ -78,6 +88,12 @@ func newDeferredGatewayProxy(t *testing.T, port int) *deferredGatewayProxy {
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.hits.Add(1)
+		if p.down.Load() {
+			// Simulated outage: the gateway front-door rejects everything.
+			p.downHits.Add(1)
+			http.Error(w, "gateway unavailable (simulated outage)", http.StatusBadGateway)
+			return
+		}
 		p.mu.RLock()
 		hasTarget := p.target != nil
 		p.mu.RUnlock()
@@ -98,6 +114,17 @@ func newDeferredGatewayProxy(t *testing.T, port int) *deferredGatewayProxy {
 // Hits returns the number of requests the proxy has received. Used to assert a
 // dead gateway was actually reached, proving round-robin failover was exercised.
 func (p *deferredGatewayProxy) Hits() int64 { return p.hits.Load() }
+
+// HitsWhileDown returns the number of requests rejected during a simulated
+// outage, so a test can assert the enclave actually hit the outage window.
+func (p *deferredGatewayProxy) HitsWhileDown() int64 { return p.downHits.Load() }
+
+// TakeDown begins a simulated gateway outage: every request returns 502 until
+// BringUp is called, even when a target is set.
+func (p *deferredGatewayProxy) TakeDown() { p.down.Store(true) }
+
+// BringUp ends a simulated gateway outage.
+func (p *deferredGatewayProxy) BringUp() { p.down.Store(false) }
 
 func (p *deferredGatewayProxy) SetTarget(rawURL string) error {
 	u, err := url.Parse(rawURL)
@@ -156,9 +183,16 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
 	// The whole runtime configuration reaches the enclave as one opaque JSON
 	// payload (ENCLAVE_SETTINGS): the host forwards it verbatim and the enclave
 	// app requires the storage endpoint, storage key and gateway URL.
+	//
+	// The retry tunables are set explicitly so the gateway-outage subtest has a
+	// predictable window: every attempt during an outage fails with a
+	// transport-level 502, and the dispatcher retries within gatewayRetryTimeout
+	// paced by gatewayRetryBackoff. The outage duration (60s) fits comfortably
+	// inside the 3m retry window; the defaults would also work but pinning them
+	// keeps the test's assumptions local to the test.
 	host := enclaveHostAddr()
 	t.Setenv("ENCLAVE_SETTINGS", fmt.Sprintf(
-		`{"storageKey":%q,"storageServiceUrl":%q,"storageServiceTls":false,"gatewayUrl":%q}`,
+		`{"storageKey":%q,"storageServiceUrl":%q,"storageServiceTls":false,"gatewayUrl":%q,"gatewayRetryBackoff":"5s","gatewayRetryTimeout":"3m"}`,
 		engineTestStorageKeyHex, storageAddr, fmt.Sprintf("http://%s:9998,http://%s:9999", host, host)))
 	if !tests.UseFakeEnclave() {
 		// confidential-workflows EIF is larger than confidential-http (wasmtime/CGO),
@@ -633,7 +667,31 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// no-op'd even though the workflow reported success.
 	assertFeedReportWritten(t, sethClientFor(t, testEnv), consumerAddr, testLogger, 2*time.Minute)
 
-	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write validated")
+	// 8. Gateway-outage resilience: the workflow keeps running when the gateway
+	// is disrupted mid-flight. The healthy proxy (:9999) rejects every request
+	// with 502 for 60s — longer than one cron interval (30s), so at least one
+	// trigger's GetSecret/capability round-trips hit the outage — then comes
+	// back. Every gateway call during the outage fails at the transport level;
+	// the dispatcher's retry loop keeps retrying within its 3m window, and when
+	// the gateway returns, the retried fan-out reaches the relay DON, whose
+	// response cache answers the repeat request without re-executing. The
+	// workflow must ultimately succeed: a second successful execution proves the
+	// triggers that fired during the outage were not lost.
+	testLogger.Info().Msg("Gateway-outage phase: taking the healthy gateway proxy down for 60s")
+	gwProxy.TakeDown()
+	time.Sleep(60 * time.Second)
+	gwProxy.BringUp()
+	testLogger.Info().Msg("Gateway-outage phase: gateway proxy back up; waiting for a post-outage execution")
+
+	waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, 2, 5*time.Minute)
+
+	// The outage must have been real: the enclave's gateway calls during the
+	// window have to have hit the proxy while it was rejecting. Zero downHits
+	// means the outage was never observed (e.g. no trigger fired in the window)
+	// and the resilience assertion above passed vacuously.
+	require.Positive(t, gwProxy.HitsWhileDown(), "no gateway request hit the simulated outage; the resilience phase did not exercise retries")
+
+	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write + gateway-outage resilience validated")
 }
 
 // engineTestFeedID / engineTestPrice are the feed the confidential workflow reports
@@ -747,28 +805,63 @@ func waitForWorkflowExecutionComplete(
 	timeout time.Duration,
 ) {
 	t.Helper()
+	waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, 1, timeout)
+}
+
+// waitForWorkflowExecutions waits until at least want distinct successful-execution
+// log lines for workflowID appear in the workflow-DON container logs, and fails
+// the test if any execution for that workflow errored along the way. The engine
+// test's cron trigger fires repeatedly, so later executions re-emit the same line;
+// counting across the full log tail handles that. Each container is scraped
+// independently; the count is per-container, so want=2 means any single container
+// saw the line twice (the engine runs one execution per trigger on each node).
+//
+// A success count alone can hide a mid-window failure (a trigger that errored
+// during an outage would be silently ignored as long as later triggers succeed),
+// so any "Workflow execution failed*" line carrying the workflowID fails the
+// test immediately.
+func waitForWorkflowExecutions(
+	t *testing.T,
+	testEnv *ttypes.TestEnvironment,
+	testLogger zerolog.Logger,
+	workflowID string,
+	want int,
+	timeout time.Duration,
+) {
+	t.Helper()
 
 	containers := workflowDONContainerNames(testEnv)
 	require.NotEmpty(t, containers, "no workflow-DON containers found to scrape")
-	needleMsg := []byte(`"msg":"Workflow execution finished successfully"`)
+	successMsg := []byte(`"msg":"Workflow execution finished successfully"`)
+	failureMsg := []byte(`"msg":"Workflow execution failed`)
 	needleID := []byte(workflowID)
-	testLogger.Info().Msgf("Waiting for successful-trigger log for workflowID %s on %d container(s): %v", workflowID, len(containers), containers)
+	testLogger.Info().Msgf("Waiting for %d successful-trigger log(s) for workflowID %s on %d container(s): %v", want, workflowID, len(containers), containers)
 
 	deadline := time.Now().Add(timeout)
 	for {
 		for _, name := range containers {
 			out, _ := exec.Command("docker", "logs", "--tail", "10000", name).CombinedOutput()
+			count := 0
 			for _, line := range bytes.Split(out, []byte{'\n'}) {
-				if bytes.Contains(line, needleMsg) && bytes.Contains(line, needleID) {
-					testLogger.Info().Msgf("Found successful-trigger log in container %s for workflowID %s", name, workflowID)
-					return
+				if !bytes.Contains(line, needleID) {
+					continue
 				}
+				if bytes.Contains(line, failureMsg) {
+					t.Fatalf("workflow execution failed for workflowID %s (container %s): %s", workflowID, name, line)
+				}
+				if bytes.Contains(line, successMsg) {
+					count++
+				}
+			}
+			if count >= want {
+				testLogger.Info().Msgf("Found %d successful-trigger log(s) in container %s for workflowID %s", count, name, workflowID)
+				return
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %s waiting for successful-trigger log with workflowID %s", timeout, workflowID)
+			t.Fatalf("timed out after %s waiting for %d successful-trigger log(s) with workflowID %s", timeout, want, workflowID)
 		}
-		testLogger.Info().Msg("Successful-trigger log not found yet, retrying in 5s...")
+		testLogger.Info().Msg("Successful-trigger log(s) not found yet, retrying in 5s...")
 		time.Sleep(5 * time.Second)
 	}
 }
