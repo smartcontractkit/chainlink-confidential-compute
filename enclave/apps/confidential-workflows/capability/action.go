@@ -50,9 +50,6 @@ type ConfidentialWorkflowAction struct {
 	lggr logger.SugaredLogger
 }
 
-// validateExecutionIdentity cross-checks the capability call metadata's
-// workflow identity fields against the internal workflow execution request.
-// Returns a human-readable error string, empty if all checks pass.
 func validateExecutionIdentity(metadata capabilities.RequestMetadata, execution *confworkflowtypes.WorkflowExecution) string {
 	if execution.WorkflowId != metadata.WorkflowID {
 		return fmt.Sprintf("workflow_id mismatch: metadata %q, execution %q", metadata.WorkflowID, execution.WorkflowId)
@@ -60,11 +57,10 @@ func validateExecutionIdentity(metadata capabilities.RequestMetadata, execution 
 	if execution.ExecutionId != metadata.WorkflowExecutionID {
 		return fmt.Sprintf("execution_id mismatch: metadata %q, execution %q", metadata.WorkflowExecutionID, execution.ExecutionId)
 	}
-	// chainlink hands WorkflowOwner as 40-char hex without 0x prefix; the
-	// execution proto carries the canonical 0x-prefixed form.
-	normalizedOwner := util.HexToAddress(metadata.WorkflowOwner).String()
-	if execution.Owner != normalizedOwner {
-		return fmt.Sprintf("owner mismatch: metadata %q, execution %q", normalizedOwner, execution.Owner)
+	// Owner casing/prefixing differs between callers (unprefixed lowercase hex
+	// vs 0x-prefixed checksummed), so compare the normalized forms.
+	if util.HexToAddress(execution.Owner) != util.HexToAddress(metadata.WorkflowOwner) {
+		return fmt.Sprintf("owner mismatch: metadata %q, execution %q", metadata.WorkflowOwner, execution.Owner)
 	}
 	if execution.OrgId != metadata.OrgID {
 		return fmt.Sprintf("org_id mismatch: metadata %q, execution %q", metadata.OrgID, execution.OrgId)
