@@ -3,6 +3,7 @@ package capability
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -20,6 +21,8 @@ import (
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow/server"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
+
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 )
 
 const ServiceName = "ConfidentialWorkflowsCapabilityService"
@@ -47,11 +50,37 @@ type ConfidentialWorkflowAction struct {
 	lggr logger.SugaredLogger
 }
 
+// validateExecutionIdentity cross-checks the capability call metadata's
+// workflow identity fields against the internal workflow execution request.
+// Returns a human-readable error string, empty if all checks pass.
+func validateExecutionIdentity(metadata capabilities.RequestMetadata, execution *confworkflowtypes.WorkflowExecution) string {
+	if execution.WorkflowId != metadata.WorkflowID {
+		return fmt.Sprintf("workflow_id mismatch: metadata %q, execution %q", metadata.WorkflowID, execution.WorkflowId)
+	}
+	if execution.ExecutionId != metadata.WorkflowExecutionID {
+		return fmt.Sprintf("execution_id mismatch: metadata %q, execution %q", metadata.WorkflowExecutionID, execution.ExecutionId)
+	}
+	// chainlink hands WorkflowOwner as 40-char hex without 0x prefix; the
+	// execution proto carries the canonical 0x-prefixed form.
+	normalizedOwner := util.HexToAddress(metadata.WorkflowOwner).String()
+	if execution.Owner != normalizedOwner {
+		return fmt.Sprintf("owner mismatch: metadata %q, execution %q", normalizedOwner, execution.Owner)
+	}
+	if execution.OrgId != metadata.OrgID {
+		return fmt.Sprintf("org_id mismatch: metadata %q, execution %q", metadata.OrgID, execution.OrgId)
+	}
+	return ""
+}
+
 func (a *ConfidentialWorkflowAction) Execute(ctx context.Context, metadata capabilities.RequestMetadata, input *confworkflowtypes.ConfidentialWorkflowRequest) (*capabilities.ResponseAndMetadata[*confworkflowtypes.ConfidentialWorkflowResponse], caperrors.Error) {
 	if input.Execution == nil {
 		// Missing required input field is a workflow-author bug, not infrastructure failure.
 		// Classify as OriginUser so the workflow engine routes to _user_errors, not _failures.
 		errStr := "execution field is required"
+		a.lggr.Errorw(errStr)
+		return nil, caperrors.NewPublicUserError(errors.New(errStr), caperrors.InvalidArgument)
+	}
+	if errStr := validateExecutionIdentity(metadata, input.Execution); errStr != "" {
 		a.lggr.Errorw(errStr)
 		return nil, caperrors.NewPublicUserError(errors.New(errStr), caperrors.InvalidArgument)
 	}
