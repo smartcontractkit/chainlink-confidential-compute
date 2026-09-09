@@ -50,6 +50,11 @@ func StartNitroEnclave(
 		logger.Fatalf("Invalid port")
 	}
 
+	// Verify the NSM is the hardware RNG feeding the kernel entropy pool.
+	if err := VerifyEntropySource(); err != nil {
+		return fmt.Errorf("entropy source check failed: %w", err)
+	}
+
 	// Verify PTP clock synchronization.
 	clockSource := getClockSource()
 	if clockSource != "kvm-clock" {
