@@ -382,6 +382,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        account: ["312157985241", "816722353863", "648030273096", "129896631554"]
+        app:
+          - name: confidential-http
+            nitro_prefix: nitro-enclave
+            plugin_prefix: enclave
+          - name: confidential-workflows
+            nitro_prefix: nitro-workflows
+            plugin_prefix: enclave-workflows
         include:
           - account: "312157985241"
             region: "us-west-2"
@@ -391,13 +399,6 @@ jobs:
             region: "us-west-2"
           - account: "129896631554"
             region: "us-east-2"
-        app:
-          - name: confidential-http
-            nitro_prefix: nitro-enclave
-            plugin_prefix: enclave
-          - name: confidential-workflows
-            nitro_prefix: nitro-workflows
-            plugin_prefix: enclave-workflows
     runs-on: ubuntu-latest
     permissions:
       contents: read

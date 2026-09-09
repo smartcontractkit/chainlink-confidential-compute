@@ -86,6 +86,7 @@ jobs:
     needs: build-image
     strategy:
       matrix:
+        account: ["312157985241", "816722353863", "648030273096", "129896631554"]
         include:
           - account: "312157985241"
             region: "us-west-2"
