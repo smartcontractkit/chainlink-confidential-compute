@@ -86,7 +86,15 @@ jobs:
     needs: build-image
     strategy:
       matrix:
-        account: ["312157985241", "816722353863", "648030273096"]
+        include:
+          - account: "312157985241"
+            region: "us-west-2"
+          - account: "816722353863"
+            region: "us-west-2"
+          - account: "648030273096"
+            region: "us-west-2"
+          - account: "129896631554"
+            region: "us-east-2"
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -112,7 +120,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@be2e7ad815e27b890489a89ce2717b0f9e26b56e
         with:
           role-to-assume: arn:aws:iam::${{ matrix.account }}:role/custom-ga-confidential-compute-deployer
-          aws-region: us-west-2
+          aws-region: ${{ matrix.region }}
           role-duration-seconds: 3600
 
       - name: Login to Amazon ECR
@@ -127,7 +135,7 @@ jobs:
         env:
           DOCKER_METADATA_PR_HEAD_SHA: "true"
         with:
-          images: ${{ matrix.account }}.dkr.ecr.us-west-2.amazonaws.com/containers/enclave
+          images: ${{ matrix.account }}.dkr.ecr.${{ matrix.region }}.amazonaws.com/containers/enclave
           tags: |
             type=sha,prefix=host-sha-
             type=ref,event=tag,prefix=host-
