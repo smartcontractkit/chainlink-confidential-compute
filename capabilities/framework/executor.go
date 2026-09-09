@@ -519,7 +519,6 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 	// and org, matching the DON-mode base labels (workflowName/workflowOwner/orgID).
 	// sdk is not available at this layer (not on RequestMetadata), so it is omitted.
 	metrics := NewScopedEmitter(e.metrics, map[string]any{
-		"node.id":        e.nodeID,
 		"workflow.owner": metadata.WorkflowOwner,
 		"workflow.id":    metadata.WorkflowID,
 		"workflow.name":  metadata.WorkflowName,

@@ -61,7 +61,6 @@ var allowedMetricAttributes = map[string]struct{}{
 	"num_requests":    {},
 	"max_concurrent":  {},
 	"metric_type":     {},
-	"node.id":         {},
 	"workflow.id":     {},
 	"workflow.name":   {},
 	"workflow.owner":  {},

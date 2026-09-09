@@ -586,10 +586,9 @@ func TestExecutor_Execute(t *testing.T) {
 		AssertCalledNTimes(t, mockMetrics, "compute_request_signature_error", 0)
 		// MockEnclaveClient is set to error once before succeeding
 		AssertCalledNTimes(t, mockMetrics, "execute_error", 1)
-		// Verify execute_error includes enclave.id and node.id
+		// Verify execute_error includes enclave.id
 		require.Contains(t, mockMetrics.EmitRecords, "execute_error")
 		assert.NotEmpty(t, mockMetrics.EmitRecords["execute_error"][0]["enclave.id"], "execute_error should include enclave.id")
-		assert.Equal(t, TEST_NODE_ID, mockMetrics.EmitRecords["execute_error"][0]["node.id"], "execute_error should include node.id")
 		// execute_error carries the enclave-execute duration.
 		assert.Contains(t, mockMetrics.EmitRecords["execute_error"][0], "duration_seconds", "execute_error should include duration_seconds")
 		assert.GreaterOrEqual(t, mockMetrics.EmitRecords["execute_error"][0]["duration_seconds"].(float64), 0.0)
@@ -601,7 +600,6 @@ func TestExecutor_Execute(t *testing.T) {
 		require.Contains(t, mockMetrics.EmitRecords, "execute_total")
 		assert.Equal(t, "success", mockMetrics.EmitRecords["execute_total"][0]["outcome"])
 		assert.NotEmpty(t, mockMetrics.EmitRecords["execute_total"][0]["enclave.id"], "execute_total should include enclave.id on success")
-		assert.Equal(t, TEST_NODE_ID, mockMetrics.EmitRecords["execute_total"][0]["node.id"])
 		assert.GreaterOrEqual(t, mockMetrics.EmitRecords["execute_total"][0]["duration_seconds"].(float64), 0.0)
 
 		// Verify enclave metrics were forwarded through OTel with correct content
@@ -1202,7 +1200,6 @@ func TestExecutor_ExecuteFailAfterRetry(t *testing.T) {
 		AssertCalledNTimes(t, mockMetrics, "execute_total", 1)
 		require.Contains(t, mockMetrics.EmitRecords, "execute_total")
 		assert.Equal(t, "error", mockMetrics.EmitRecords["execute_total"][0]["outcome"])
-		assert.Equal(t, TEST_NODE_ID, mockMetrics.EmitRecords["execute_total"][0]["node.id"])
 		assert.GreaterOrEqual(t, mockMetrics.EmitRecords["execute_total"][0]["duration_seconds"].(float64), 0.0)
 		// requests_completed_total is success-only and must NOT fire on failure.
 		AssertCalledNTimes(t, mockMetrics, "requests_completed_total", 0)
@@ -1439,7 +1436,6 @@ func TestExecutor_ExecuteWithRateLimit(t *testing.T) {
 		AssertCalledNTimes(t, mockMetrics, "rate_limit_exceeded", 1)
 		require.Contains(t, mockMetrics.EmitRecords, "rate_limit_exceeded")
 		assert.Equal(t, "owner1", mockMetrics.EmitRecords["rate_limit_exceeded"][0]["workflow.owner"])
-		assert.Equal(t, TEST_NODE_ID, mockMetrics.EmitRecords["rate_limit_exceeded"][0]["node.id"])
 
 		// execute_total fires on both calls: the first as success, the second
 		// (rate-limited, before any enclave is selected) as error. The rate-limited
