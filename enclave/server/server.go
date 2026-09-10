@@ -238,12 +238,10 @@ func (s *enclaveServer) attestPublicKeys(dataToAttest [32]byte) ([]byte, error) 
 	return v.([]byte), nil
 }
 
-// handleMemory handles the GET /memory endpoint. It reports the enclave process's
-// memory usage, rounded to the nearest megabyte: UsedMB from the Go runtime, and
-// RSSMB (resident set size) which also covers native allocations like the
-// wasmtime WASM linear memory. The megabyte granularity is deliberate: it is a
-// coarse operational signal, and the rounding limits the resolution of any
-// memory-based side channel into the confidential workload.
+// handleMemory handles the GET /memory endpoint. It reports coarse enclave
+// resource usage: memory rounded to the nearest megabyte and process and guest
+// CPU time rounded to the nearest second. The granularity limits the resolution
+// of resource-based side channels into the confidential workload.
 func (s *enclaveServer) handleMemory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, fmt.Sprintf("method not allowed: %v", r.Method), http.StatusMethodNotAllowed)
@@ -252,12 +250,16 @@ func (s *enclaveServer) handleMemory(w http.ResponseWriter, r *http.Request) {
 
 	info := readMemInfo()
 	status := readProcStatus()
+	guestCPUBusySeconds, guestCPUTotalSeconds := readGuestCPUSeconds()
 	resp := types.MemoryEstimateResponse{
-		UsedMB:      bytesToMB(readRuntimeMemoryBytes()),
-		RSSMB:       bytesToMB(status.rssBytes),
-		TotalMB:     bytesToMB(info.totalBytes),
-		AvailableMB: bytesToMB(info.availableBytes),
-		PeakRSSMB:   bytesToMB(status.peakRSSBytes),
+		UsedMB:               bytesToMB(readRuntimeMemoryBytes()),
+		RSSMB:                bytesToMB(status.rssBytes),
+		TotalMB:              bytesToMB(info.totalBytes),
+		AvailableMB:          bytesToMB(info.availableBytes),
+		PeakRSSMB:            bytesToMB(status.peakRSSBytes),
+		ProcessCPUSeconds:    readProcessCPUSeconds(),
+		GuestCPUBusySeconds:  guestCPUBusySeconds,
+		GuestCPUTotalSeconds: guestCPUTotalSeconds,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
