@@ -475,4 +475,16 @@ type MemoryEstimateResponse struct {
 	// still visible afterwards instead of being missed between samples. Omitted
 	// from the JSON when zero.
 	PeakRSSMB uint64 `json:"peakRssMB,omitempty"`
+	// ProcessCPUSeconds is cumulative user and system CPU time consumed by the
+	// enclave process, rounded to the nearest whole second. 0 if unavailable or
+	// below the first rounding boundary.
+	ProcessCPUSeconds uint64 `json:"processCPUSeconds,omitempty"`
+	// GuestCPUBusySeconds is cumulative CPU time across all enclave guest vCPUs
+	// spent on user, nice, system, IRQ, and softirq work, rounded to the nearest
+	// second. 0 if unavailable.
+	GuestCPUBusySeconds uint64 `json:"guestCPUBusySeconds,omitempty"`
+	// GuestCPUTotalSeconds is cumulative guest vCPU capacity: busy time plus
+	// idle, iowait, and steal, rounded to the nearest second. 0 means the whole
+	// guest CPU sample is unavailable.
+	GuestCPUTotalSeconds uint64 `json:"guestCPUTotalSeconds,omitempty"`
 }
