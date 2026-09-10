@@ -12,7 +12,7 @@ require (
 	github.com/smartcontractkit/cre-sdk-go v1.17.0-capdev.1
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/sys v0.47.0
-	google.golang.org/grpc v1.83.1
+	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 )
 
