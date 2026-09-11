@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -159,8 +160,8 @@ func enclaveHostAddr() string {
 	return "127.0.0.1"
 }
 
-func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
-	[]types.Enclave, []string, *deferredGatewayProxy, *deferredGatewayProxy, *fakeStorageService, func(),
+func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger, bootCRESettings string) (
+	[]types.Enclave, []string, *deferredGatewayProxy, *deferredGatewayProxy, *fakeStorageService, func(string) string, func(),
 ) {
 	t.Helper()
 	// Two gateway front-proxies to exercise the enclave's round-robin failover.
@@ -191,9 +192,16 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
 	// inside the 3m retry window; the defaults would also work but pinning them
 	// keeps the test's assumptions local to the test.
 	host := enclaveHostAddr()
-	t.Setenv("ENCLAVE_SETTINGS", fmt.Sprintf(
-		`{"storageKey":%q,"storageServiceUrl":%q,"storageServiceTls":false,"gatewayUrl":%q,"gatewayRetryBackoff":"5s","gatewayRetryTimeout":"3m"}`,
-		engineTestStorageKeyHex, storageAddr, fmt.Sprintf("http://%s:9998,http://%s:9999", host, host)))
+	makeSettings := func(creSettings string) string {
+		payload := fmt.Sprintf(
+			`{"storageKey":%q,"storageServiceUrl":%q,"storageServiceTls":false,"gatewayUrl":%q,"gatewayRetryBackoff":"5s","gatewayRetryTimeout":"3m"`,
+			engineTestStorageKeyHex, storageAddr, fmt.Sprintf("http://%s:9998,http://%s:9999", host, host))
+		if creSettings != "" {
+			payload += fmt.Sprintf(`,"creSettings":%s`, creSettings)
+		}
+		return payload + "}"
+	}
+	t.Setenv("ENCLAVE_SETTINGS", makeSettings(bootCRESettings))
 	if !tests.UseFakeEnclave() {
 		// confidential-workflows EIF is larger than confidential-http (wasmtime/CGO),
 		// so it needs more memory per enclave (~1148 MiB minimum).
@@ -201,7 +209,7 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
 		t.Setenv("TOTAL_MEMORY_MIB", "4096")
 	}
 	enclaves, configURLs, enclaveCleanup := startNitroEnclaves(t, App{Name: "confidential-workflows"}, logger)
-	return enclaves, configURLs, proxy, deadProxy, storageSvc, enclaveCleanup
+	return enclaves, configURLs, proxy, deadProxy, storageSvc, makeSettings, enclaveCleanup
 }
 
 // ---- testConfidentialRelayFeature ----
@@ -475,8 +483,11 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// 2. Start Nitro enclaves for the confidential-workflows app. This also
 	//    stands up the fake CRE storage service and puts its endpoint and the
 	//    storage key in ENCLAVE_SETTINGS; storageSvc's artifact URL is populated
-	//    once the WASM server is up (below).
-	enclaves, configURLs, gwProxy, deadGwProxy, storageSvc, enclaveCleanup := startNitroEnclavesForEngine(t, testLogger)
+	//    once the WASM server is up (below). bootCRESettings carries a
+	//    non-default memory override so the boot-time injection proves injected
+	//    CRE settings are accepted end-to-end (host forwards them verbatim, the
+	//    app installs them) and the workflow runs on an overridden value.
+	enclaves, configURLs, gwProxy, deadGwProxy, storageSvc, makeSettings, enclaveCleanup := startNitroEnclavesForEngine(t, testLogger, `{"global":{"PerWorkflow":{"WASMMemoryLimit":"128mb"}}}`)
 	defer enclaveCleanup()
 	defer gwProxy.Close()
 	defer deadGwProxy.Close()
@@ -691,7 +702,30 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// and the resilience assertion above passed vacuously.
 	require.Positive(t, gwProxy.HitsWhileDown(), "no gateway request hit the simulated outage; the resilience phase did not exercise retries")
 
-	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write + gateway-outage resilience validated")
+	// 9. Injected CRE limiter settings are enforced end-to-end. Re-inject the
+	//    same settings over the config port with a global compressed-binary
+	//    limit of 1 byte — below any artifact — and the next trigger must fail
+	//    inside the enclave at module instantiation on exactly that limit. Then
+	//    re-inject without creSettings and the next trigger must succeed again
+	//    on the built-in defaults. This exercises the runtime settings path
+	//    (config port → host → vsock → app → WASM limiters) and the fail-open
+	//    contract: a cleared override restores the default without redeploy or
+	//    reboot.
+	testLogger.Info().Msg("CRE-settings phase: re-injecting settings with a 1-byte compressed-binary limit")
+	for _, configURL := range configURLs {
+		postEnclaveSettings(t, configURL, makeSettings(`{"global":{"PerWorkflow":{"WASMCompressedBinarySizeLimit":"1b"}}}`))
+	}
+	waitForWorkflowExecutionFailure(t, testEnv, testLogger, workflowID,
+		"compressed binary size exceeds the maximum allowed size", 3*time.Minute)
+
+	successBaseline := countSuccessfulWorkflowExecutions(t, testEnv, workflowID)
+	testLogger.Info().Msg("CRE-settings phase: re-injecting settings without creSettings to restore defaults")
+	for _, configURL := range configURLs {
+		postEnclaveSettings(t, configURL, makeSettings(""))
+	}
+	waitForAdditionalWorkflowExecution(t, testEnv, testLogger, workflowID, successBaseline, 3*time.Minute)
+
+	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write + gateway-outage resilience + injected CRE limiter settings enforced and cleared validated")
 }
 
 // engineTestFeedID / engineTestPrice are the feed the confidential workflow reports
@@ -862,6 +896,112 @@ func waitForWorkflowExecutions(
 			t.Fatalf("timed out after %s waiting for %d successful-trigger log(s) with workflowID %s", timeout, want, workflowID)
 		}
 		testLogger.Info().Msg("Successful-trigger log(s) not found yet, retrying in 5s...")
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// postEnclaveSettings POSTs a settings payload to an enclave's config port,
+// riding the same host→vsock→app path as the boot-time injection. The app
+// accepts a complete payload at any time; it replies 204 on success and 500
+// with the rejection reason otherwise.
+func postEnclaveSettings(t *testing.T, configURL, payload string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, configURL+types.SettingsPath, strings.NewReader(payload))
+	require.NoError(t, err, "building settings request")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err, "posting settings to %s", configURL)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "reading settings response from %s", configURL)
+	require.Equalf(t, http.StatusNoContent, resp.StatusCode, "settings injection rejected by %s: %s", configURL, body)
+}
+
+// countSuccessfulWorkflowExecutions returns the highest per-container count of
+// successful-execution log lines for workflowID, matching the per-container
+// semantics of waitForWorkflowExecutions.
+func countSuccessfulWorkflowExecutions(t *testing.T, testEnv *ttypes.TestEnvironment, workflowID string) int {
+	t.Helper()
+	successMsg := []byte(`"msg":"Workflow execution finished successfully"`)
+	needleID := []byte(workflowID)
+	maxCount := 0
+	for _, name := range workflowDONContainerNames(testEnv) {
+		out, _ := exec.Command("docker", "logs", "--tail", "10000", name).CombinedOutput()
+		count := 0
+		for _, line := range bytes.Split(out, []byte{'\n'}) {
+			if bytes.Contains(line, needleID) && bytes.Contains(line, successMsg) {
+				count++
+			}
+		}
+		maxCount = max(maxCount, count)
+	}
+	return maxCount
+}
+
+// waitForWorkflowExecutionFailure waits for a failed-execution log line for
+// workflowID whose error carries the given cause, proving the injected
+// override was enforced rather than silently ignored.
+func waitForWorkflowExecutionFailure(
+	t *testing.T,
+	testEnv *ttypes.TestEnvironment,
+	testLogger zerolog.Logger,
+	workflowID string,
+	cause string,
+	timeout time.Duration,
+) {
+	t.Helper()
+	containers := workflowDONContainerNames(testEnv)
+	require.NotEmpty(t, containers, "no workflow-DON containers found to scrape")
+	failureMsg := []byte(`"msg":"Workflow execution failed`)
+	needleID := []byte(workflowID)
+	needleCause := []byte(cause)
+	testLogger.Info().Msgf("Waiting for a failed-trigger log for workflowID %s caused by %q", workflowID, cause)
+
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, name := range containers {
+			out, _ := exec.Command("docker", "logs", "--tail", "10000", name).CombinedOutput()
+			for _, line := range bytes.Split(out, []byte{'\n'}) {
+				if bytes.Contains(line, needleID) && bytes.Contains(line, failureMsg) && bytes.Contains(line, needleCause) {
+					testLogger.Info().Msgf("Found failed-trigger log in container %s: %s", name, line)
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for a failed execution for workflowID %s caused by %q", timeout, workflowID, cause)
+		}
+		testLogger.Info().Msg("Failed-trigger log not found yet, retrying in 5s...")
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// waitForAdditionalWorkflowExecution waits for one successful-execution log
+// line beyond the baseline count. Failure lines are deliberately not fatal
+// here: an execution that was already in flight when settings were restored
+// can still fail on the old override, and recovery is proven by the new
+// success, not by the absence of stragglers.
+func waitForAdditionalWorkflowExecution(
+	t *testing.T,
+	testEnv *ttypes.TestEnvironment,
+	testLogger zerolog.Logger,
+	workflowID string,
+	baseline int,
+	timeout time.Duration,
+) {
+	t.Helper()
+	testLogger.Info().Msgf("Waiting for a new successful-trigger log for workflowID %s (baseline %d)", workflowID, baseline)
+
+	deadline := time.Now().Add(timeout)
+	for {
+		if countSuccessfulWorkflowExecutions(t, testEnv, workflowID) > baseline {
+			testLogger.Info().Msgf("New successful-trigger log found for workflowID %s", workflowID)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for a new successful execution for workflowID %s after restoring defaults", timeout, workflowID)
+		}
+		testLogger.Info().Msg("No new successful-trigger log yet, retrying in 5s...")
 		time.Sleep(5 * time.Second)
 	}
 }
