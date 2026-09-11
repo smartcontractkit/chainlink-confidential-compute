@@ -681,6 +681,10 @@ func (h *hostServer) processBatch(reqs []types.SignedComputeRequest) (*types.Exe
 		if err != nil {
 			return nil, failureReason, fmt.Errorf("enclave returned error: %s (no message provided)", resp.Status)
 		}
+		var enclaveErrResp types.EnclaveErrorResponse
+		if json.Unmarshal(body, &enclaveErrResp) == nil {
+			h.recordSubCapabilityFailures(reqs, enclaveErrResp.MetricEvents)
+		}
 		return nil, failureReason, fmt.Errorf("enclave returned error: %s - %s", resp.Status, string(body))
 	}
 
@@ -688,8 +692,26 @@ func (h *hostServer) processBatch(reqs []types.SignedComputeRequest) (*types.Exe
 	if err := json.NewDecoder(resp.Body).Decode(&execResp); err != nil {
 		return nil, executionFailureProtocol, fmt.Errorf("failed to decode response: %w", err)
 	}
+	h.recordSubCapabilityFailures(reqs, execResp.MetricEvents)
 
 	return &execResp, "", nil
+}
+
+func (h *hostServer) recordSubCapabilityFailures(reqs []types.SignedComputeRequest, events []types.MetricEvent) {
+	if len(reqs) == 0 || reqs[0].AppID != types.AppIDConfidentialWorkflows {
+		return
+	}
+	for _, event := range events {
+		if event.Event != "capability_finished" {
+			continue
+		}
+		success, ok := event.Details["success"].(bool)
+		if !ok || success {
+			continue
+		}
+		errorType, _ := event.Details["error_type"].(string)
+		h.metrics.recordSubCapabilityFailure(normalizeSubCapabilityErrorType(errorType))
+	}
 }
 
 // notifyWaiters sends a response to all waiting channels for a batch.

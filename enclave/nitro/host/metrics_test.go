@@ -24,19 +24,20 @@ import (
 )
 
 const (
-	executionDurationMetric     = "confidential_compute.enclave.execution.duration"
-	endpointDurationMetric      = "confidential_compute.enclave.host.endpoint.duration"
-	quorumWaitDurationMetric    = "confidential_compute.enclave.execution.quorum_wait.duration"
-	totalDurationMetric         = "confidential_compute.enclave.execution.total.duration"
-	executionsStartedMetric     = "confidential_compute.enclave.executions.started"
-	executionsRejectedMetric    = "confidential_compute.enclave.executions.rejected"
-	executionsInflightMetric    = "confidential_compute.enclave.executions.inflight"
-	executionsInflightMaxMetric = "confidential_compute.enclave.executions.inflight.max"
-	workflowActiveMetric        = "confidential_compute.enclave.workflow.active"
-	workflowsActiveMaxMetric    = "confidential_compute.enclave.workflows.active.max"
-	totalMemoryMetric           = "confidential_compute.enclave.memory.total"
-	goRuntimeMemoryMetric       = "confidential_compute.enclave.memory.go_runtime"
-	processRSSMemoryMetric      = "confidential_compute.enclave.memory.rss"
+	executionDurationMetric             = "confidential_compute.enclave.execution.duration"
+	endpointDurationMetric              = "confidential_compute.enclave.host.endpoint.duration"
+	quorumWaitDurationMetric            = "confidential_compute.enclave.execution.quorum_wait.duration"
+	totalDurationMetric                 = "confidential_compute.enclave.execution.total.duration"
+	executionsStartedMetric             = "confidential_compute.enclave.executions.started"
+	executionsRejectedMetric            = "confidential_compute.enclave.executions.rejected"
+	executionsInflightMetric            = "confidential_compute.enclave.executions.inflight"
+	executionsInflightMaxMetric         = "confidential_compute.enclave.executions.inflight.max"
+	workflowActiveMetric                = "confidential_compute.enclave.workflow.active"
+	workflowsActiveMaxMetric            = "confidential_compute.enclave.workflows.active.max"
+	totalMemoryMetric                   = "confidential_compute.enclave.memory.total"
+	goRuntimeMemoryMetric               = "confidential_compute.enclave.memory.go_runtime"
+	processRSSMemoryMetric              = "confidential_compute.enclave.memory.rss"
+	subCapabilityFailureTimestampMetric = "confidential_compute.enclave.sub_capability.failure.timestamp"
 )
 
 func newTestHostMetrics(t *testing.T) (*hostMetrics, *sdkmetric.ManualReader) {
@@ -296,6 +297,42 @@ func TestHostMetricsExecutionError(t *testing.T) {
 		"failure.reason": executionFailureUnknown,
 		"outcome":        executionOutcomeError,
 		"request.kind":   "subscribe",
+	}))
+}
+
+func TestHostMetricsSubCapabilityFailureTimestamp(t *testing.T) {
+	clock := &testClock{now: time.Unix(1_000, 0)}
+	metrics, reader := newTestHostMetricsWithClock(t, clock.Now)
+
+	metrics.recordSubCapabilityFailure(subCapabilityErrorDispatch)
+	clock.Advance(10 * time.Second)
+	metrics.recordSubCapabilityFailure(subCapabilityErrorCapability)
+	clock.Advance(10 * time.Second)
+	metrics.recordSubCapabilityFailure("guest-defined")
+
+	data := collectHostMetrics(t, reader)
+	metricData := requireMetric(t, data, subCapabilityFailureTimestampMetric)
+	assert.Equal(t, "s", metricData.Unit)
+	assert.Equal(t, int64(1_000), gaugeValue(t, data, subCapabilityFailureTimestampMetric, map[string]string{
+		"error.type": subCapabilityErrorDispatch,
+	}))
+	assert.Equal(t, int64(1_010), gaugeValue(t, data, subCapabilityFailureTimestampMetric, map[string]string{
+		"error.type": subCapabilityErrorCapability,
+	}))
+	assert.Equal(t, int64(1_020), gaugeValue(t, data, subCapabilityFailureTimestampMetric, map[string]string{
+		"error.type": subCapabilityErrorUnknown,
+	}))
+
+	clock.Advance(10 * time.Second)
+	metrics.recordSubCapabilityFailure(subCapabilityErrorDispatch)
+	data = collectHostMetrics(t, reader)
+	assert.Equal(t, int64(1_030), gaugeValue(t, data, subCapabilityFailureTimestampMetric, map[string]string{
+		"error.type": subCapabilityErrorDispatch,
+	}))
+
+	data = collectHostMetrics(t, reader)
+	assert.Equal(t, int64(1_030), gaugeValue(t, data, subCapabilityFailureTimestampMetric, map[string]string{
+		"error.type": subCapabilityErrorDispatch,
 	}))
 }
 

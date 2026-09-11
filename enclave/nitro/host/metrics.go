@@ -29,6 +29,9 @@ const (
 	executionFailureTimeout       = "timeout"
 	executionFailureTransport     = "transport"
 	executionFailureUnknown       = "unknown"
+	subCapabilityErrorDispatch    = "dispatch"
+	subCapabilityErrorCapability  = "capability"
+	subCapabilityErrorUnknown     = "unknown"
 	enclaveMemoryPollInterval     = 30 * time.Second
 	enclaveMemoryPollTimeout      = 30 * time.Second
 	maxEnclaveMemoryResponseBytes = 64 * 1024
@@ -41,6 +44,7 @@ var executionDurationBuckets = []float64{
 
 type executionMetrics interface {
 	startExecution(executionMetadata, time.Duration) func(outcome, failureReason string)
+	recordSubCapabilityFailure(errorType string)
 }
 
 type noopExecutionMetrics struct{}
@@ -48,6 +52,8 @@ type noopExecutionMetrics struct{}
 func (noopExecutionMetrics) startExecution(executionMetadata, time.Duration) func(string, string) {
 	return func(string, string) {}
 }
+
+func (noopExecutionMetrics) recordSubCapabilityFailure(string) {}
 
 type enclaveMemorySnapshot struct {
 	totalBytes      int64
@@ -63,16 +69,17 @@ type hostMetrics struct {
 	// Time from the first matching request until quorum dispatch for one batch.
 	quorumWaitDuration metric.Float64Histogram
 	// Quorum wait plus post-quorum enclave execution time for one batch.
-	totalDuration         metric.Float64Histogram
-	executionsStarted     metric.Int64Counter
-	executionsRejected    metric.Int64Counter
-	executionsInflight    metric.Int64ObservableGauge
-	executionsInflightMax metric.Int64ObservableGauge
-	workflowActive        metric.Int64ObservableGauge
-	workflowsActiveMax    metric.Int64ObservableGauge
-	totalMemory           metric.Int64ObservableGauge
-	goRuntimeMemory       metric.Int64ObservableGauge
-	processRSSMemory      metric.Int64ObservableGauge
+	totalDuration                 metric.Float64Histogram
+	executionsStarted             metric.Int64Counter
+	executionsRejected            metric.Int64Counter
+	executionsInflight            metric.Int64ObservableGauge
+	executionsInflightMax         metric.Int64ObservableGauge
+	subCapabilityFailureTimestamp metric.Int64Gauge
+	workflowActive                metric.Int64ObservableGauge
+	workflowsActiveMax            metric.Int64ObservableGauge
+	totalMemory                   metric.Int64ObservableGauge
+	goRuntimeMemory               metric.Int64ObservableGauge
+	processRSSMemory              metric.Int64ObservableGauge
 
 	now              func() time.Time
 	mu               sync.Mutex
@@ -140,6 +147,14 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	if err != nil {
 		return nil, fmt.Errorf("create enclave executions rejected counter: %w", err)
 	}
+	subCapabilityFailureTimestamp, err := meter.Int64Gauge(
+		"confidential_compute.enclave.sub_capability.failure.timestamp",
+		metric.WithDescription("Unix timestamp of the latest failed in-enclave sub-capability call observed by the host"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create sub-capability failure timestamp gauge: %w", err)
+	}
 	inflight, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.executions.inflight",
 		metric.WithDescription("Actual enclave executions currently in flight in this host"),
@@ -157,16 +172,17 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 		return nil, fmt.Errorf("create maximum enclave executions in-flight gauge: %w", err)
 	}
 	metrics := &hostMetrics{
-		executionDuration:     duration,
-		endpointDuration:      endpointDuration,
-		quorumWaitDuration:    quorumWait,
-		totalDuration:         total,
-		executionsStarted:     started,
-		executionsRejected:    rejected,
-		executionsInflight:    inflight,
-		executionsInflightMax: inflightMax,
-		now:                   now,
-		workflowRefs:          make(map[string]int64),
+		executionDuration:             duration,
+		endpointDuration:              endpointDuration,
+		quorumWaitDuration:            quorumWait,
+		totalDuration:                 total,
+		executionsStarted:             started,
+		executionsRejected:            rejected,
+		executionsInflight:            inflight,
+		executionsInflightMax:         inflightMax,
+		subCapabilityFailureTimestamp: subCapabilityFailureTimestamp,
+		now:                           now,
+		workflowRefs:                  make(map[string]int64),
 	}
 	active, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.workflow.active",
@@ -228,6 +244,24 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 		return nil, fmt.Errorf("register enclave execution load callback: %w", err)
 	}
 	return metrics, nil
+}
+
+func (m *hostMetrics) recordSubCapabilityFailure(errorType string) {
+	errorType = normalizeSubCapabilityErrorType(errorType)
+	m.subCapabilityFailureTimestamp.Record(
+		context.Background(),
+		m.now().Unix(),
+		metric.WithAttributes(attribute.String("error.type", errorType)),
+	)
+}
+
+func normalizeSubCapabilityErrorType(errorType string) string {
+	switch errorType {
+	case subCapabilityErrorDispatch, subCapabilityErrorCapability:
+		return errorType
+	default:
+		return subCapabilityErrorUnknown
+	}
 }
 
 func (m *hostMetrics) recordEndpointDuration(ctx context.Context, endpoint string, duration time.Duration) {
