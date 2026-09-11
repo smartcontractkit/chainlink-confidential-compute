@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -27,16 +28,40 @@ type warningLogger interface {
 	Warnw(msg string, keysAndValues ...any)
 }
 
+type debugLogger interface {
+	Debugw(msg string, keysAndValues ...any)
+}
+
 type socksLogger struct {
 	logger warningLogger
 }
 
 func (l socksLogger) Errorf(format string, args ...interface{}) {
+	err := fmt.Errorf(format, args...)
+	if isEnclaveTunnelClose(err.Error()) {
+		if logger, ok := l.logger.(debugLogger); ok {
+			logger.Debugw(
+				"outbound proxy tunnel closed by enclave",
+				"event", "OUTBOUND_PROXY_TUNNEL_CLOSED",
+				"detail", err.Error(),
+			)
+		}
+		return
+	}
 	l.logger.Warnw(
 		"outbound proxy request failed",
 		"event", "OUTBOUND_PROXY_REQUEST_ERR",
-		"error", fmt.Errorf(format, args...),
+		"error", err,
 	)
+}
+
+// go-socks5 exposes relay failures to its logger only as formatted text. This
+// exact shape means the enclave closed its side of an established tunnel.
+// Example: server: writeto tcp 192.0.2.10:45132->198.51.100.20:5002: write vsock vm(4294967295):5001->vm(16):42: broken pipe
+func isEnclaveTunnelClose(message string) bool {
+	return strings.HasPrefix(message, "server: writeto tcp ") &&
+		strings.Contains(message, ": write vsock ") &&
+		strings.HasSuffix(message, ": broken pipe")
 }
 
 type ruleSet struct {

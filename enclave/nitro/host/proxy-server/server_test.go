@@ -65,6 +65,56 @@ func TestSOCKSProxyLogsFailedRequest(t *testing.T) {
 	require.Contains(t, entry.ContextMap()["error"], "blocked by rules")
 }
 
+func TestSOCKSLoggerClassifiesRelayErrors(t *testing.T) {
+	tests := []struct {
+		name        string
+		message     string
+		wantLevel   zapcore.Level
+		wantLog     string
+		wantEvent   string
+		wantContext string
+	}{
+		{
+			name:        "enclave closes established tunnel",
+			message:     "server: writeto tcp 192.0.2.10:45132->198.51.100.20:5002: write vsock vm(4294967295):5001->vm(16):42: broken pipe",
+			wantLevel:   zapcore.DebugLevel,
+			wantLog:     "outbound proxy tunnel closed by enclave",
+			wantEvent:   "OUTBOUND_PROXY_TUNNEL_CLOSED",
+			wantContext: "detail",
+		},
+		{
+			name:        "remote socket closes",
+			message:     "server: write tcp 192.0.2.10:45132->198.51.100.20:5002: broken pipe",
+			wantLevel:   zapcore.WarnLevel,
+			wantLog:     "outbound proxy request failed",
+			wantEvent:   "OUTBOUND_PROXY_REQUEST_ERR",
+			wantContext: "error",
+		},
+		{
+			name:        "different vsock failure",
+			message:     "server: writeto tcp 192.0.2.10:45132->198.51.100.20:5002: write vsock vm(4294967295):5001->vm(16):42: connection reset by peer",
+			wantLevel:   zapcore.WarnLevel,
+			wantLog:     "outbound proxy request failed",
+			wantEvent:   "OUTBOUND_PROXY_REQUEST_ERR",
+			wantContext: "error",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			logger, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
+			socksLogger{logger: logger}.Errorf("%s", test.message)
+
+			require.Equal(t, 1, logs.Len())
+			entry := logs.All()[0]
+			require.Equal(t, test.wantLevel, entry.Level)
+			require.Equal(t, test.wantLog, entry.Message)
+			require.Equal(t, test.wantEvent, entry.ContextMap()["event"])
+			require.Contains(t, entry.ContextMap()[test.wantContext], test.message)
+		})
+	}
+}
+
 func TestRuleSetConfiguredProfile(t *testing.T) {
 	rules := ruleSet{localAddresses: map[netip.Addr]struct{}{netip.MustParseAddr("10.0.0.7"): {}}}
 	require.True(t, allows(rules, types.ProxyProfileConfigured, "10.0.0.8"))
