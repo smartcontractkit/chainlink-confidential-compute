@@ -4,7 +4,7 @@ go 1.26.6
 
 require (
 	github.com/andybalholm/brotli v1.2.2
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260914162034-34ebd5d3972b
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260914191328-10cc2b41997e
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260804191526-b7a850ae7648
 	github.com/smartcontractkit/chainlink-protos/storage-service v0.3.0
@@ -17,6 +17,7 @@ require (
 )
 
 require (
+	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
