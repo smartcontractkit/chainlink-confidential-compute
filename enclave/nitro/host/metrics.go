@@ -29,7 +29,7 @@ const (
 	executionFailureTimeout       = "timeout"
 	executionFailureTransport     = "transport"
 	executionFailureUnknown       = "unknown"
-	enclaveMemoryPollInterval     = 30 * time.Second
+	enclaveMemoryPollInterval     = 5 * time.Second
 	enclaveMemoryPollTimeout      = 30 * time.Second
 	maxEnclaveMemoryResponseBytes = 64 * 1024
 )
