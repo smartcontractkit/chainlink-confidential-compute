@@ -4,7 +4,7 @@ go 1.26.6
 
 require (
 	github.com/andybalholm/brotli v1.2.2
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260903173259-a8f860eb5f61
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260914162034-34ebd5d3972b
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260804191526-b7a850ae7648
 	github.com/smartcontractkit/chainlink-protos/storage-service v0.3.0
@@ -21,7 +21,7 @@ require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
-	github.com/bytecodealliance/wasmtime-go/v48 v48.0.0 // indirect
+	github.com/bytecodealliance/wasmtime-go/v47 v47.0.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudevents/sdk-go/binding/format/protobuf/v2 v2.16.1 // indirect
