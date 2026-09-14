@@ -3,7 +3,7 @@ module github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/
 go 1.26.6
 
 require (
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260903173259-a8f860eb5f61
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260914162034-34ebd5d3972b
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260804191526-b7a850ae7648
 	github.com/stretchr/testify v1.12.1
