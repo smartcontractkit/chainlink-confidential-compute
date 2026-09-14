@@ -7,15 +7,17 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"github.com/smartcontractkit/chainlink-evm/gethwrappers/workflow/generated/capabilities_registry_wrapper_v2"
 	evmClient "github.com/smartcontractkit/chainlink-evm/pkg/client"
 	"github.com/smartcontractkit/chainlink-evm/pkg/config/chaintype"
-	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 )
 
 const (
@@ -84,8 +86,11 @@ func main() {
 	}
 	lggr.Infof("Capabilities registry client created successfully")
 
-	configTracker := NewConfigTracker(reg, lggr, donID, hostPort, configPort, time.Minute, initialT, initialMasterPublicKey, requireBFTQuorum)
-	configTracker.Start()
+	configTracker := NewConfigTracker(reg, lggr, donID, hostPort, configPort, refreshInterval, initialT, initialMasterPublicKey, requireBFTQuorum)
+	// Passing ctx to Start lets stop() cancel RPC/HTTP requests and the polling timer.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	configTracker.Start(ctx)
 }
 
 func loadConfigFromEnv() (common.Address, *big.Int, uint32, string, string, []evmClient.NodeConfig, []byte, uint32, bool, error) {

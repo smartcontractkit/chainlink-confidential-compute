@@ -1,17 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
-	"github.com/smartcontractkit/chainlink-evm/gethwrappers/workflow/generated/capabilities_registry_wrapper_v2"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/workflow/generated/capabilities_registry_wrapper_v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -100,7 +102,7 @@ func TestCheckUpdates_Success_NoUpdateNeeded(t *testing.T) {
 	configPort := configURL.Port()
 
 	ct := &configTracker{}
-	configSet, err := ct.checkUpdates(lggr, mockRegistry, donID, hostPort, configPort)
+	configSet, err := ct.checkUpdates(context.Background(), lggr, mockRegistry, donID, hostPort, configPort)
 
 	assert.NoError(t, err)
 	assert.True(t, configSet, "Config should be reported as set when signers already match")
@@ -171,7 +173,7 @@ func TestCheckUpdates_Success_UpdateNeededForF(t *testing.T) {
 	configPort := configURL.Port()
 
 	ct := &configTracker{}
-	configSet, err := ct.checkUpdates(lggr, mockRegistry, donID, hostPort, configPort)
+	configSet, err := ct.checkUpdates(context.Background(), lggr, mockRegistry, donID, hostPort, configPort)
 
 	assert.NoError(t, err)
 	assert.True(t, configSet, "Config should be reported as set after a successful update")
@@ -254,7 +256,7 @@ func TestCheckUpdates_Success_UpdateNeeded(t *testing.T) {
 	configPort := configURL.Port()
 
 	ct := &configTracker{}
-	configSet, err := ct.checkUpdates(lggr, mockRegistry, donID, hostPort, configPort)
+	configSet, err := ct.checkUpdates(context.Background(), lggr, mockRegistry, donID, hostPort, configPort)
 
 	assert.NoError(t, err)
 	assert.True(t, configSet, "Config should be reported as set after a successful update")
@@ -321,11 +323,43 @@ func TestCheckUpdates_UnconfiguredEnclave_SetsInitialConfig(t *testing.T) {
 		initialT:               3,
 		initialMasterPublicKey: []byte("initial-public-key"),
 	}
-	configSet, err := ct.checkUpdates(lggr, mockRegistry, donID, hostPort, configPort)
+	configSet, err := ct.checkUpdates(context.Background(), lggr, mockRegistry, donID, hostPort, configPort)
 
 	assert.NoError(t, err)
 	assert.True(t, configSet, "Config should be reported as set after bootstrapping an unconfigured enclave")
 	assert.True(t, configUpdateReceived, "Initial config should have been posted")
+	mockRegistry.AssertExpectations(t)
+}
+
+func TestCheckUpdates_ConfigAlreadySet(t *testing.T) {
+	mockRegistry := &MockCapabilitiesRegistry{}
+	donID := uint32(123)
+	mockRegistry.On("GetDON", mock.Anything, donID).Return(
+		capabilities_registry_wrapper_v2.CapabilitiesRegistryDONInfo{
+			NodeP2PIds: [][32]byte{{0x01}, {0x02}},
+			F:          1,
+		}, nil,
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case types.PublicKeyPath:
+			http.Error(w, "enclave config not set", http.StatusServiceUnavailable)
+		case types.SetConfigPath:
+			w.WriteHeader(http.StatusConflict)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	ct := &configTracker{initialT: 1, initialMasterPublicKey: []byte("test-public-key")}
+	configSet, err := ct.checkUpdates(context.Background(), createTestLogger(t), mockRegistry, donID, serverURL.Port(), serverURL.Port())
+
+	require.NoError(t, err)
+	assert.True(t, configSet)
 	mockRegistry.AssertExpectations(t)
 }
 
@@ -340,7 +374,7 @@ func TestCheckUpdates_GetDONError(t *testing.T) {
 	)
 
 	ct := &configTracker{}
-	_, err := ct.checkUpdates(lggr, mockRegistry, donID, "8080", "8081")
+	_, err := ct.checkUpdates(context.Background(), lggr, mockRegistry, donID, "8080", "8081")
 
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to get DON")
@@ -359,7 +393,7 @@ func TestCheckUpdates_DonFZeroError(t *testing.T) {
 	mockRegistry.On("GetDON", mock.Anything, donID).Return(donInfo, nil)
 
 	ct := &configTracker{}
-	_, err := ct.checkUpdates(lggr, mockRegistry, donID, "8080", "8081")
+	_, err := ct.checkUpdates(context.Background(), lggr, mockRegistry, donID, "8080", "8081")
 
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "DON F value is 0")
@@ -379,7 +413,7 @@ func TestCheckUpdates_EnclaveConfigFetchError(t *testing.T) {
 
 	// Use invalid port to cause connection error
 	ct := &configTracker{}
-	_, err := ct.checkUpdates(lggr, mockRegistry, donID, "99999", "unused")
+	_, err := ct.checkUpdates(context.Background(), lggr, mockRegistry, donID, "99999", "unused")
 
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to fetch enclave config")
@@ -410,7 +444,7 @@ func TestCheckUpdates_InvalidJSONResponse(t *testing.T) {
 	hostPort := serverURL.Port()
 
 	ct := &configTracker{}
-	_, err = ct.checkUpdates(lggr, mockRegistry, donID, hostPort, "8999")
+	_, err = ct.checkUpdates(context.Background(), lggr, mockRegistry, donID, hostPort, "8999")
 
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to unmarshal enclave response")
@@ -461,7 +495,7 @@ func TestCheckUpdates_ConfigUpdateError(t *testing.T) {
 	configPort := configURL.Port()
 
 	ct := &configTracker{}
-	_, err = ct.checkUpdates(lggr, mockRegistry, donID, hostPort, configPort)
+	_, err = ct.checkUpdates(context.Background(), lggr, mockRegistry, donID, hostPort, configPort)
 
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to update enclave config")
@@ -480,13 +514,15 @@ func TestConfigTracker_StartStop(t *testing.T) {
 	mockRegistry.On("GetDON", mock.Anything, uint32(123)).Return(donInfo, nil).Maybe()
 
 	// Setup test server
+	var callCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
 		response := types.PublicKeyResponse{
 			Config: types.EnclaveConfig{
 				Signers:         [][]byte{toBytes32([]byte{0x01, 0x02, 0x03})},
 				MasterPublicKey: []byte("test-public-key"),
 				T:               1,
-				F:               0,
+				F:               1,
 			},
 		}
 		err := json.NewEncoder(w).Encode(response)
@@ -500,38 +536,35 @@ func TestConfigTracker_StartStop(t *testing.T) {
 	tval := uint32(1)
 	masterPublicKey := []byte("test-public-key")
 
-	tracker := NewConfigTracker(mockRegistry, lggr, 123, hostPort, "8999", 500*time.Millisecond, tval, masterPublicKey, false)
+	tracker := NewConfigTracker(mockRegistry, lggr, 123, hostPort, "8999", time.Hour, tval, masterPublicKey, false)
 
 	// Test that we can create the tracker and it can perform initial checks
 	assert.NotNil(t, tracker)
 
-	// Start the tracker in a goroutine
-	done := make(chan bool, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	go func() {
-		defer func() {
-			done <- true
-		}()
-		tracker.Start()
+		defer close(done)
+		tracker.Start(ctx)
 	}()
 
-	// Check that the tracker continues running.
-	time.Sleep(5 * time.Second)
+	require.Eventually(t, func() bool { return callCount.Load() == 1 }, time.Second, 10*time.Millisecond)
+	cancel()
 	select {
 	case <-done:
-		t.Fatal("Tracker finished unexpectedly - Start() should run indefinitely")
 	case <-time.After(time.Second):
-		t.Log("Tracker is running as expected")
+		t.Fatal("Tracker did not stop after cancellation")
 	}
+	mockRegistry.AssertExpectations(t)
 }
 
-func TestConfigTracker_StopsPollingAfterConfigSet(t *testing.T) {
+func TestConfigTracker_ContinuesPollingAfterConfigSet(t *testing.T) {
 	mockRegistry := &MockCapabilitiesRegistry{}
 	lggr := createTestLogger(t)
-	refreshInterval := 200 * time.Millisecond
+	refreshInterval := 20 * time.Millisecond
 
-	// Track the number of calls to verify polling stops once the config is set
-	callCount := 0
-	configUpdateCount := 0
+	var callCount atomic.Int32
+	var configUpdateCount atomic.Int32
 
 	// Mock DON data that will cause an update on the first check
 	donInfo := capabilities_registry_wrapper_v2.CapabilitiesRegistryDONInfo{
@@ -540,15 +573,17 @@ func TestConfigTracker_StopsPollingAfterConfigSet(t *testing.T) {
 	}
 	mockRegistry.On("GetDON", mock.Anything, uint32(123)).Return(donInfo, nil).Maybe()
 
-	// Setup test server. The first check returns mismatched signers, triggering
-	// an update. If polling continued it would keep being hit, but it should not.
 	publicKeysServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		call := callCount.Add(1)
 		assert.Equal(t, "/publicKeys", r.URL.Path)
+		if call == 2 {
+			http.Error(w, "temporary failure", http.StatusInternalServerError)
+			return
+		}
 
 		response := types.PublicKeyResponse{
 			Config: types.EnclaveConfig{
-				Signers:         [][]byte{{0x07, 0x08, 0x09}}, // Different from DON - triggers update
+				Signers:         [][]byte{{0x07, 0x08, 0x09}},
 				MasterPublicKey: []byte("test-public-key"),
 				T:               1,
 				F:               0,
@@ -561,9 +596,8 @@ func TestConfigTracker_StopsPollingAfterConfigSet(t *testing.T) {
 	}))
 	defer publicKeysServer.Close()
 
-	// Setup config server to handle updates
 	configServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		configUpdateCount++
+		configUpdateCount.Add(1)
 		assert.Equal(t, "/config", r.URL.Path)
 		assert.Equal(t, "POST", r.Method)
 
@@ -577,7 +611,6 @@ func TestConfigTracker_StopsPollingAfterConfigSet(t *testing.T) {
 	}))
 	defer configServer.Close()
 
-	// Extract ports from test server URLs
 	publicKeysURL, err := url.Parse(publicKeysServer.URL)
 	require.NoError(t, err)
 	hostPort := publicKeysURL.Port()
@@ -590,29 +623,23 @@ func TestConfigTracker_StopsPollingAfterConfigSet(t *testing.T) {
 
 	tracker := NewConfigTracker(mockRegistry, lggr, 123, hostPort, configPort, refreshInterval, tval, masterPublicKey, false)
 
-	// Start the tracker in a goroutine
-	done := make(chan bool, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	go func() {
-		defer func() {
-			done <- true
-		}()
-		tracker.Start()
+		defer close(done)
+		tracker.Start(ctx)
 	}()
 
-	// Wait for several refresh intervals to elapse
-	time.Sleep(refreshInterval*3 + 100*time.Millisecond)
-
-	// Verify that the config was set exactly once and polling stopped afterwards.
-	assert.Equal(t, 1, configUpdateCount, "Should have set the config exactly once")
-	assert.Equal(t, 1, callCount, "Should have stopped polling after the config was set")
-
-	// Verify the tracker is still running (sitting idle, not exited).
+	require.Eventually(t, func() bool {
+		return callCount.Load() >= 4 && configUpdateCount.Load() >= 3
+	}, time.Second, 10*time.Millisecond)
+	cancel()
 	select {
 	case <-done:
-		t.Fatal("Tracker finished unexpectedly - Start() should sit idle after the config is set")
-	case <-time.After(50 * time.Millisecond):
-		t.Log("Tracker is sitting idle as expected")
+	case <-time.After(time.Second):
+		t.Fatal("Tracker did not stop after cancellation")
 	}
+	mockRegistry.AssertExpectations(t)
 }
 
 type MockCapabilitiesRegistry struct {

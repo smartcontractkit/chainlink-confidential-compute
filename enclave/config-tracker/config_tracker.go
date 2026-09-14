@@ -7,19 +7,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"os/signal"
 	"slices"
 	"sort"
-	"syscall"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
-	"github.com/smartcontractkit/chainlink-evm/gethwrappers/workflow/generated/capabilities_registry_wrapper_v2"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
+	"github.com/smartcontractkit/chainlink-evm/gethwrappers/workflow/generated/capabilities_registry_wrapper_v2"
 )
+
+const reconcileTimeout = 30 * time.Second
 
 type CapabilitiesRegistry interface {
 	GetDON(opts *bind.CallOpts, donId uint32) (capabilities_registry_wrapper_v2.CapabilitiesRegistryDONInfo, error)
@@ -62,55 +61,35 @@ func NewConfigTracker(
 	}
 }
 
-func (ct *configTracker) Start() {
+func (ct *configTracker) Start(ctx context.Context) {
 	ct.logger.Info("Starting periodic checks for DON configuration updates...")
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	configSet, err := ct.checkUpdates(ct.logger, ct.capabilitiesRegistry, ct.donID, ct.hostPort, ct.configPort)
-	if err != nil {
-		ct.logger.Errorf("Error checking updates: %v", err)
-	}
-	if configSet {
-		ct.waitForShutdown(sigChan)
-		return
-	}
-
-	ticker := time.NewTicker(ct.refreshInterval)
-	defer ticker.Stop()
 	for {
-		select {
-		case <-ticker.C:
-			configSet, err = ct.checkUpdates(ct.logger, ct.capabilitiesRegistry, ct.donID, ct.hostPort, ct.configPort)
-			if err != nil {
-				ct.logger.Errorf("Error checking updates: %v", err)
-			}
-			if configSet {
-				ticker.Stop()
-				ct.waitForShutdown(sigChan)
-				return
-			}
-		case <-sigChan:
-			ct.logger.Info("Received kill signal, stopping periodic checks")
+		checkCtx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+		_, err := ct.checkUpdates(checkCtx, ct.logger, ct.capabilitiesRegistry, ct.donID, ct.hostPort, ct.configPort)
+		cancel()
+		if ctx.Err() != nil {
 			return
+		}
+		if err != nil {
+			ct.logger.Errorf("Error checking updates: %v", err)
+		}
+
+		timer := time.NewTimer(ct.refreshInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
 		}
 	}
 }
 
-// waitForShutdown blocks until a kill signal is received. It is used after the
-// config has been set, so the tracker sits idle instead of polling for updates.
-func (ct *configTracker) waitForShutdown(sigChan <-chan os.Signal) {
-	ct.logger.Info("Config set, stopping periodic checks and sitting idle")
-	<-sigChan
-	ct.logger.Info("Received kill signal, stopping")
-}
-
-// checkUpdates fetches the DON membership and, if it differs from the enclave's
-// current config, updates the config. It returns true once the config has been
-// confirmed set: either after a successful update or when it already matches.
-func (ct *configTracker) checkUpdates(lggr logger.Logger, reg CapabilitiesRegistry, donID uint32, hostPort, configPort string) (bool, error) {
+// checkUpdates compares the DON membership with the enclave config. It returns
+// true when the enclave is configured, including when another writer wins the
+// initial configuration race.
+func (ct *configTracker) checkUpdates(ctx context.Context, lggr logger.Logger, reg CapabilitiesRegistry, donID uint32, hostPort, configPort string) (bool, error) {
 	lggr.Infof("Fetching DON with ID: %d", donID)
-	don, err := reg.GetDON(nil, donID)
+	don, err := reg.GetDON(&bind.CallOpts{Context: ctx}, donID)
 	if err != nil {
 		return false, fmt.Errorf("failed to get DON: %w", err)
 	}
@@ -125,7 +104,11 @@ func (ct *configTracker) checkUpdates(lggr logger.Logger, reg CapabilitiesRegist
 
 	lggr.Infof("Fetching enclave config from: %s", localhostPrefix+":"+hostPort+"/publicKeys")
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(localhostPrefix + ":" + hostPort + "/publicKeys")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, localhostPrefix+":"+hostPort+"/publicKeys", nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to create enclave config request: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("failed to fetch enclave config: %w", err)
 	}
@@ -204,13 +187,13 @@ func (ct *configTracker) checkUpdates(lggr logger.Logger, reg CapabilitiesRegist
 			T:               t,
 			F:               requiredF,
 		}
-		configBytes, err := json.Marshal(config)
-		if err != nil {
-			return false, fmt.Errorf("failed to marshal enclave config: %w", err)
-		}
-		_, err = util.SetNodeConfig(context.Background(), types.Enclave{EnclaveURL: localhostPrefix + ":" + configPort}, types.ConfigRequest{Config: configBytes}, nil)
+		alreadySet, err := postConfig(ctx, client, configPort, config)
 		if err != nil {
 			return false, fmt.Errorf("failed to update enclave config: %w", err)
+		}
+		if alreadySet {
+			lggr.Info("Enclave config is already set; no update applied")
+			return true, nil
 		}
 		lggr.Info("Successfully updated enclave config.")
 	} else {
@@ -218,4 +201,34 @@ func (ct *configTracker) checkUpdates(lggr logger.Logger, reg CapabilitiesRegist
 	}
 
 	return true, nil
+}
+
+func postConfig(ctx context.Context, client *http.Client, configPort string, config types.EnclaveConfig) (bool, error) {
+	configBytes, err := json.Marshal(config)
+	if err != nil {
+		return false, fmt.Errorf("failed to marshal enclave config: %w", err)
+	}
+	payload, err := json.Marshal(types.ConfigRequest{Config: configBytes})
+	if err != nil {
+		return false, fmt.Errorf("failed to marshal config request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, localhostPrefix+":"+configPort+types.SetConfigPath, bytes.NewReader(payload))
+	if err != nil {
+		return false, fmt.Errorf("failed to create config request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("failed to send config request: %w", err)
+	}
+	defer util.SafeClose(resp)
+	if resp.StatusCode == http.StatusConflict {
+		return true, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("config request failed with status %d", resp.StatusCode)
+	}
+
+	return false, nil
 }
