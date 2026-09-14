@@ -37,6 +37,8 @@ const (
 	totalMemoryMetric           = "confidential_compute.enclave.memory.total"
 	goRuntimeMemoryMetric       = "confidential_compute.enclave.memory.go_runtime"
 	processRSSMemoryMetric      = "confidential_compute.enclave.memory.rss"
+	availableMemoryMetric       = "confidential_compute.enclave.memory.available"
+	peakRSSMemoryMetric         = "confidential_compute.enclave.memory.rss_peak"
 )
 
 func newTestHostMetrics(t *testing.T) (*hostMetrics, *sdkmetric.ManualReader) {
@@ -465,6 +467,27 @@ func TestHostMetricsEnclaveMemory(t *testing.T) {
 	assert.False(t, found)
 }
 
+func TestHostMetricsEnclaveMemoryHeadroomFields(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{
+		TotalMB:     10240,
+		RSSMB:       9000,
+		AvailableMB: 512,
+		PeakRSSMB:   9800,
+	})
+
+	data := collectHostMetrics(t, reader)
+	availableMetric := requireMetric(t, data, availableMemoryMetric)
+	peakMetric := requireMetric(t, data, peakRSSMemoryMetric)
+	assert.Equal(t, int64(512*1024*1024), gaugeValue(t, data, availableMemoryMetric, nil))
+	assert.Equal(t, int64(9800*1024*1024), gaugeValue(t, data, peakRSSMemoryMetric, nil))
+	assert.Equal(t, "By", availableMetric.Unit)
+	assert.Equal(t, "By", peakMetric.Unit)
+	assert.Contains(t, availableMetric.Description, "quantized to the nearest MiB inside the enclave")
+	assert.Contains(t, peakMetric.Description, "quantized to the nearest MiB inside the enclave")
+}
+
 func TestHostMetricsOmitsUnavailableMemoryValues(t *testing.T) {
 	metrics, reader := newTestHostMetrics(t)
 
@@ -476,6 +499,10 @@ func TestHostMetricsOmitsUnavailableMemoryValues(t *testing.T) {
 	_, found := findMetric(data, processRSSMemoryMetric)
 	assert.False(t, found)
 	_, found = findMetric(data, totalMemoryMetric)
+	assert.False(t, found)
+	_, found = findMetric(data, availableMemoryMetric)
+	assert.False(t, found)
+	_, found = findMetric(data, peakRSSMemoryMetric)
 	assert.False(t, found)
 }
 

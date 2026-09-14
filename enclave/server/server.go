@@ -251,9 +251,11 @@ func (s *enclaveServer) handleMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := types.MemoryEstimateResponse{
-		UsedMB:  bytesToMB(readRuntimeMemoryBytes()),
-		RSSMB:   bytesToMB(readProcessRSSBytes()),
-		TotalMB: bytesToMB(readTotalMemoryBytes()),
+		UsedMB:      bytesToMB(readRuntimeMemoryBytes()),
+		RSSMB:       bytesToMB(readProcessRSSBytes()),
+		TotalMB:     bytesToMB(readTotalMemoryBytes()),
+		AvailableMB: bytesToMB(readAvailableMemoryBytes()),
+		PeakRSSMB:   bytesToMB(readPeakProcessRSSBytes()),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

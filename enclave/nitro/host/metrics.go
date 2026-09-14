@@ -53,6 +53,8 @@ type enclaveMemorySnapshot struct {
 	totalBytes      int64
 	goRuntimeBytes  int64
 	processRSSBytes int64
+	availableBytes  int64
+	peakRSSBytes    int64
 }
 
 type hostMetrics struct {
@@ -73,6 +75,8 @@ type hostMetrics struct {
 	totalMemory           metric.Int64ObservableGauge
 	goRuntimeMemory       metric.Int64ObservableGauge
 	processRSSMemory      metric.Int64ObservableGauge
+	availableMemory       metric.Int64ObservableGauge
+	peakRSSMemory         metric.Int64ObservableGauge
 
 	now              func() time.Time
 	mu               sync.Mutex
@@ -212,11 +216,32 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 		return nil, fmt.Errorf("create enclave process RSS memory gauge: %w", err)
 	}
 
+	availableMemory, err := meter.Int64ObservableGauge(
+		"confidential_compute.enclave.memory.available",
+		metric.WithDescription("Guest RAM the enclave kernel reports as available (/proc/meminfo MemAvailable), quantized to the nearest MiB inside the enclave; the headroom that total and RSS together cannot show"),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(metrics.observeAvailableMemory),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave available memory gauge: %w", err)
+	}
+	peakRSSMemory, err := meter.Int64ObservableGauge(
+		"confidential_compute.enclave.memory.rss_peak",
+		metric.WithDescription("High-water mark of the enclave process's resident set (/proc/self/status VmHWM), quantized to the nearest MiB inside the enclave; monotonic, so a spike between two polls stays visible"),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(metrics.observePeakRSSMemory),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave peak RSS memory gauge: %w", err)
+	}
+
 	metrics.workflowActive = active
 	metrics.workflowsActiveMax = activeMax
 	metrics.totalMemory = totalMemory
 	metrics.goRuntimeMemory = goRuntimeMemory
 	metrics.processRSSMemory = processRSSMemory
+	metrics.availableMemory = availableMemory
+	metrics.peakRSSMemory = peakRSSMemory
 	_, err = meter.RegisterCallback(
 		metrics.observeExecutionLoad,
 		metrics.executionsInflight,
@@ -294,11 +319,29 @@ func (m *hostMetrics) observeProcessRSSMemory(_ context.Context, observer metric
 	return nil
 }
 
+func (m *hostMetrics) observeAvailableMemory(_ context.Context, observer metric.Int64Observer) error {
+	snapshot := m.memory.Load()
+	if snapshot != nil && snapshot.availableBytes > 0 {
+		observer.Observe(snapshot.availableBytes)
+	}
+	return nil
+}
+
+func (m *hostMetrics) observePeakRSSMemory(_ context.Context, observer metric.Int64Observer) error {
+	snapshot := m.memory.Load()
+	if snapshot != nil && snapshot.peakRSSBytes > 0 {
+		observer.Observe(snapshot.peakRSSBytes)
+	}
+	return nil
+}
+
 func (m *hostMetrics) recordEnclaveMemory(estimate types.MemoryEstimateResponse) {
 	m.memory.Store(&enclaveMemorySnapshot{
 		totalBytes:      mibToBytes(estimate.TotalMB),
 		goRuntimeBytes:  mibToBytes(estimate.UsedMB),
 		processRSSBytes: mibToBytes(estimate.RSSMB),
+		availableBytes:  mibToBytes(estimate.AvailableMB),
+		peakRSSBytes:    mibToBytes(estimate.PeakRSSMB),
 	})
 }
 

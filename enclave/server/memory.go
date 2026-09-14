@@ -49,6 +49,55 @@ func readTotalMemoryBytes() uint64 {
 	return parseMemTotalBytes(data)
 }
 
+// readAvailableMemoryBytes returns the guest RAM the kernel reports as
+// available in bytes, from /proc/meminfo (MemAvailable). This is the real
+// headroom: readTotalMemoryBytes and readProcessRSSBytes together cannot show
+// it, because the page cache and slab also draw on the enclave's fixed budget.
+// Returns 0 if unavailable (e.g. non-Linux dev builds, where /proc is absent).
+func readAvailableMemoryBytes() uint64 {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	return parseSizeFieldBytes(data, "MemAvailable")
+}
+
+// readPeakProcessRSSBytes returns the high-water mark of the enclave process's
+// resident set in bytes, from /proc/self/status (VmHWM). Unlike
+// readProcessRSSBytes it is monotonic, so a spike shorter than the host's poll
+// interval is still visible on the next sample rather than being missed.
+// Returns 0 if unavailable (e.g. non-Linux dev builds, where /proc is absent).
+func readPeakProcessRSSBytes() uint64 {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0
+	}
+	return parseSizeFieldBytes(data, "VmHWM")
+}
+
+// parseSizeFieldBytes extracts the named "Key: <n> kB" field, the shared format
+// of /proc/meminfo and /proc/<pid>/status, and returns it in bytes. Returns 0 if
+// the field is absent, malformed, carries a unit other than kB, or would
+// overflow. Keys are matched whole, so VmHWM is not satisfied by VmHWMFoo.
+func parseSizeFieldBytes(data []byte, key string) uint64 {
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(line, key+":")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(rest) // e.g. ["11534336", "kB"]
+		if len(fields) != 2 || fields[1] != "kB" {
+			return 0
+		}
+		kb, err := strconv.ParseUint(fields[0], 10, 64)
+		if err != nil || kb > math.MaxUint64/1024 {
+			return 0
+		}
+		return kb * 1024
+	}
+	return 0
+}
+
 // parseMemTotalBytes extracts MemTotal from /proc/meminfo content and returns
 // it in bytes (the file reports kB). Returns 0 if the line is absent,
 // malformed, carries a unit other than kB, or would overflow.
