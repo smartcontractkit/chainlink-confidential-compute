@@ -6,50 +6,58 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestParseVmRSSBytes(t *testing.T) {
+func TestParseSizeFieldsMemInfo(t *testing.T) {
+	const meminfo = `MemTotal:       11534336 kB
+MemFree:         8123456 kB
+MemAvailable:    9000000 kB
+Buffers:          123456 kB
+`
+	var total, available uint64
+	parseSizeFields([]byte(meminfo), map[string]*uint64{
+		"MemTotal":     &total,
+		"MemAvailable": &available,
+	})
+
+	if want := uint64(11534336) * 1024; total != want {
+		t.Errorf("MemTotal = %d, want %d", total, want)
+	}
+	if want := uint64(9000000) * 1024; available != want {
+		t.Errorf("MemAvailable = %d, want %d", available, want)
+	}
+}
+
+func TestParseSizeFieldsProcStatus(t *testing.T) {
 	const status = `Name:	go-enclave
 Umask:	0022
 State:	R (running)
 VmPeak:	 2100000 kB
 VmSize:	 2000000 kB
 VmRSS:	 1234560 kB
+VmHWM:	 2045678 kB
 RssAnon:	 1200000 kB
 Threads:	42
 `
-	if got, want := parseVmRSSBytes([]byte(status)), uint64(1234560)*1024; got != want {
-		t.Fatalf("parseVmRSSBytes = %d, want %d", got, want)
-	}
+	var rss, peak uint64
+	parseSizeFields([]byte(status), map[string]*uint64{
+		"VmRSS": &rss,
+		"VmHWM": &peak,
+	})
 
-	cases := map[string][]byte{
-		"missing line": []byte("Name:\tx\nVmSize:\t100 kB\n"),
-		"empty input":  []byte(""),
-		"malformed":    []byte("VmRSS:\tnotanumber kB\n"),
-		"no value":     []byte("VmRSS:\n"),
+	if want := uint64(1234560) * 1024; rss != want {
+		t.Errorf("VmRSS = %d, want %d", rss, want)
 	}
-	for name, in := range cases {
-		if got := parseVmRSSBytes(in); got != 0 {
-			t.Errorf("%s: parseVmRSSBytes = %d, want 0", name, got)
-		}
+	if want := uint64(2045678) * 1024; peak != want {
+		t.Errorf("VmHWM = %d, want %d", peak, want)
 	}
 }
 
-func TestParseMemTotalBytes(t *testing.T) {
-	const meminfo = `MemTotal:       11534336 kB
-MemFree:         8123456 kB
-MemAvailable:    9000000 kB
-Buffers:          123456 kB
-`
-	if got, want := parseMemTotalBytes([]byte(meminfo)), uint64(11534336)*1024; got != want {
-		t.Fatalf("parseMemTotalBytes() = %d, want %d", got, want)
-	}
-	if got := parseMemTotalBytes([]byte("no memtotal here")); got != 0 {
-		t.Fatalf("parseMemTotalBytes() = %d, want 0", got)
-	}
-	if got := parseMemTotalBytes([]byte("MemTotal: notanumber kB")); got != 0 {
-		t.Fatalf("parseMemTotalBytes() = %d, want 0", got)
-	}
-
+func TestParseSizeFieldsLeavesBadValuesUntouched(t *testing.T) {
 	cases := map[string]string{
+		"missing line":  "Name:\tx\nVmSize:\t100 kB\n",
+		"empty input":   "",
+		"no colon":      "no memtotal here",
+		"malformed":     "MemTotal:\tnotanumber kB\n",
+		"no value":      "MemTotal:\n",
 		"wrong unit":    "MemTotal: 11534336 MB",
 		"missing unit":  "MemTotal: 11534336",
 		"extra field":   "MemTotal: 11534336 kB extra",
@@ -58,9 +66,43 @@ Buffers:          123456 kB
 		"lowercase kib": "MemTotal: 11534336 kb",
 	}
 	for name, in := range cases {
-		if got := parseMemTotalBytes([]byte(in)); got != 0 {
-			t.Errorf("%s: parseMemTotalBytes() = %d, want 0", name, got)
-		}
+		t.Run(name, func(t *testing.T) {
+			got := uint64(0)
+			parseSizeFields([]byte(in), map[string]*uint64{"MemTotal": &got})
+			if got != 0 {
+				t.Errorf("parseSizeFields(%q) = %d, want 0", in, got)
+			}
+		})
+	}
+}
+
+// Keys are matched whole, so a longer field sharing a prefix must not satisfy
+// the lookup and report another field's value.
+func TestParseSizeFieldsMatchesWholeKeys(t *testing.T) {
+	var got uint64
+	parseSizeFields([]byte("VmHWMExtra:\t123 kB\n"), map[string]*uint64{"VmHWM": &got})
+	if got != 0 {
+		t.Errorf("VmHWM = %d, want 0 for a prefix-only match", got)
+	}
+}
+
+// One bad field must not stop the pass: the remaining requested keys are still
+// extracted, so a single malformed line cannot blank the whole reading.
+func TestParseSizeFieldsContinuesPastABadField(t *testing.T) {
+	const meminfo = `MemTotal:       banana kB
+MemAvailable:    9000000 kB
+`
+	var total, available uint64
+	parseSizeFields([]byte(meminfo), map[string]*uint64{
+		"MemTotal":     &total,
+		"MemAvailable": &available,
+	})
+
+	if total != 0 {
+		t.Errorf("MemTotal = %d, want 0 for a malformed value", total)
+	}
+	if want := uint64(9000000) * 1024; available != want {
+		t.Errorf("MemAvailable = %d, want %d", available, want)
 	}
 }
 

@@ -463,4 +463,16 @@ type MemoryEstimateResponse struct {
 	// never leaves the host. 0 if unavailable (e.g. non-Linux). Omitted from
 	// the JSON when zero.
 	TotalMB uint64 `json:"totalMB,omitempty"`
+	// AvailableMB is the guest RAM the kernel reports as available
+	// (/proc/meminfo MemAvailable), rounded to the nearest megabyte. This is the
+	// real headroom, which TotalMB and RSSMB together cannot show: the page
+	// cache and slab also draw on the enclave's fixed budget. Omitted from the
+	// JSON when zero, so an enclave predating this field stays compatible.
+	AvailableMB uint64 `json:"availableMB,omitempty"`
+	// PeakRSSMB is the high-water mark of the enclave process's resident set
+	// (/proc/self/status VmHWM), rounded to the nearest megabyte. Unlike RSSMB
+	// it is monotonic, so a spike shorter than the host's poll interval is
+	// still visible afterwards instead of being missed between samples. Omitted
+	// from the JSON when zero.
+	PeakRSSMB uint64 `json:"peakRssMB,omitempty"`
 }
