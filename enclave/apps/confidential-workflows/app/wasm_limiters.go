@@ -13,15 +13,6 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
 )
 
-const (
-	// Matches CRE's 100mb default: https://github.com/smartcontractkit/chainlink-common/blob/a8f860eb5f61b1bdae0f11ef03b996285c8125f5/pkg/settings/cresettings/defaults.toml#L116
-	defaultWASMMemoryLimit             = config.Size(100) * config.MByte
-	defaultWASMCompressedBinaryLimit   = config.Size(20 * 1024 * 1024)
-	defaultWASMDecompressedBinaryLimit = config.Size(100 * 1024 * 1024)
-	defaultWASMResponseLimit           = config.Size(5 * 1024 * 1024)
-	defaultUserMetricPayloadLimit      = config.Size(4096)
-)
-
 type wasmModuleLimiters struct {
 	memory                     limits.BoundLimiter[config.Size]
 	maxCompressedBinary        limits.BoundLimiter[config.Size]
@@ -86,17 +77,6 @@ func newWASMModuleLimiters(factory limits.Factory) (_ *wasmModuleLimiters, err e
 	}()
 
 	cfg := cresettings.Default.PerWorkflow
-	// Retain the named settings' keys and scopes so injected CRE settings can
-	// override them. Memory matches CRE's current default but is pinned locally
-	// via defaultWASMMemoryLimit, so an upstream change cannot silently move
-	// this attested limit; it intentionally supersedes the host's 128 MB
-	// MinMemoryMBs floor. The remaining DefaultValue overrides preserve the
-	// enclave's previous WASM host fallbacks.
-	cfg.WASMMemoryLimit.DefaultValue = defaultWASMMemoryLimit
-	cfg.WASMCompressedBinarySizeLimit.DefaultValue = defaultWASMCompressedBinaryLimit
-	cfg.WASMBinarySizeLimit.DefaultValue = defaultWASMDecompressedBinaryLimit
-	cfg.ExecutionResponseLimit.DefaultValue = defaultWASMResponseLimit
-	cfg.UserMetricPayloadLimit.DefaultValue = defaultUserMetricPayloadLimit
 
 	l.memory, err = limits.MakeUpperBoundLimiter(factory, cfg.WASMMemoryLimit)
 	if err != nil {

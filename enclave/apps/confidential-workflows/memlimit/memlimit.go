@@ -18,9 +18,8 @@ const (
 	// if the enclave's memory changes.
 	ReserveMB uint64 = 1024
 
-	// PerExecMB tracks the default of the injected WASMMemoryLimit CRE setting
-	// (creSettings; the app package's defaultWASMMemoryLimit, 100 MB). An
-	// injected override above 100 MB can exceed this budget.
+	// PerExecMB tracks cresettings.Default.PerWorkflow.WASMMemoryLimit (100 MB).
+	// An injected override above 100 MB can exceed this budget.
 	PerExecMB uint64 = 100
 
 	// FallbackConcurrency is used when total memory can't be read (non-Linux

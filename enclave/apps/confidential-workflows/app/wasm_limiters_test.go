@@ -17,6 +17,7 @@ import (
 )
 
 func TestWASMModuleLimiters_Defaults(t *testing.T) {
+	defaults := cresettings.Default.PerWorkflow
 	moduleLimiters, err := newWASMModuleLimiters(limits.Factory{Logger: logger.Test(t)})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, moduleLimiters.Close()) })
@@ -38,17 +39,16 @@ func TestWASMModuleLimiters_Defaults(t *testing.T) {
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
 	memory, err := cfg.MemoryLimiter.Limit(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, defaultWASMMemoryLimit, memory)
-	assert.Equal(t, cresettings.Default.PerWorkflow.WASMMemoryLimit.DefaultValue, defaultWASMMemoryLimit)
+	assert.Equal(t, defaults.WASMMemoryLimit.DefaultValue, memory)
 	compressed, err := cfg.MaxCompressedBinaryLimiter.Limit(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, defaultWASMCompressedBinaryLimit, compressed)
+	assert.Equal(t, defaults.WASMCompressedBinarySizeLimit.DefaultValue, compressed)
 	decompressed, err := cfg.MaxDecompressedBinaryLimiter.Limit(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, defaultWASMDecompressedBinaryLimit, decompressed)
+	assert.Equal(t, defaults.WASMBinarySizeLimit.DefaultValue, decompressed)
 	response, err := cfg.MaxResponseSizeLimiter.Limit(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, defaultWASMResponseLimit, response)
+	assert.Equal(t, defaults.ExecutionResponseLimit.DefaultValue, response)
 	pendingCalls, err := cfg.PendingCallsLimiter.Limit(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 30, pendingCalls)
@@ -57,7 +57,7 @@ func TestWASMModuleLimiters_Defaults(t *testing.T) {
 	assert.False(t, userMetricsEnabled)
 	metricPayload, err := cfg.MaxUserMetricPayloadLimiter.Limit(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, defaultUserMetricPayloadLimit, metricPayload)
+	assert.Equal(t, defaults.UserMetricPayloadLimit.DefaultValue, metricPayload)
 	metricName, err := cfg.MaxUserMetricNameLengthLimiter.Limit(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 128, metricName)
@@ -179,7 +179,7 @@ func TestInjectSettings_LimiterSettings(t *testing.T) {
 
 		require.NoError(t, inject(t, a, nil))
 		t.Cleanup(func() { require.NoError(t, a.storageFetcher.Close()) })
-		assert.Equal(t, defaultWASMMemoryLimit, memoryLimit(t, a))
+		assert.Equal(t, cresettings.Default.PerWorkflow.WASMMemoryLimit.DefaultValue, memoryLimit(t, a))
 	})
 }
 
@@ -206,6 +206,7 @@ func TestWASMModuleLimiterSettingParsers(t *testing.T) {
 }
 
 func TestWASMModuleLimiters_InvalidOrUnreachableOverrideUsesDefault(t *testing.T) {
+	defaultMemoryLimit := cresettings.Default.PerWorkflow.WASMMemoryLimit.DefaultValue
 	tests := []struct {
 		name string
 		raw  string
@@ -216,7 +217,7 @@ func TestWASMModuleLimiters_InvalidOrUnreachableOverrideUsesDefault(t *testing.T
 			name: "workflow override without owner",
 			raw:  `{"workflow":{"workflow":{"PerWorkflow":{"WASMMemoryLimit":"256mb"}}}}`,
 			cre:  contexts.CRE{Workflow: "workflow"},
-			want: defaultWASMMemoryLimit,
+			want: defaultMemoryLimit,
 		},
 		{
 			name: "global override without owner",
@@ -234,13 +235,13 @@ func TestWASMModuleLimiters_InvalidOrUnreachableOverrideUsesDefault(t *testing.T
 			name: "invalid value",
 			raw:  `{"workflow":{"workflow":{"PerWorkflow":{"WASMMemoryLimit":"banana"}}}}`,
 			cre:  contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"},
-			want: defaultWASMMemoryLimit,
+			want: defaultMemoryLimit,
 		},
 		{
 			name: "sub-megabyte memory limit",
 			raw:  `{"workflow":{"workflow":{"PerWorkflow":{"WASMMemoryLimit":"512kb"}}}}`,
 			cre:  contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"},
-			want: defaultWASMMemoryLimit,
+			want: defaultMemoryLimit,
 		},
 	}
 
