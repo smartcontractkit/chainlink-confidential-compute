@@ -31,7 +31,6 @@ var (
 
 func main() {
 	flag.Parse()
-	nitro.SuperviseIfRequested()
 
 	// Two loggers because the call boundary takes two types: the keychain and
 	// the nitro starter want a stdlib *log.Logger, while the confidential-

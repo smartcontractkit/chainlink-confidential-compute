@@ -16,19 +16,18 @@ const (
 	// cannot occupy the listener.
 	crashReportReadTimeout = 30 * time.Second
 
-	// crashReportMaxBytes caps a single report. The supervisor retains 256KiB of
-	// stderr; this leaves headroom for the JSON envelope while refusing anything
-	// that could only be a misbehaving peer.
-	crashReportMaxBytes = 1 << 20
+	// crashReportMaxBytes caps a single report. The payload is exit status only,
+	// so anything beyond a few hundred bytes is a misbehaving peer.
+	crashReportMaxBytes = 4 << 10
 )
 
 // serveCrashReports accepts enclave post-mortems until the listener is closed.
 //
-// The enclave application is PID 1 in its VM, so its stderr dies with it and the
-// Nitro console is unreadable without --debug-mode. Its supervisor ships the tail
-// here instead, which is the only way a panic traceback or a wasmtime SIGSEGV
-// reaches host logs. Reports are logged at error level so they land in Loki
-// alongside the rest of the host's output.
+// The enclave's exit status is otherwise unrecoverable host-side: the enclave
+// init computes it and then reboots the VM, and describe-enclaves exposes no
+// exit code for a terminated enclave. The supervisor relays it here instead.
+// Reports are logged at error level so they land in Loki alongside the rest of
+// the host's output.
 func ServeCrashReports(listener net.Listener, lggr logger.Logger) error {
 	for {
 		conn, err := listener.Accept()
@@ -56,12 +55,12 @@ func handleCrashReport(conn net.Conn, lggr logger.Logger) {
 		return
 	}
 
+	// Status only: the traceback stays inside the enclave, since the host is
+	// outside its trust boundary. See types.CrashReport.
 	lggr.Errorw("enclave application exited",
 		"app", report.App,
 		"exitCode", report.ExitCode,
 		"signal", report.Signal,
 		"waitError", report.Error,
-		"stderrTruncated", report.Truncated,
-		"stderrTail", report.StderrTail,
 	)
 }

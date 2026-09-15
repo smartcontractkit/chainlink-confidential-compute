@@ -25,7 +25,6 @@ var (
 
 func main() {
 	flag.Parse()
-	nitro.SuperviseIfRequested()
 	logger := log.New(log.Writer(), "enclave: ", log.LstdFlags|log.Lshortfile)
 
 	var rotationOverride *time.Duration

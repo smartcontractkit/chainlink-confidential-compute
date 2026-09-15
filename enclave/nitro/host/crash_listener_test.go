@@ -23,11 +23,9 @@ func TestHandleCrashReport_LogsTheReport(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close() })
 
 	report := types.CrashReport{
-		App:        "enclave-app",
-		ExitCode:   139,
-		Signal:     "segmentation fault",
-		StderrTail: "fatal error: unexpected signal during runtime execution\n[signal SIGSEGV]",
-		Truncated:  true,
+		App:      "enclave-app",
+		ExitCode: 137,
+		Signal:   "killed",
 	}
 	go func() { _ = json.NewEncoder(client).Encode(report) }()
 
@@ -38,10 +36,9 @@ func TestHandleCrashReport_LogsTheReport(t *testing.T) {
 
 	fields := entries[0].ContextMap()
 	assert.Equal(t, "enclave-app", fields["app"])
-	assert.EqualValues(t, 139, fields["exitCode"])
-	assert.Equal(t, "segmentation fault", fields["signal"])
-	assert.Equal(t, true, fields["stderrTruncated"])
-	assert.Contains(t, fields["stderrTail"], "SIGSEGV")
+	assert.EqualValues(t, 137, fields["exitCode"])
+	assert.Equal(t, "killed", fields["signal"])
+	assert.NotContains(t, fields, "stderrTail", "stderr must not cross the trust boundary")
 }
 
 func TestHandleCrashReport_MalformedPayload(t *testing.T) {
@@ -73,7 +70,7 @@ func TestHandleCrashReport_RejectsOversizePayload(t *testing.T) {
 	go func() {
 		defer client.Close() //nolint:errcheck // test cleanup
 		// Valid JSON prefix, then more bytes than the limit allows.
-		_, _ = client.Write([]byte(`{"stderr_tail":"`))
+		_, _ = client.Write([]byte(`{"app":"`))
 		chunk := strings.Repeat("a", 64<<10)
 		for range (crashReportMaxBytes / len(chunk)) + 2 {
 			if _, err := client.Write([]byte(chunk)); err != nil {

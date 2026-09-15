@@ -18,6 +18,10 @@ COPY util/ ./util/
 ARG APP_NAME=confidential-http
 RUN CGO_ENABLED=0 GOOS=linux go build -o /enclave-app enclave/apps/${APP_NAME}/environments/nitro/main.go
 
+# The supervisor is a separate, minimal binary: it never links the app, so the
+# process that outlives a crash stays small.
+RUN CGO_ENABLED=0 GOOS=linux go build -o /enclave-supervisor ./enclave/nitro/supervisor/
+
 FROM amazonlinux:latest
 
 RUN dnf upgrade -y && \
@@ -33,6 +37,7 @@ RUN echo "refclock PHC /dev/ptp0 poll 0 offset 0 prefer" > /etc/chrony.conf && \
     echo "makestep 1.0 3" >> /etc/chrony.conf
 
 COPY --from=builder /enclave-app /usr/bin/
+COPY --from=builder /enclave-supervisor /usr/bin/
 
 ARG KEYPAIR_ROTATION=
 ARG KEYPAIR_EXPIRATION=
@@ -52,8 +57,8 @@ RUN echo '#!/bin/sh' > /start.sh && \
     echo 'if [ -n "$KEYPAIR_ROTATION" ]; then ARGS="$ARGS --keypair-rotation=$KEYPAIR_ROTATION"; fi' >> /start.sh && \
     echo 'if [ -n "$KEYPAIR_EXPIRATION" ]; then ARGS="$ARGS --keypair-expiration=$KEYPAIR_EXPIRATION"; fi' >> /start.sh && \
     echo 'if [ "$ALLOW_RECONFIG" = "true" ]; then ARGS="$ARGS --allow-reconfig"; fi' >> /start.sh && \
-    echo '# --supervise keeps PID 1 alive past the app so its stderr (panics, cgo SIGSEGV) reaches the host.' >> /start.sh && \
-    echo 'exec /usr/bin/enclave-app --supervise $ARGS' >> /start.sh && \
+    echo '# The supervisor outlives the app so its exit status reaches the host; init would otherwise reboot the VM with it.' >> /start.sh && \
+    echo 'exec /usr/bin/enclave-supervisor /usr/bin/enclave-app $ARGS' >> /start.sh && \
     chmod +x /start.sh
 
 ENTRYPOINT ["/start.sh"]
