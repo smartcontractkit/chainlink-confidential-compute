@@ -381,7 +381,25 @@ jobs:
     needs: build-enclave-and-plugin
     strategy:
       fail-fast: false
+      # `account` is a top-level key rather than an `include` entry on purpose.
+      # An `include` object whose keys are absent from the base matrix is merged
+      # into every existing combination instead of adding new ones, so listing
+      # the accounts only under `include` collapsed this job to a single leg
+      # pinned to the last account. `include` here just attaches each account's
+      # region, which works because `account` is a real matrix dimension.
       matrix:
+        account:
+          - "312157985241"
+          - "816722353863"
+          - "648030273096"
+          - "129896631554"
+        app:
+          - name: confidential-http
+            nitro_prefix: nitro-enclave
+            plugin_prefix: enclave
+          - name: confidential-workflows
+            nitro_prefix: nitro-workflows
+            plugin_prefix: enclave-workflows
         include:
           - account: "312157985241"
             region: "us-west-2"
@@ -391,13 +409,6 @@ jobs:
             region: "us-west-2"
           - account: "129896631554"
             region: "us-east-2"
-        app:
-          - name: confidential-http
-            nitro_prefix: nitro-enclave
-            plugin_prefix: enclave
-          - name: confidential-workflows
-            nitro_prefix: nitro-workflows
-            plugin_prefix: enclave-workflows
     runs-on: ubuntu-latest
     permissions:
       contents: read
