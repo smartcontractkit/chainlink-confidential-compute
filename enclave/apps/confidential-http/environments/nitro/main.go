@@ -8,7 +8,7 @@ import (
 
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/app"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
+	proxyclient "github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
