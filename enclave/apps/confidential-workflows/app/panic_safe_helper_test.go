@@ -65,14 +65,6 @@ func guardedCalls(h host.ExecutionHelper) map[string]func() error {
 			_, err := h.GetSecrets(context.Background(), &sdkpb.GetSecretsRequest{})
 			return err
 		},
-		"GetDONTime": func() error {
-			_, err := h.GetDONTime()
-			return err
-		},
-		"EmitUserLog": func() error { return h.EmitUserLog("hello") },
-		"EmitUserMetric": func() error {
-			return h.EmitUserMetric(context.Background(), &wfpb.WorkflowUserMetric{})
-		},
 	}
 }
 

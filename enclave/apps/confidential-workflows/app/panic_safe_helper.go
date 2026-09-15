@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
-	"time"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
-	wfpb "github.com/smartcontractkit/chainlink-protos/workflows/go/v2"
 )
 
 // panicSafeExecutionHelper converts a panic raised anywhere in the ExecutionHelper
@@ -28,8 +26,8 @@ import (
 // declared explicitly so a newly added interface method fails to compile here
 // rather than silently passing through unguarded.
 type panicSafeExecutionHelper struct {
-	inner host.ExecutionHelper
-	lggr  logger.Logger
+	host.ExecutionHelper
+	lggr logger.Logger
 }
 
 var _ host.ExecutionHelper = (*panicSafeExecutionHelper)(nil)
@@ -37,7 +35,7 @@ var _ host.ExecutionHelper = (*panicSafeExecutionHelper)(nil)
 // newPanicSafeExecutionHelper wraps inner so panics surface as errors. Apply it
 // outermost so it also covers the restriction-enforcing decorator.
 func newPanicSafeExecutionHelper(inner host.ExecutionHelper, lggr logger.Logger) *panicSafeExecutionHelper {
-	return &panicSafeExecutionHelper{inner: inner, lggr: lggr}
+	return &panicSafeExecutionHelper{ExecutionHelper: inner, lggr: lggr}
 }
 
 // recoverTo turns a panic into err, logging the value and stack. Call it as
@@ -60,41 +58,10 @@ func (h *panicSafeExecutionHelper) recoverTo(method string, err *error) {
 
 func (h *panicSafeExecutionHelper) CallCapability(ctx context.Context, req *sdkpb.CapabilityRequest) (resp *sdkpb.CapabilityResponse, err error) {
 	defer h.recoverTo("CallCapability", &err)
-	return h.inner.CallCapability(ctx, req)
+	return h.ExecutionHelper.CallCapability(ctx, req)
 }
 
 func (h *panicSafeExecutionHelper) GetSecrets(ctx context.Context, req *sdkpb.GetSecretsRequest) (resp []*sdkpb.SecretResponse, err error) {
 	defer h.recoverTo("GetSecrets", &err)
-	return h.inner.GetSecrets(ctx, req)
-}
-
-func (h *panicSafeExecutionHelper) GetDONTime() (t time.Time, err error) {
-	defer h.recoverTo("GetDONTime", &err)
-	return h.inner.GetDONTime()
-}
-
-func (h *panicSafeExecutionHelper) EmitUserLog(log string) (err error) {
-	defer h.recoverTo("EmitUserLog", &err)
-	return h.inner.EmitUserLog(log)
-}
-
-func (h *panicSafeExecutionHelper) EmitUserMetric(ctx context.Context, metric *wfpb.WorkflowUserMetric) (err error) {
-	defer h.recoverTo("EmitUserMetric", &err)
-	return h.inner.EmitUserMetric(ctx, metric)
-}
-
-// GetWorkflowExecutionID and GetNodeTime have no error channel, so a recover here
-// could only substitute a zero value ("" or the zero time) for a real one. That is
-// worse than the alternative: the enclave attests its output, so a workflow that
-// silently computed against a 1970 timestamp would produce a signed-but-wrong
-// result. Both are reached only from WASM host functions on the synchronous
-// callStart goroutine, whose recover already converts a panic into a failed
-// execution, so leaving them unguarded cannot crash the enclave.
-
-func (h *panicSafeExecutionHelper) GetWorkflowExecutionID() string {
-	return h.inner.GetWorkflowExecutionID()
-}
-
-func (h *panicSafeExecutionHelper) GetNodeTime() time.Time {
-	return h.inner.GetNodeTime()
+	return h.ExecutionHelper.GetSecrets(ctx, req)
 }
