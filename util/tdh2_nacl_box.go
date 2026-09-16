@@ -42,14 +42,13 @@ func TDH2NACLBoxComputeEncryptedDecryptionShare(
 
 type invalidShare struct {
 	index int
-	share []byte
 	err   error
 }
 
 // TDH2AggregateDecryptionShares aggregates TDH2 decryption shares for a given ciphertext.
-// It validates each share against the ciphertext and public key. For an invalid share, the share is collected and
-// the function continues. If a threshold of valid shares is not reached, it returns an error containing the faulty shares.
-// Otherwise, it proceeds to aggregate the valid shares and returns the result.
+// It validates each share against the ciphertext and public key. For an invalid share, its index is collected and
+// the function continues. If a threshold of valid shares is not reached, it returns an error identifying the faulty
+// shares by index. Otherwise, it proceeds to aggregate the valid shares and returns the result.
 func TDH2AggregateDecryptionShares(ciphertext tdh2easy.Ciphertext, shares [][]byte, publicKey tdh2easy.PublicKey, threshold int) ([]byte, error) {
 	// Gather all valid shares.
 	var decShares []*tdh2easy.DecryptionShare
@@ -57,12 +56,12 @@ func TDH2AggregateDecryptionShares(ciphertext tdh2easy.Ciphertext, shares [][]by
 	for i, s := range shares {
 		var share tdh2easy.DecryptionShare
 		if err := share.Unmarshal(s); err != nil {
-			invalidShares = append(invalidShares, invalidShare{index: i, share: s, err: err})
+			invalidShares = append(invalidShares, invalidShare{index: i, err: err})
 			continue
 		}
 
 		if err := tdh2easy.VerifyShare(&ciphertext, &publicKey, &share); err != nil {
-			invalidShares = append(invalidShares, invalidShare{index: i, share: s, err: err})
+			invalidShares = append(invalidShares, invalidShare{index: i, err: err})
 			continue
 		}
 		decShares = append(decShares, &share)
@@ -71,11 +70,11 @@ func TDH2AggregateDecryptionShares(ciphertext tdh2easy.Ciphertext, shares [][]by
 		}
 	}
 
-	// If a threshold of valid shares is not reached, return faulty shares.
+	// If a threshold of valid shares is not reached, report the faulty share indexes.
 	if len(decShares) < threshold {
 		var errDetails string
 		for _, is := range invalidShares {
-			errDetails += fmt.Sprintf("share %d (%x): %v; ", is.index, is.share, is.err)
+			errDetails += fmt.Sprintf("share %d: %v; ", is.index, is.err)
 		}
 		if len(invalidShares) == 0 {
 			errDetails = "none"

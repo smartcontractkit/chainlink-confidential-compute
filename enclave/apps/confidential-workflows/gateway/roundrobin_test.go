@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -104,6 +105,42 @@ func TestSendRequest_QuorumErrorNotRetried(t *testing.T) {
 	}
 	if goodHits.Load() != 0 {
 		t.Errorf("second gateway hits = %d, want 0 (must not fail over on a relay answer)", goodHits.Load())
+	}
+}
+
+// A relay node user error (e.g. a missing secret) reaches the enclave as HTTP 400
+// with a JSON-RPC ErrInvalidParams body. The body must still decode into a typed
+// *RPCError carrying the code, since that is what lets the caller classify the
+// failure as user-caused, and the 4xx must not fail over.
+func TestSendRequest_UserErrorOn4xxIsTypedAndNotRetried(t *testing.T) {
+	const msg = "invalid params error: vault error for secret main/API_TOKEN: key does not exist"
+	var userHits, goodHits atomic.Int32
+	userErrSrv := httptest.NewServer(jsonrpcErrorHandler(&userHits, http.StatusBadRequest, jsonrpc2.ErrInvalidParams, msg))
+	defer userErrSrv.Close()
+	good := httptest.NewServer(resultHandler(&goodHits, json.RawMessage(`{"ok":true}`)))
+	defer good.Close()
+
+	client := NewGatewayClient(urls(userErrSrv, good), nil)
+	_, err := client.SendRequest(context.Background(), "m", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected a JSON-RPC error, got nil")
+	}
+
+	var rpcErr *RPCError
+	if !errors.As(err, &rpcErr) {
+		t.Fatalf("expected *RPCError so the caller can read the code, got %T: %v", err, err)
+	}
+	if rpcErr.Code != jsonrpc2.ErrInvalidParams {
+		t.Errorf("RPCError.Code = %d, want %d (user error)", rpcErr.Code, jsonrpc2.ErrInvalidParams)
+	}
+	if rpcErr.Message != msg {
+		t.Errorf("RPCError.Message = %q, want %q", rpcErr.Message, msg)
+	}
+	if userHits.Load() != 1 {
+		t.Errorf("user-error gateway hits = %d, want 1", userHits.Load())
+	}
+	if goodHits.Load() != 0 {
+		t.Errorf("second gateway hits = %d, want 0 (a user error is deterministic; do not fail over)", goodHits.Load())
 	}
 }
 
