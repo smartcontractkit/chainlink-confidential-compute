@@ -47,7 +47,9 @@ const defaultSecretsNamespace = "main"
 // verify returns the quorum-verified result, or an error that is terminal: a
 // well-formed JSON-RPC error from the relay, a bundle that does not decode, or
 // a quorum-not-reached verdict — the relay answered, and an immediate retry
-// won't change which signatures arrived.
+// won't change which signatures arrived. A JSON-RPC error reporting that the
+// gateway could not reach the relay DON is the exception: no quorum result can
+// exist yet, and the condition clears once the DON reconnects, so it is retried.
 //
 // Transient failures across attempts are gathered with errors.Join so the
 // final error carries the full history, not just the last failure.
@@ -77,9 +79,10 @@ func sendWithRetry[T any](d *remoteDispatcher, ctx context.Context, what, method
 		}
 
 		// A well-formed JSON-RPC error means the relay answered with a terminal
-		// condition; don't retry.
+		// condition; don't retry. The exception is a gateway that could not reach the
+		// relay DON, which clears on its own once the node websockets are back.
 		var rpcErr *gateway.RPCError
-		if errors.As(err, &rpcErr) {
+		if errors.As(err, &rpcErr) && !rpcErr.Retryable() {
 			var zero T
 			return zero, wrapErr(err)
 		}

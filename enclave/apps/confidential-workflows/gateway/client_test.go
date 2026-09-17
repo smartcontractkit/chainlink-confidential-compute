@@ -254,3 +254,34 @@ func TestSendRequest_ContextCancellation(t *testing.T) {
 		t.Fatal("expected error from cancelled context")
 	}
 }
+
+func TestRPCError_Retryable(t *testing.T) {
+	tests := []struct {
+		name string
+		err  RPCError
+		want bool
+	}{
+		{
+			name: "gateway could not reach the relay DON",
+			err:  RPCError{Code: jsonrpc2.ErrInternal, Message: "failed to forward user request to nodes"},
+			want: true,
+		},
+		{
+			name: "relay answered that quorum was unreachable",
+			err:  RPCError{Code: jsonrpc2.ErrInternal, Message: "relay quorum unreachable: 1 signed responses"},
+			want: false,
+		},
+		{
+			name: "user error is never retried",
+			err:  RPCError{Code: jsonrpc2.ErrInvalidParams, Message: "failed to forward user request to nodes"},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.err.Retryable(); got != tt.want {
+				t.Errorf("Retryable() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
