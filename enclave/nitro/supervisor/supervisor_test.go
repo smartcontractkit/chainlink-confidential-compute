@@ -29,38 +29,52 @@ func TestBuildCrashReport_SignalledChild(t *testing.T) {
 	waitErr := cmd.Run()
 	require.Error(t, waitErr)
 
-	report := buildCrashReport("enclave-app", waitErr)
+	report := buildCrashReport("enclave-app", cmd.ProcessState, waitErr)
 	assert.Equal(t, "enclave-app", report.App)
 	assert.Equal(t, syscall.SIGSEGV.String(), report.Signal)
 	assert.Equal(t, 128+int(syscall.SIGSEGV), report.ExitCode)
+	// ProcessState's rendering carries the signal name, and " (core dumped)"
+	// when the kernel dumped, which the structured fields cannot express.
+	assert.Contains(t, report.Status, "signal: "+syscall.SIGSEGV.String())
+	assert.Empty(t, report.Error, "an exit status is not a Wait failure")
 }
 
 func TestBuildCrashReport_NonZeroExit(t *testing.T) {
 	t.Parallel()
 
-	waitErr := exec.Command("sh", "-c", "exit 3").Run()
+	cmd := exec.Command("sh", "-c", "exit 3")
+	waitErr := cmd.Run()
 	require.Error(t, waitErr)
 
-	report := buildCrashReport("enclave-app", waitErr)
+	report := buildCrashReport("enclave-app", cmd.ProcessState, waitErr)
 	assert.Equal(t, 3, report.ExitCode)
 	assert.Empty(t, report.Signal)
+	assert.Equal(t, "exit status 3", report.Status)
+	assert.Empty(t, report.Error)
 }
 
 func TestBuildCrashReport_CleanExitStillReported(t *testing.T) {
 	t.Parallel()
 
-	report := buildCrashReport("enclave-app", nil)
+	cmd := exec.Command("sh", "-c", "exit 0")
+	require.NoError(t, cmd.Run())
+
+	report := buildCrashReport("enclave-app", cmd.ProcessState, nil)
 	assert.Equal(t, 0, report.ExitCode)
+	assert.Equal(t, "exit status 0", report.Status)
 	assert.Empty(t, report.Signal)
 	assert.Empty(t, report.Error)
 }
 
+// Wait failing is not an exit status: there is no process state to read, so the
+// error text is the only thing distinguishing it from a startup guard's exit 1.
 func TestBuildCrashReport_WaitFailure(t *testing.T) {
 	t.Parallel()
 
-	report := buildCrashReport("enclave-app", errors.New("wait blew up"))
+	report := buildCrashReport("enclave-app", nil, errors.New("wait blew up"))
 	assert.Equal(t, 1, report.ExitCode)
 	assert.Equal(t, "wait blew up", report.Error)
+	assert.Empty(t, report.Status)
 }
 
 // The report has to survive a JSON round trip over vsock, and must not regain a
@@ -75,6 +89,7 @@ func TestCrashReport_RoundTripsOverAConnection(t *testing.T) {
 		App:      "enclave-app",
 		ExitCode: 137,
 		Signal:   "killed",
+		Status:   "signal: killed",
 	}
 
 	go func() { _ = json.NewEncoder(client).Encode(want) }()
@@ -114,15 +129,18 @@ func TestSupervise_EndToEnd(t *testing.T) {
 		mode       string
 		wantSignal string
 		wantCode   int
+		wantStatus string
 	}{
 		"go runtime fatal": {
-			mode:     "fatal",
-			wantCode: 2,
+			mode:       "fatal",
+			wantCode:   2,
+			wantStatus: "exit status 2",
 		},
 		"uncatchable signal": {
 			mode:       "killed",
 			wantSignal: syscall.SIGKILL.String(),
 			wantCode:   128 + int(syscall.SIGKILL),
+			wantStatus: "signal: " + syscall.SIGKILL.String(),
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -143,6 +161,7 @@ func TestSupervise_EndToEnd(t *testing.T) {
 			case report := <-got:
 				assert.Equal(t, tc.wantSignal, report.Signal)
 				assert.Equal(t, tc.wantCode, report.ExitCode)
+				assert.Equal(t, tc.wantStatus, report.Status)
 				assert.Equal(t, report.ExitCode, code, "supervisor should surface the child's status")
 			default:
 				t.Fatal("supervisor produced no crash report")

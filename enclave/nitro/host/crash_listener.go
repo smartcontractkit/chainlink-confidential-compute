@@ -61,6 +61,7 @@ func handleCrashReport(conn net.Conn, lggr logger.Logger) {
 		"app", report.App,
 		"exitCode", report.ExitCode,
 		"signal", report.Signal,
+		"status", report.Status,
 		"waitError", report.Error,
 	)
 }

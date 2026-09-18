@@ -43,7 +43,7 @@ func supervise(app string, args []string) int {
 	waitErr := cmd.Wait()
 	stopForwarding()
 
-	report := buildCrashReport(filepath.Base(app), waitErr)
+	report := buildCrashReport(filepath.Base(app), cmd.ProcessState, waitErr)
 	reportSink(report)
 	return report.ExitCode
 }
@@ -78,24 +78,32 @@ func forwardSignals(cmd *exec.Cmd) func() {
 	}
 }
 
-func buildCrashReport(app string, waitErr error) types.CrashReport {
+func buildCrashReport(app string, state *os.ProcessState, waitErr error) types.CrashReport {
 	report := types.CrashReport{App: app}
 
 	var exitErr *exec.ExitError
-	switch {
-	case waitErr == nil:
-		// The enclave server blocks forever, so even a clean exit is unexpected.
-	case errors.As(waitErr, &exitErr):
-		report.ExitCode = exitErr.ExitCode()
-		// ExitCode reports -1 for a signalled process; recover the signal instead,
-		// which is how a wasmtime SIGSEGV or an OOM kill presents.
-		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-			report.Signal = status.Signal().String()
-			report.ExitCode = 128 + int(status.Signal())
-		}
-	default:
+	if waitErr != nil && !errors.As(waitErr, &exitErr) {
+		// Wait failed rather than reporting a status. Without this the failure
+		// would be indistinguishable from a startup guard's exit 1.
 		report.Error = waitErr.Error()
 		report.ExitCode = 1
+	}
+
+	if state == nil {
+		return report
+	}
+
+	// Prefer os.ProcessState's own rendering over reformatting the wait status by
+	// hand: it also reports a core dump, and the stop/continue cases that would
+	// otherwise fall through as a bare exit code of -1.
+	report.Status = state.String()
+	report.ExitCode = state.ExitCode()
+
+	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		// ExitCode is -1 for a signalled process. Normalise to 128+signal, which
+		// is what the enclave init reports as the VM's own status.
+		report.Signal = status.Signal().String()
+		report.ExitCode = 128 + int(status.Signal())
 	}
 
 	return report

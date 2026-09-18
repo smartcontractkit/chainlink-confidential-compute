@@ -20,6 +20,11 @@ type CrashReport struct {
 	App string `json:"app"`
 	// ExitCode is the child's exit status, or 128+signal when it was signalled.
 	ExitCode int `json:"exit_code"`
+	// Status is os.ProcessState's own rendering of the wait status, e.g.
+	// "exit status 2", "signal: killed", "signal: segmentation fault (core
+	// dumped)". It is the authoritative reading: it also covers the core-dump
+	// and stop/continue cases that ExitCode and Signal alone cannot express.
+	Status string `json:"status,omitempty"`
 	// Signal is set when the child was terminated by a signal (e.g. "killed").
 	Signal string `json:"signal,omitempty"`
 	// Error is set when the child could not be waited on at all.

@@ -26,6 +26,7 @@ func TestHandleCrashReport_LogsTheReport(t *testing.T) {
 		App:      "enclave-app",
 		ExitCode: 137,
 		Signal:   "killed",
+		Status:   "signal: killed",
 	}
 	go func() { _ = json.NewEncoder(client).Encode(report) }()
 
@@ -38,6 +39,7 @@ func TestHandleCrashReport_LogsTheReport(t *testing.T) {
 	assert.Equal(t, "enclave-app", fields["app"])
 	assert.EqualValues(t, 137, fields["exitCode"])
 	assert.Equal(t, "killed", fields["signal"])
+	assert.Equal(t, "signal: killed", fields["status"])
 	assert.NotContains(t, fields, "stderrTail", "stderr must not cross the trust boundary")
 }
 
