@@ -38,6 +38,19 @@ func (e *RPCError) Error() string {
 	return fmt.Sprintf("JSON-RPC error %d: %s", e.Code, e.Message)
 }
 
+// gatewayFanOutFailure is the message the gateway returns when it could not deliver a
+// request to enough relay nodes to reach quorum. The gateway raises it while the relay
+// DON's websockets are down, which is most often the seconds a DON spends reconnecting
+// after it or the gateway restarts.
+const gatewayFanOutFailure = "failed to forward user request to nodes"
+
+// Retryable reports whether the relay answered with a condition that clears on its own,
+// so the caller should try again rather than surface the error. Every other JSON-RPC
+// error is a real answer about this request: an immediate retry cannot change it.
+func (e *RPCError) Retryable() bool {
+	return e.Code == jsonrpc2.ErrInternal && strings.Contains(e.Message, gatewayFanOutFailure)
+}
+
 type GatewayClient struct {
 	gatewayURLs []string          // one or more; round-robined per request
 	attestor    attestor.Attestor // nil = skip attestation (local testing)
