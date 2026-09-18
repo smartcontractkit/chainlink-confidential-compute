@@ -1,6 +1,6 @@
 # Enclave Architecture
 
-<!-- diagram:BEGIN id=enclave-architecture digest=68bcfaa0927e4e77 -->
+<!-- diagram:BEGIN id=enclave-architecture digest=f0b1dc7ca2c3d9cd -->
 <!-- Generated from the sources listed in .github/diagrams.yaml. Do not edit by hand; edit the manifest instructions instead. -->
 
 ```mermaid
@@ -25,7 +25,7 @@ flowchart TB
 
     subgraph ROUTES["enclaveServer routes"]
       R1["GET /publicKeys"]
-      R2["POST and PATCH /config"]
+      R2["POST and PATCH /config - PATCH quorum of F+1 signer votes"]
       R4["POST /settings"]
       R5["POST /requests"]
       R6["GET /memory"]
@@ -49,6 +49,7 @@ flowchart TB
   end
 
   EXT -->|"signed compute requests - verified and batched to f+1 or 2f+1 quorum"| MAIN
+  EXT -->|"PATCH /config signed votes"| MAIN
   TRACKER -->|"polls GetDON"| CHAIN
   TRACKER -->|"POST /config"| CFG
   MAIN ==>|"HTTP over AF_VSOCK - vsock.Dial to CID 16 port 5000 - host initiates"| SRV
