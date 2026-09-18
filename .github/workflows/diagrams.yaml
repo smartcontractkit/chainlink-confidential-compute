@@ -2,12 +2,12 @@ name: Diagrams
 
 # Regenerates the mermaid diagrams declared in .github/diagrams.yaml whenever a
 # PR changes the code they are derived from, and commits the result onto the PR
-# branch.
+# branch. The implementation lives in .github/actions/diagrams, which other
+# repositories consume as a published composite action.
 #
 # A digest of each diagram's sources is stored next to the rendered block, so
-# the expensive path (a model completion per stale diagram, plus a
-# mermaid-cli render to prove the output parses) only runs when the sources
-# actually changed. An unchanged PR costs a checkout and a hash.
+# the expensive path only runs when the sources actually changed. An unchanged
+# PR costs a checkout and a hash.
 #
 # The commit is made through the contents API so it is signed by GitHub. Because
 # it is authored with GITHUB_TOKEN it does not re-trigger workflows, so the new
@@ -48,76 +48,12 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
 
-      - uses: actions/setup-python@v5
+      # This repository hosts the action, so it consumes its own working copy
+      # rather than a pinned release.
+      - uses: ./.github/actions/diagrams
         with:
-          python-version: "3.12"
-
-      - name: Install manifest parser
-        run: pip install --quiet pyyaml
-
-      - name: Find stale diagrams
-        id: check
-        env:
-          ONLY: ${{ inputs.only }}
-          FORCE: ${{ inputs.force }}
-        run: |
-          set -euo pipefail
-          args=()
-          [ -n "$ONLY" ] && args+=(--only $ONLY)
-
-          if [ "$FORCE" = "true" ]; then
-            echo "stale=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          set +e
-          python .github/scripts/gen_diagrams.py --check "${args[@]+"${args[@]}"}"
-          rc=$?
-          set -e
-          case "$rc" in
-            0) echo "stale=false" >> "$GITHUB_OUTPUT" ;;
-            3) echo "stale=true"  >> "$GITHUB_OUTPUT" ;;
-            *) echo "gen_diagrams.py --check failed with $rc" >&2; exit "$rc" ;;
-          esac
-
-      # mermaid-cli pulls a headless Chromium, so only pay for it when
-      # there is actually a diagram to render.
-      - uses: actions/setup-node@v6
-        if: steps.check.outputs.stale == 'true'
-        with:
-          node-version: "22"
-
-      - name: Install mermaid-cli
-        if: steps.check.outputs.stale == 'true'
-        run: npm install --global --no-fund --no-audit @mermaid-js/mermaid-cli@11
-
-      - name: Regenerate diagrams
-        if: steps.check.outputs.stale == 'true'
-        env:
-          LLM_API_URL: ${{ secrets.LLM_API_URL }}
-          LLM_MODEL: ${{ secrets.LLM_MODEL }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          ONLY: ${{ inputs.only }}
-          FORCE: ${{ inputs.force }}
-        run: |
-          set -euo pipefail
-          args=()
-          [ -n "$ONLY" ] && args+=(--only $ONLY)
-          [ "$FORCE" = "true" ] && args+=(--force)
-          python .github/scripts/gen_diagrams.py "${args[@]+"${args[@]}"}"
-
-      - name: Commit regenerated diagrams
-        if: steps.check.outputs.stale == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
-        run: |
-          set -euo pipefail
-          git add -A
-          mapfile -d '' -t changed < <(git diff --cached --name-only -z)
-          if [ "${#changed[@]}" -eq 0 ]; then
-            echo "diagrams regenerated to identical content; nothing to commit"
-            exit 0
-          fi
-          printf 'changed: %s\n' "${changed[@]}"
-          .github/scripts/commit_diagrams.sh "$BRANCH" "${changed[@]}"
+          llm-api-url: ${{ secrets.LLM_API_URL }}
+          llm-model: ${{ secrets.LLM_MODEL }}
+          llm-api-key: ${{ secrets.LLM_API_KEY }}
+          force: ${{ inputs.force || 'false' }}
+          only: ${{ inputs.only }}
