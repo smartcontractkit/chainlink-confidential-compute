@@ -1,84 +1,86 @@
 # Enclave Architecture
 
-<!-- diagram:BEGIN id=enclave-architecture digest=68bcfaa0927e4e77 -->
+<!-- diagram:BEGIN id=enclave-architecture digest=74c96c1194555362 -->
 <!-- Generated from the sources listed in .github/diagrams.yaml. Do not edit by hand; edit the manifest instructions instead. -->
 
 ```mermaid
 flowchart TB
-  EXT["External callers - DON signer nodes"]
-  CHAIN["CapabilitiesRegistry - on-chain DON membership"]
-  NET["Internet"]
 
-  subgraph HOST["HOST - untrusted - parent instance"]
-    MAIN["hostServer - terminates inbound HTTP - port 8080"]
-    CFG["config server - 127.0.0.1 port 8081 - localhost only"]
-    TRACKER["configTracker - on-chain config tracker"]
-    PROXY["proxyserver - SOCKS5 server - AF_VSOCK CIDAny types.ProxyPort"]
-    RULES["ruleSet.Allow - blocks local and loopback - public profile safeURL blocklist"]
-  end
+    EXT["External callers"]
 
-  subgraph ENCLAVE["NITRO ENCLAVE - trusted - EIF image"]
-    START["StartNitroEnclave - VerifyEntropySource, kvm-clock, chrony PHC"]
-    NSM["NSM - Nitro Security Module"]
-    ENT["nsm-hwrng - kernel entropy pool"]
-    SRV["enclaveServer - HTTP on AF_VSOCK port 5000"]
-
-    subgraph ROUTES["enclaveServer routes"]
-      R1["GET /publicKeys"]
-      R2["POST and PATCH /config"]
-      R4["POST /settings"]
-      R5["POST /requests"]
-      R6["GET /memory"]
+    subgraph HOST["UNTRUSTED HOST - parent instance"]
+        MAIN["hostServer main HTTP :8080"]
+        CFG["hostServer config HTTP 127.0.0.1:8081"]
+        TRACKER["configTracker"]
+        PROXY["proxyserver SOCKS5 - vsock.ListenAt CIDAny types.ProxyPort"]
+        RULES["ruleSet.Allow and publicProfileAllowsAddress"]
+        CRASHH["serveCrashReports listener - types.CrashReportPort"]
     end
 
-    ATT["attestor.Attestor - nitroAttestor via NSM session"]
-    KC["keychain.Keychain - boxKeychain NaCl box keypairs"]
-    COMB["combiner.Combiner - tdh2EasyCombiner"]
-    VER["SignatureVerifier - ed25519SignatureVerifier"]
-    EMIT["types.Emitter - ResponseEmitter per request"]
+    subgraph ENCLAVE["NITRO ENCLAVE - trust boundary"]
+        START["StartNitroEnclave"]
+        NSM["Nitro Security Module session"]
+        ENT["nsm-hwrng feeding kernel entropy pool"]
+        SRV["enclaveServer - http.Serve on AF_VSOCK 5000"]
+        ROUTES["routes /publicKeys /requests /config /settings /memory"]
+        ATT["attestor.Attestor - nitroAttestor"]
+        KC["keychain.Keychain - boxKeychain"]
+        COMB["combiner.Combiner - tdh2EasyCombiner"]
+        VER["SignatureVerifier - ed25519SignatureVerifier"]
+        EMIT["types.Emitter - ResponseEmitter or noOpEmitter"]
+        APP["types.EnclaveApp"]
+        DIALER["proxyclient.Dialer - SOCKS5 profile credentials"]
+        POLICY["policy.validateAuthority - ports 80 443 or configured endpoints"]
+        CRASHE["enclave supervisor post-mortems"]
 
-    subgraph APPS["types.EnclaveApp - interchangeable payloads"]
-      APP["types.EnclaveApp interface"]
-      ECHO["echoEnclaveApp - confidential-echo - no network access"]
-      HTTPAPP["httpEnclaveApp - confidential-http"]
-      WFAPP["confidentialWorkflowsApp - confidential-workflows"]
+        subgraph APPS["EnclaveApp payloads - one per EIF"]
+            ECHO["confidential-echo"]
+            HTTPA["confidential-http"]
+            WF["confidential-workflows"]
+        end
     end
 
-    DIAL["proxyclient.Dialer - SOCKS5 dialer"]
-    EPOL["policy.validateAuthority - ports 80 or 443, or configured endpoints only"]
-  end
+    CHAIN["CapabilitiesRegistry contract"]
+    INET["Internet destinations"]
 
-  EXT -->|"signed compute requests - verified and batched to f+1 or 2f+1 quorum"| MAIN
-  TRACKER -->|"polls GetDON"| CHAIN
-  TRACKER -->|"POST /config"| CFG
-  MAIN ==>|"HTTP over AF_VSOCK - vsock.Dial to CID 16 port 5000 - host initiates"| SRV
-  CFG ==>|"POST /config and /settings - AF_VSOCK port 5000 - host initiates"| SRV
+    EXT -->|"SignedComputeRequest batches - quorum f+1 or 2f+1"| MAIN
+    TRACKER -->|"GetDON DON membership"| CHAIN
+    TRACKER -->|"postConfig on membership change"| CFG
 
-  START -->|"NewEnclaveServer and vsock.Listen"| SRV
-  START -->|"VerifyEntropySource"| ENT
-  NSM -->|"registers nsm-hwrng"| ENT
-  ATT -->|"CreateAttestation"| NSM
-  SRV -->|"serves"| ROUTES
-  SRV -->|"attests responses"| ATT
-  SRV -->|"ephemeral keypairs"| KC
-  SRV -->|"combines TDH2 shares"| COMB
-  SRV -->|"verifies signer signatures"| VER
-  SRV -->|"collects metric events"| EMIT
-  R5 -->|"app.Execute with secrets"| APP
-  R4 -->|"InjectSettings - opaque JSON"| APP
-  APP --> ECHO
-  APP --> HTTPAPP
-  APP --> WFAPP
-  HTTPAPP -->|"outbound HTTP"| DIAL
-  WFAPP -->|"binary fetch and gateway dispatch"| DIAL
-  DIAL -->|"validateAuthority"| EPOL
-  DIAL ==>|"SOCKS5 over AF_VSOCK types.ProxyPort - enclave initiates"| PROXY
-  PROXY --> RULES
-  RULES -->|"dials destination"| NET
+    MAIN -->|"proxy /publicKeys /requests PATCH /config - AF_VSOCK 5000 - host dials enclave CID 16"| SRV
+    CFG -->|"POST /config and POST /settings - AF_VSOCK 5000 - host dials enclave CID 16"| SRV
+    CRASHE -->|"post-mortem - AF_VSOCK types.CrashReportPort - enclave dials host"| CRASHH
+
+    START -->|"OpenNitroAttestor - nsm.OpenDefaultSession"| NSM
+    START -->|"VerifyEntropySource"| ENT
+    NSM -->|"NSM driver registers hwrng"| ENT
+    START -->|"NewEnclaveServer - vsock.Listen - Start"| SRV
+    SRV -->|"Handler"| ROUTES
+
+    ROUTES -->|"CreateAttestation"| ATT
+    ATT -->|"session.Send Attestation"| NSM
+    ROUTES -->|"GetKeyPairs and GetKeyPairForRequest"| KC
+    ENT -->|"crypto/rand key material"| KC
+    ROUTES -->|"AggregateShares threshold T"| COMB
+    ROUTES -->|"VerifySignature against config.Signers"| VER
+    ROUTES -->|"NewResponseEmitter per request"| EMIT
+    ROUTES -->|"app.Execute with plaintext secrets"| APP
+    APP -->|"Emit metric events"| EMIT
+
+    APP -.->|"one payload per EIF"| ECHO
+    APP -.->|"one payload per EIF"| HTTPA
+    APP -.->|"one payload per EIF"| WF
+
+    HTTPA -->|"httpClient egress"| DIALER
+    WF -->|"httpfetch storage fetcher remote dispatcher"| DIALER
+    DIALER -->|"validateAuthority before connect"| POLICY
+    DIALER -->|"SOCKS5 - AF_VSOCK types.ProxyPort - enclave dials parent"| PROXY
+    PROXY -->|"ruleSet.Allow per connection"| RULES
+    RULES -->|"dial destination"| INET
 ```
 
 <!-- diagram:END id=enclave-architecture -->
 
 ## Sources
 
-Generated from [`enclave/nitro/starter.go`](../../enclave/nitro/starter.go), [`enclave/nitro/types.go`](../../enclave/nitro/types.go), [`enclave/nitro/entropy.go`](../../enclave/nitro/entropy.go), [`enclave/server/server.go`](../../enclave/server/server.go), [`enclave/server/memory.go`](../../enclave/server/memory.go), [`enclave/server/response_emitter.go`](../../enclave/server/response_emitter.go), [`enclave/nitro/host/host.go`](../../enclave/nitro/host/host.go), [`enclave/nitro/host/public_data.go`](../../enclave/nitro/host/public_data.go), [`enclave/nitro/host/proxy-server/server.go`](../../enclave/nitro/host/proxy-server/server.go), [`enclave/nitro/host/proxy-server/policy.go`](../../enclave/nitro/host/proxy-server/policy.go), [`enclave/nitro/proxy-client/client.go`](../../enclave/nitro/proxy-client/client.go), [`enclave/nitro/proxy-client/policy.go`](../../enclave/nitro/proxy-client/policy.go), [`enclave/services/attestor/attestor.go`](../../enclave/services/attestor/attestor.go), [`enclave/services/attestor/nitro_attestor.go`](../../enclave/services/attestor/nitro_attestor.go), [`enclave/services/combiner/combiner.go`](../../enclave/services/combiner/combiner.go), [`enclave/services/combiner/tdh2easycombiner.go`](../../enclave/services/combiner/tdh2easycombiner.go), [`enclave/services/emitter/noopemitter.go`](../../enclave/services/emitter/noopemitter.go), [`enclave/services/keychain/box_keychain.go`](../../enclave/services/keychain/box_keychain.go), [`enclave/services/keychain/keychain.go`](../../enclave/services/keychain/keychain.go), [`enclave/services/signature-verifier/ed25519_signature_verifier.go`](../../enclave/services/signature-verifier/ed25519_signature_verifier.go), [`enclave/services/signature-verifier/verifier.go`](../../enclave/services/signature-verifier/verifier.go), [`enclave/config-tracker/config_tracker.go`](../../enclave/config-tracker/config_tracker.go), [`enclave/config-tracker/main.go`](../../enclave/config-tracker/main.go), [`enclave/apps/confidential-echo/app/app.go`](../../enclave/apps/confidential-echo/app/app.go), [`enclave/apps/confidential-http/app/app.go`](../../enclave/apps/confidential-http/app/app.go), [`enclave/apps/confidential-workflows/app/app.go`](../../enclave/apps/confidential-workflows/app/app.go).
+Generated from [`enclave/nitro/starter.go`](../../enclave/nitro/starter.go), [`enclave/nitro/types.go`](../../enclave/nitro/types.go), [`enclave/nitro/entropy.go`](../../enclave/nitro/entropy.go), [`enclave/server/server.go`](../../enclave/server/server.go), [`enclave/server/memory.go`](../../enclave/server/memory.go), [`enclave/server/response_emitter.go`](../../enclave/server/response_emitter.go), [`enclave/nitro/host/host.go`](../../enclave/nitro/host/host.go), [`enclave/nitro/host/public_data.go`](../../enclave/nitro/host/public_data.go), [`enclave/nitro/host/proxy-server/server.go`](../../enclave/nitro/host/proxy-server/server.go), [`enclave/nitro/host/proxy-server/policy.go`](../../enclave/nitro/host/proxy-server/policy.go), [`enclave/nitro/proxy-client/client.go`](../../enclave/nitro/proxy-client/client.go), [`enclave/nitro/proxy-client/policy.go`](../../enclave/nitro/proxy-client/policy.go), [`enclave/services/attestor/attestor.go`](../../enclave/services/attestor/attestor.go), [`enclave/services/attestor/nitro_attestor.go`](../../enclave/services/attestor/nitro_attestor.go), [`enclave/services/combiner/combiner.go`](../../enclave/services/combiner/combiner.go), [`enclave/services/combiner/tdh2easycombiner.go`](../../enclave/services/combiner/tdh2easycombiner.go), [`enclave/services/emitter/noopemitter.go`](../../enclave/services/emitter/noopemitter.go), [`enclave/services/keychain/box_keychain.go`](../../enclave/services/keychain/box_keychain.go), [`enclave/services/keychain/keychain.go`](../../enclave/services/keychain/keychain.go), [`enclave/services/signature-verifier/ed25519_signature_verifier.go`](../../enclave/services/signature-verifier/ed25519_signature_verifier.go), [`enclave/services/signature-verifier/verifier.go`](../../enclave/services/signature-verifier/verifier.go), [`enclave/config-tracker/config_tracker.go`](../../enclave/config-tracker/config_tracker.go), [`enclave/config-tracker/main.go`](../../enclave/config-tracker/main.go), [`enclave/apps/confidential-echo/app/app.go`](../../enclave/apps/confidential-echo/app/app.go), [`enclave/apps/confidential-fault/app/app.go`](../../enclave/apps/confidential-fault/app/app.go), [`enclave/apps/confidential-http/app/app.go`](../../enclave/apps/confidential-http/app/app.go), [`enclave/apps/confidential-workflows/app/app.go`](../../enclave/apps/confidential-workflows/app/app.go).
