@@ -84,6 +84,7 @@ type hostMetrics struct {
 	processRSSMemory              metric.Int64ObservableGauge
 	availableMemory               metric.Int64ObservableGauge
 	peakRSSMemory                 metric.Int64ObservableGauge
+	appExits                      metric.Int64Counter
 
 	now              func() time.Time
 	mu               sync.Mutex
@@ -159,6 +160,14 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	if err != nil {
 		return nil, fmt.Errorf("create sub-capability failure timestamp gauge: %w", err)
 	}
+	appExits, err := meter.Int64Counter(
+		"confidential_compute.enclave.app.exits",
+		metric.WithDescription("Enclave application exits reported by the enclave supervisor"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave app exits counter: %w", err)
+	}
 	inflight, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.executions.inflight",
 		metric.WithDescription("Actual enclave executions currently in flight in this host"),
@@ -182,6 +191,7 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 		totalDuration:                 total,
 		executionsStarted:             started,
 		executionsRejected:            rejected,
+		appExits:                      appExits,
 		executionsInflight:            inflight,
 		executionsInflightMax:         inflightMax,
 		subCapabilityFailureTimestamp: subCapabilityFailureTimestamp,
@@ -514,6 +524,21 @@ func (m *hostMetrics) startExecution(metadata executionMetadata, quorumWait time
 			}
 		})
 	}
+}
+
+// recordAppExit counts an enclave application exit.
+//
+// Dimensioned so the cause is separable without alerting on log text: exit.code
+// distinguishes a runtime fatal error (2) from a deliberate abort, and signal
+// names the terminating signal when there was one ("killed" being what an OOM
+// kill looks like). Both are bounded sets, so cardinality stays flat. The full
+// os.ProcessState rendering, including any core dump, stays in the log line.
+func (m *hostMetrics) recordAppExit(report types.CrashReport) {
+	attrs := []attribute.KeyValue{attribute.Int("exit.code", report.ExitCode)}
+	if report.Signal != "" {
+		attrs = append(attrs, attribute.String("signal", report.Signal))
+	}
+	m.appExits.Add(context.Background(), 1, metric.WithAttributes(attrs...))
 }
 
 func executionMetricAttributes(metadata executionMetadata) []attribute.KeyValue {

@@ -32,7 +32,7 @@ const (
 // exit code for a terminated enclave. The supervisor relays it here instead.
 // Reports are logged at error level so they land in Loki alongside the rest of
 // the host's output.
-func ServeCrashReports(listener net.Listener, lggr logger.Logger) error {
+func serveCrashReports(listener net.Listener, lggr logger.Logger, metrics *hostMetrics) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -41,11 +41,11 @@ func ServeCrashReports(listener net.Listener, lggr logger.Logger) error {
 			}
 			return err
 		}
-		go handleCrashReport(conn, lggr)
+		go handleCrashReport(conn, lggr, metrics)
 	}
 }
 
-func handleCrashReport(conn net.Conn, lggr logger.Logger) {
+func handleCrashReport(conn net.Conn, lggr logger.Logger, metrics *hostMetrics) {
 	defer conn.Close() //nolint:errcheck // best-effort cleanup
 
 	if err := conn.SetReadDeadline(time.Now().Add(crashReportReadTimeout)); err != nil {
@@ -57,6 +57,10 @@ func handleCrashReport(conn net.Conn, lggr logger.Logger) {
 	if err := json.NewDecoder(io.LimitReader(conn, crashReportMaxBytes)).Decode(&report); err != nil {
 		lggr.Errorw("failed to decode enclave crash report", "error", err)
 		return
+	}
+
+	if metrics != nil {
+		metrics.recordAppExit(report)
 	}
 
 	// Status only: the traceback stays inside the enclave, since the host is

@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/zap/zapcore"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
@@ -41,7 +43,7 @@ func TestHandleCrashReport_LogsTheReport(t *testing.T) {
 		ack <- string(buf)
 	}()
 
-	handleCrashReport(server, lggr)
+	handleCrashReport(server, lggr, nil)
 
 	entries := logs.FilterMessage("enclave application exited").All()
 	require.Len(t, entries, 1)
@@ -75,7 +77,7 @@ func TestHandleCrashReport_MalformedPayload(t *testing.T) {
 		_ = client.Close()
 	}()
 
-	handleCrashReport(server, lggr)
+	handleCrashReport(server, lggr, nil)
 
 	assert.Len(t, logs.FilterMessage("enclave application exited").All(), 0)
 	assert.Len(t, logs.FilterMessage("failed to decode enclave crash report").All(), 1)
@@ -102,7 +104,7 @@ func TestHandleCrashReport_RejectsOversizePayload(t *testing.T) {
 	}()
 
 	done := make(chan struct{})
-	go func() { defer close(done); handleCrashReport(server, lggr) }()
+	go func() { defer close(done); handleCrashReport(server, lggr, nil) }()
 
 	select {
 	case <-done:
@@ -121,7 +123,7 @@ func TestServeCrashReports_ReturnsOnClosedListener(t *testing.T) {
 	listener := newPipeListener()
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- ServeCrashReports(listener, lggr) }()
+	go func() { errCh <- serveCrashReports(listener, lggr, nil) }()
 
 	require.NoError(t, listener.Close())
 
@@ -130,7 +132,7 @@ func TestServeCrashReports_ReturnsOnClosedListener(t *testing.T) {
 		// A closed listener is an orderly shutdown, not a failure to report.
 		assert.NoError(t, err)
 	case <-time.After(10 * time.Second):
-		t.Fatal("ServeCrashReports did not return after the listener closed")
+		t.Fatal("serveCrashReports did not return after the listener closed")
 	}
 }
 
@@ -151,3 +153,69 @@ func (l *pipeListener) Close() error {
 }
 
 func (l *pipeListener) Addr() net.Addr { return &net.UnixAddr{Name: "pipe", Net: "unix"} }
+
+// TestHandleCrashReport_RecordsMetric covers the alerting path: a log line is
+// awkward to alert on, so an enclave app exit must also increment a counter
+// dimensioned by cause. This is the only host-side signal that an enclave died,
+// since the enclave init reboots the VM with the status and describe-enclaves
+// exposes no exit code for a terminated enclave.
+func TestHandleCrashReport_RecordsMetric(t *testing.T) {
+	for name, tc := range map[string]struct {
+		report    types.CrashReport
+		wantAttrs []attribute.KeyValue
+	}{
+		"oom kill shape": {
+			report:    types.CrashReport{App: "enclave-app", ExitCode: 137, Signal: "killed", Status: "signal: killed"},
+			wantAttrs: []attribute.KeyValue{attribute.Int("exit.code", 137), attribute.String("signal", "killed")},
+		},
+		"runtime fatal error": {
+			// No signal reaches the wait status, so the attribute is omitted
+			// rather than recorded empty.
+			report:    types.CrashReport{App: "enclave-app", ExitCode: 2, Status: "exit status 2"},
+			wantAttrs: []attribute.KeyValue{attribute.Int("exit.code", 2)},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			metrics, reader := newTestHostMetrics(t)
+			lggr := logger.Test(t)
+
+			client, server := net.Pipe()
+			t.Cleanup(func() { _ = client.Close() })
+			go func() {
+				_ = json.NewEncoder(client).Encode(tc.report)
+				buf := make([]byte, len(types.CrashReportAck))
+				_, _ = io.ReadFull(client, buf)
+			}()
+
+			handleCrashReport(server, lggr, metrics)
+
+			data := collectHostMetrics(t, reader)
+			exits := requireMetric(t, data, "confidential_compute.enclave.app.exits")
+			sum, ok := exits.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "app exits should be a counter")
+			require.Len(t, sum.DataPoints, 1)
+			assert.EqualValues(t, 1, sum.DataPoints[0].Value)
+			assert.ElementsMatch(t, tc.wantAttrs, sum.DataPoints[0].Attributes.ToSlice())
+		})
+	}
+}
+
+// A report the host could not decode must not be counted, or a malformed peer
+// would look like a stream of enclave deaths.
+func TestHandleCrashReport_MalformedPayloadRecordsNoMetric(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+	lggr := logger.Test(t)
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	go func() {
+		_, _ = client.Write([]byte("not json"))
+		_ = client.Close()
+	}()
+
+	handleCrashReport(server, lggr, metrics)
+
+	data := collectHostMetrics(t, reader)
+	_, found := findMetric(data, "confidential_compute.enclave.app.exits")
+	assert.False(t, found, "a report that failed to decode must not be counted")
+}

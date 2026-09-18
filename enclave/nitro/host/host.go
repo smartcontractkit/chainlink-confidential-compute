@@ -941,7 +941,7 @@ func main() {
 	} else {
 		defer crashListener.Close() //nolint:errcheck // best-effort cleanup
 		go func() {
-			if err := ServeCrashReports(crashListener, lggr); err != nil {
+			if err := serveCrashReports(crashListener, lggr, metrics); err != nil {
 				lggr.Errorw("enclave crash report listener stopped", "error", err)
 			}
 		}()
