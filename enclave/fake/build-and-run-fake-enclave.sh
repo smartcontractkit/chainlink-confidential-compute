@@ -89,7 +89,7 @@ chmod +x "${APP_BINARY}"
 # behaviour that only exists in the real enclave.
 SUPERVISOR_BINARY="${ENCLAVE_PATH}/enclave-supervisor-cid${ENCLAVE_CID}"
 echo "Building enclave supervisor..."
-go build -C "$(pwd)" -o "${SUPERVISOR_BINARY}" ./enclave/nitro/supervisor/
+go build -o "${SUPERVISOR_BINARY}" ./enclave/nitro/supervisor/
 chmod +x "${SUPERVISOR_BINARY}"
 
 echo "Starting fake enclave app (${APP}) under supervisor with args: ${APP_ARGS}"
@@ -126,16 +126,18 @@ go build -C ./enclave/nitro/host -o "${HOST_BINARY}" .
 chmod +x "${HOST_BINARY}"
 
 echo "Starting fake host-server on port ${HTTP_PORT}..."
-# Mirror the real script and tee the host's own output to a file, so tests can
-# assert on what it logged (e.g. an enclave crash report) rather than only
-# seeing it interleaved on this script's stdout. Per-CID so concurrent fake
-# enclaves do not clobber each other.
+# Mirror the real script and send the host's own output to a file, so tests can
+# assert on what it logged (e.g. an enclave crash report). Per-CID so concurrent
+# fake enclaves do not clobber each other.
+# Redirect rather than pipe through tee: $! after a pipeline is the PID of the
+# last element, so piping would record tee's PID here and the EXIT trap would
+# leave the host server alive holding VSOCK 5001. Matches the real script.
 HOST_LOGFILE="${ENCLAVE_PATH}/host-server-cid${ENCLAVE_CID}.log"
 "${HOST_BINARY}" \
     --port="${HTTP_PORT}" \
     --config-port="${CONFIG_HTTP_PORT}" \
     --enclave-cid="${ENCLAVE_CID}" \
-    --enclave-port="${ENCLAVE_VSOCK_PORT}" 2>&1 | tee "${HOST_LOGFILE}" &
+    --enclave-port="${ENCLAVE_VSOCK_PORT}" > "${HOST_LOGFILE}" 2>&1 &
 HOST_PID=$!
 PIDS+=("${HOST_PID}")
 
