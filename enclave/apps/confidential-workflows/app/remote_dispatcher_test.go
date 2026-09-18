@@ -17,10 +17,10 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialrelay"
 	"github.com/smartcontractkit/chainlink-common/pkg/jsonrpc2"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
-	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
 	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -995,4 +995,129 @@ func TestCallCapability_RetriesAfterTransientGatewayFailure(t *testing.T) {
 	require.NoError(t, anypb.UnmarshalTo(resp.GetPayload(), &gotValue, proto.UnmarshalOptions{}))
 	assert.Equal(t, "result-value", gotValue.GetValue())
 	assert.GreaterOrEqual(t, attempts.Load(), int32(2), "dispatcher retried after the transient failure")
+}
+
+// TestCallCapability_RetriesWhenGatewayCannotReachRelayDON verifies the dispatcher
+// retries when the gateway answers with a well-formed JSON-RPC error reporting that it
+// could not forward the request to the relay DON. That is what a DON whose websockets
+// are still reconnecting looks like from the enclave, and it clears on its own.
+func TestCallCapability_RetriesWhenGatewayCannotReachRelayDON(t *testing.T) {
+	wantAny, err := anypb.New(wrapperspb.String("result-value"))
+	require.NoError(t, err)
+	wantRespBytes, err := proto.Marshal(&sdkpb.CapabilityResponse{
+		Response: &sdkpb.CapabilityResponse_Payload{Payload: wantAny},
+	})
+	require.NoError(t, err)
+
+	signers := newRelaySigners(t, 2)
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		req, err := jsonrpc2.DecodeRequest[json.RawMessage](body, "")
+		require.NoError(t, err)
+		var p confidentialrelay.CapabilityRequestParams
+		require.NoError(t, json.Unmarshal(*req.Params, &p))
+
+		w.Header().Set("Content-Type", "application/json")
+		if attempts.Add(1) == 1 {
+			resp := jsonrpc2.Response[json.RawMessage]{
+				Version: jsonrpc2.JsonRpcVersion,
+				ID:      req.ID,
+				Error: &jsonrpc2.WireError{
+					Code:    jsonrpc2.ErrInternal,
+					Message: "failed to forward user request to nodes",
+				},
+			}
+			respBytes, _ := jsonrpc2.EncodeResponse(&resp)
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write(respBytes)
+			return
+		}
+		result := confidentialrelay.CapabilityResponseResult{
+			Payload: base64.StdEncoding.EncodeToString(wantRespBytes),
+		}
+		bundle := signCapabilityBundle(t, result, p, signers)
+		resultJSON, _ := json.Marshal(bundle)
+		resultRaw := json.RawMessage(resultJSON)
+		resp := jsonrpc2.Response[json.RawMessage]{
+			Version: jsonrpc2.JsonRpcVersion,
+			ID:      req.ID,
+			Result:  &resultRaw,
+		}
+		respBytes, _ := jsonrpc2.EncodeResponse(&resp)
+		_, _ = w.Write(respBytes)
+	}))
+	defer srv.Close()
+
+	d := NewRemoteDispatcher(
+		gateway.NewGatewayClient(srv.URL, nil),
+		nil,
+		relayDONConfig(signers, 1),
+		logger.Test(t),
+		nil, nil,
+		signatureverifier.NewEd25519SignatureVerifier(),
+		0, 0,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	inputAny, err := anypb.New(wrapperspb.String("input-data"))
+	require.NoError(t, err)
+
+	resp, err := d.CallCapability(ctx, "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
+		Id:         "write_ethereum@1.0.0",
+		Method:     "Transmit",
+		Payload:    inputAny,
+		CallbackId: 17,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.GreaterOrEqual(t, attempts.Load(), int32(2), "an unreachable relay DON is retried, not surfaced")
+}
+
+// A JSON-RPC error that is a real answer about this request still terminates on the
+// first attempt: retrying cannot change which signatures the relay produced.
+func TestCallCapability_DoesNotRetryTerminalRPCError(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		req, err := jsonrpc2.DecodeRequest[json.RawMessage](body, "")
+		require.NoError(t, err)
+		attempts.Add(1)
+		resp := jsonrpc2.Response[json.RawMessage]{
+			Version: jsonrpc2.JsonRpcVersion,
+			ID:      req.ID,
+			Error: &jsonrpc2.WireError{
+				Code:    jsonrpc2.ErrInternal,
+				Message: "relay quorum unreachable: 1 signed responses",
+			},
+		}
+		respBytes, _ := jsonrpc2.EncodeResponse(&resp)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write(respBytes)
+	}))
+	defer srv.Close()
+
+	d := NewRemoteDispatcher(
+		gateway.NewGatewayClient(srv.URL, nil),
+		nil,
+		types.EnclaveConfig{},
+		logger.Test(t),
+		nil, nil,
+		signatureverifier.NewEd25519SignatureVerifier(),
+		0, 0,
+	)
+
+	_, err := d.CallCapability(context.Background(), "wf-term", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
+		Id:         "write_ethereum@1.0.0",
+		Method:     "Transmit",
+		CallbackId: 1,
+	})
+	require.Error(t, err)
+	assert.Equal(t, int32(1), attempts.Load(), "a terminal relay answer is not retried")
 }
