@@ -1,0 +1,59 @@
+name: Diagrams
+
+# Regenerates the mermaid diagrams declared in .github/diagrams.yaml whenever a
+# PR changes the code they are derived from, and commits the result onto the PR
+# branch. The implementation lives in .github/actions/diagrams, which other
+# repositories consume as a published composite action.
+#
+# A digest of each diagram's sources is stored next to the rendered block, so
+# the expensive path only runs when the sources actually changed. An unchanged
+# PR costs a checkout and a hash.
+#
+# The commit is made through the contents API so it is signed by GitHub. Because
+# it is authored with GITHUB_TOKEN it does not re-trigger workflows, so the new
+# head commit will not have the rest of the PR's checks re-run against it. Add
+# the `skip-diagrams` label to a PR to opt out.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Regenerate every diagram, ignoring the stored digests
+        type: boolean
+        default: false
+      only:
+        description: "Space-separated diagram ids to restrict to (default: all)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: diagrams-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diagrams:
+    runs-on: ubuntu-latest
+    # Fork PRs cannot read the model secrets and must not be able to push here.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       !contains(github.event.pull_request.labels.*.name, 'skip-diagrams'))
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
+
+      # This repository hosts the action, so it consumes its own working copy
+      # rather than a pinned release.
+      - uses: ./.github/actions/diagrams
+        with:
+          llm-api-url: ${{ secrets.LLM_API_URL }}
+          llm-model: ${{ secrets.LLM_MODEL }}
+          llm-api-key: ${{ secrets.LLM_API_KEY }}
+          force: ${{ inputs.force || 'false' }}
+          only: ${{ inputs.only }}

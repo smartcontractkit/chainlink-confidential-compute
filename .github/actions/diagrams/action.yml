@@ -1,0 +1,155 @@
+name: Regenerate diagrams
+description: >-
+  Regenerate the mermaid diagrams declared in a repository's diagram manifest,
+  but only those whose source files actually changed, and commit the result.
+
+# Consumers supply their own model endpoint. Nothing about the provider or the
+# model lives in this action; see gen_diagrams.py for the environment contract.
+inputs:
+  llm-api-url:
+    description: Chat completions endpoint (OpenAI-compatible).
+    required: true
+  llm-model:
+    description: Model identifier to request.
+    required: true
+  llm-api-key:
+    description: Bearer token for the endpoint.
+    required: true
+  github-token:
+    description: Token used to commit regenerated diagrams. Needs contents:write.
+    required: false
+    default: ${{ github.token }}
+  manifest:
+    description: Manifest path, relative to the repository root.
+    required: false
+    default: .github/diagrams.yaml
+  jobs:
+    description: Diagrams to generate in parallel.
+    required: false
+    default: "4"
+  only:
+    description: "Space-separated diagram ids to restrict to (default: all)."
+    required: false
+    default: ""
+  force:
+    description: Regenerate every diagram, ignoring the stored digests.
+    required: false
+    default: "false"
+  commit:
+    description: Commit regenerated diagrams back to the branch.
+    required: false
+    default: "true"
+  branch:
+    description: Branch to commit to. Defaults to the PR head branch.
+    required: false
+    default: ""
+  python-version:
+    required: false
+    default: "3.12"
+  mermaid-version:
+    description: Version of @mermaid-js/mermaid-cli used to validate output.
+    required: false
+    default: "11"
+
+outputs:
+  stale:
+    description: Whether any diagram needed regenerating.
+    value: ${{ steps.check.outputs.stale }}
+  changed:
+    description: Newline-separated paths written by this run.
+    value: ${{ steps.generate.outputs.changed }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install manifest parser
+      shell: bash
+      run: pip install --quiet pyyaml
+
+    - name: Find stale diagrams
+      id: check
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        MANIFEST: ${{ inputs.manifest }}
+        ONLY: ${{ inputs.only }}
+        FORCE: ${{ inputs.force }}
+      run: |
+        set -euo pipefail
+        if [ "$FORCE" = "true" ]; then
+          echo "stale=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        args=(--manifest "$MANIFEST")
+        [ -n "$ONLY" ] && args+=(--only $ONLY)
+
+        set +e
+        python "$ACTION_PATH/gen_diagrams.py" --check "${args[@]}"
+        rc=$?
+        set -e
+        case "$rc" in
+          0) echo "stale=false" >> "$GITHUB_OUTPUT" ;;
+          3) echo "stale=true"  >> "$GITHUB_OUTPUT" ;;
+          *) echo "gen_diagrams.py --check failed with $rc" >&2; exit "$rc" ;;
+        esac
+
+    # mermaid-cli pulls a headless Chromium, so only pay for it when there is
+    # actually a diagram to render.
+    - uses: actions/setup-node@v6
+      if: steps.check.outputs.stale == 'true'
+      with:
+        node-version: "22"
+
+    - name: Install mermaid-cli
+      if: steps.check.outputs.stale == 'true'
+      shell: bash
+      run: npm install --global --no-fund --no-audit @mermaid-js/mermaid-cli@${{ inputs.mermaid-version }}
+
+    - name: Regenerate diagrams
+      id: generate
+      if: steps.check.outputs.stale == 'true'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        LLM_API_URL: ${{ inputs.llm-api-url }}
+        LLM_MODEL: ${{ inputs.llm-model }}
+        LLM_API_KEY: ${{ inputs.llm-api-key }}
+        MANIFEST: ${{ inputs.manifest }}
+        ONLY: ${{ inputs.only }}
+        FORCE: ${{ inputs.force }}
+        JOBS: ${{ inputs.jobs }}
+      run: |
+        set -euo pipefail
+        args=(--manifest "$MANIFEST" --jobs "$JOBS")
+        [ -n "$ONLY" ] && args+=(--only $ONLY)
+        [ "$FORCE" = "true" ] && args+=(--force)
+        python "$ACTION_PATH/gen_diagrams.py" "${args[@]}"
+
+        git add -A
+        {
+          echo "changed<<EOF"
+          git diff --cached --name-only
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Commit regenerated diagrams
+      if: steps.check.outputs.stale == 'true' && inputs.commit == 'true'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        BRANCH: ${{ inputs.branch || github.event.pull_request.head.ref || github.ref_name }}
+      run: |
+        set -euo pipefail
+        mapfile -d '' -t changed < <(git diff --cached --name-only -z)
+        if [ "${#changed[@]}" -eq 0 ]; then
+          echo "diagrams regenerated to identical content; nothing to commit"
+          exit 0
+        fi
+        printf 'changed: %s\n' "${changed[@]}"
+        "$ACTION_PATH/commit_diagrams.sh" "$BRANCH" "${changed[@]}"
