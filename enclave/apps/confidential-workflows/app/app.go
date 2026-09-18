@@ -376,7 +376,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	sf := a.storageFetcher
 	dispatcher := a.dispatcher
 	a.mu.Unlock()
-	binary, err := a.fetcher.Fetch(context.Background(), execution.BinaryUrl, execution.BinaryHash, sf)
+	binary, err := a.fetcher.Fetch(context.Background(), execution.BinaryUrl, execution.BinaryHash, sf, emitter)
 	if err != nil {
 		return nil, &types.ExecuteError{
 			Error: fmt.Sprintf("fetching binary: %s", err.Error()),
