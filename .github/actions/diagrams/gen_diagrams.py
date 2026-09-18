@@ -316,7 +316,8 @@ class Endpoint:
         )
 
 
-def build_user_prompt(spec: Spec, blobs: list[tuple[str, str]], dropped: list[str]) -> str:
+def build_user_prompt(spec: Spec, blobs: list[tuple[str, str]], dropped: list[str],
+                      previous: str = "") -> str:
     parts = [
         f"# Diagram to produce: {spec.title}",
         "",
@@ -348,6 +349,23 @@ def build_user_prompt(spec: Spec, blobs: list[tuple[str, str]], dropped: list[st
             "speculate about their contents:",
             "",
             *(f"- `{p}`" for p in dropped),
+            "",
+        ]
+    if previous:
+        parts += [
+            "## Previous version of this diagram",
+            "",
+            "This is what the diagram looked like before the sources changed. "
+            "Reuse its structure, node ids, labels, grouping and ordering "
+            "wherever the sources still support them, so that the diff is "
+            "limited to what actually changed. Do not restate it verbatim if "
+            "the sources have moved on, and do not preserve anything the "
+            "sources now contradict — where the two disagree, the sources "
+            "above win.",
+            "",
+            "```mermaid",
+            previous,
+            "```",
             "",
         ]
     return "\n".join(parts)
@@ -554,6 +572,16 @@ def render_block(spec: Spec, digest: str, body: str) -> str:
     )
 
 
+def previous_diagram(text: str) -> str:
+    """The mermaid body already on the page, used as a regeneration anchor."""
+    if not text.strip():
+        return ""
+    try:
+        return extract_mermaid(text)
+    except ValueError:
+        return ""
+
+
 def existing_digest(text: str, spec_id: str) -> str | None:
     match = re.search(BEGIN_RE.format(id=re.escape(spec_id)), text)
     return match.group("digest") if match else None
@@ -586,10 +614,11 @@ def render_page(spec: Spec, block: str, blobs: list[tuple[str, str]], root: Path
 
 
 def generate(spec: Spec, blobs: list[tuple[str, str]], dropped: list[str],
-             endpoint: "Endpoint", attempts: int, validate: bool) -> str:
+             endpoint: "Endpoint", attempts: int, validate: bool,
+             previous: str = "") -> str:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": build_user_prompt(spec, blobs, dropped)},
+        {"role": "user", "content": build_user_prompt(spec, blobs, dropped, previous)},
     ]
     last_err = ""
     for attempt in range(1, attempts + 1):
@@ -732,7 +761,8 @@ def main() -> int:
         """Generate one diagram. Returns updated / unchanged / failed."""
         spec, blobs, dropped, digest, current = job
         try:
-            body = generate(spec, blobs, dropped, endpoint, args.attempts, args.validate)
+            body = generate(spec, blobs, dropped, endpoint, args.attempts,
+                            args.validate, previous_diagram(current))
         except (RuntimeError, ValueError) as exc:
             log(f"  ! {exc}")
             return "failed"
