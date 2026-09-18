@@ -6,6 +6,10 @@ const (
 	AppIDConfidentialHTTP      = "confidential-http@1.0.0-alpha"
 	AppIDConfidentialWorkflows = "confidential-workflows@1.0.0-alpha"
 	AppIDConfidentialEcho      = "confidential-echo@1.0.0-alpha"
+	// AppIDConfidentialFault is a test-only fixture app that fails on demand, so
+	// the enclave supervisor and crash-reporting path can be exercised against a
+	// real enclave. It is never built or deployed outside tests.
+	AppIDConfidentialFault = "confidential-fault@1.0.0-alpha"
 )
 
 // Relevant constants for Confidential Compute, beneficial to be examined next to each other to understand end-to-end behavior.

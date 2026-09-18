@@ -34,6 +34,10 @@
 **/*.pem
 **/*.crt
 **/host-server-**
+# Built by the fake enclave harness, which now runs the app under the
+# supervisor the way the real EIF's /start.sh does.
+**/fake-enclave-app-**
+**/enclave-supervisor-**
 
 # Compiled environment entrypoint binaries (from `go build ./environments/{fake,nitro}`).
 # Scoped to the app directory so the `environments/fake`, `environments/nitro`,

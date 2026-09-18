@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -49,9 +50,17 @@ func supervise(app string, args []string) int {
 		return 1
 	}
 
-	stopForwarding := forwardSignals(cmd)
+	var terminating atomic.Bool
+	stopForwarding := forwardSignals(cmd, &terminating)
 	waitErr := cmd.Wait()
 	stopForwarding()
+
+	// A shutdown we asked for is not a crash. Report only deaths the supervisor
+	// did not cause, so an orderly termination does not raise a false alarm.
+	if terminating.Load() {
+		fmt.Fprintln(os.Stderr, "supervisor: enclave app exited after a forwarded termination signal; not reporting")
+		return exitCodeFor(cmd.ProcessState, waitErr)
+	}
 
 	report := buildCrashReport(filepath.Base(app), cmd.ProcessState, waitErr)
 	reportSink(report)
@@ -60,8 +69,10 @@ func supervise(app string, args []string) int {
 
 // forwardSignals relays termination signals to the child, since the supervisor
 // has taken the entrypoint slot and receives the ones the application would
-// otherwise get. It returns a function that stops forwarding.
-func forwardSignals(cmd *exec.Cmd) func() {
+// otherwise get. It records having done so in terminating, so the caller can
+// tell a shutdown it initiated from a crash. It returns a function that stops
+// forwarding.
+func forwardSignals(cmd *exec.Cmd, terminating *atomic.Bool) func() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	done := make(chan struct{})
@@ -70,6 +81,7 @@ func forwardSignals(cmd *exec.Cmd) func() {
 		for {
 			select {
 			case sig := <-sigCh:
+				terminating.Store(true)
 				if cmd.Process != nil {
 					_ = cmd.Process.Signal(sig)
 				}
@@ -86,6 +98,13 @@ func forwardSignals(cmd *exec.Cmd) func() {
 			close(done)
 		})
 	}
+}
+
+// exitCodeFor is the status the supervisor exits with, which the enclave init in
+// turn takes as the VM's. Shared with buildCrashReport so a reported and an
+// unreported death surface the same number.
+func exitCodeFor(state *os.ProcessState, waitErr error) int {
+	return buildCrashReport("", state, waitErr).ExitCode
 }
 
 func buildCrashReport(app string, state *os.ProcessState, waitErr error) types.CrashReport {
