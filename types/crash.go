@@ -15,6 +15,12 @@ package types
 // deliberately absent: the host already polls the enclave's /memory endpoint and
 // records total, available, RSS and peak RSS as metrics, so repeating them here
 // would duplicate data the host can already query.
+// CrashReportAck is what the host writes back once it has logged a CrashReport.
+// The supervisor blocks on it before exiting: a successful write on its side
+// proves only that the bytes reached the local socket buffer, and the enclave VM
+// is destroyed moments later, which can discard anything the host has not read.
+const CrashReportAck = "ack\n"
+
 type CrashReport struct {
 	// App is the executable name, to disambiguate which enclave app died.
 	App string `json:"app"`

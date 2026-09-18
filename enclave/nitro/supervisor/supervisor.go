@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,13 +18,20 @@ import (
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
-// crashReportTimeout bounds the post-mortem so an unresponsive host cannot hold
-// the enclave VM open indefinitely after the app has already died.
+// crashReportTimeout bounds the entire post-mortem — dial, send and ACK — so an
+// unresponsive host cannot hold the enclave VM open after the app has died.
 const crashReportTimeout = 10 * time.Second
 
 // reportSink delivers the post-mortem. Indirected so tests can exercise the
 // supervise loop without a vsock peer.
 var reportSink = sendCrashReport
+
+// dialHost opens the connection to the host's crash report listener. Indirected
+// because vsock.Dial fails immediately on non-Linux hosts, which would leave the
+// timeout and abandoned-dial paths in dialCrashReport untested.
+var dialHost = func() (net.Conn, error) {
+	return vsock.Dial(types.ProxyParentCID, types.CrashReportPort, nil)
+}
 
 // supervise runs app as a child process and, once it exits, reports its status
 // to the host. It returns the child's exit code, which the enclave init in turn
@@ -110,18 +119,84 @@ func buildCrashReport(app string, state *os.ProcessState, waitErr error) types.C
 }
 
 func sendCrashReport(report types.CrashReport) {
-	conn, err := vsock.Dial(types.ProxyParentCID, types.CrashReportPort, nil)
+	// One budget for the whole exchange. The supervisor is holding the enclave VM
+	// open across all of it, so a host that misbehaves in any way delays the
+	// enclave's restart by at most this long.
+	deadline := time.Now().Add(crashReportTimeout)
+
+	conn, err := dialCrashReport(time.Until(deadline))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "supervisor: cannot dial host for crash report: %v\n", err)
 		return
 	}
 	defer conn.Close() //nolint:errcheck // best-effort cleanup
 
-	if err := conn.SetDeadline(time.Now().Add(crashReportTimeout)); err != nil {
-		fmt.Fprintf(os.Stderr, "supervisor: cannot set crash report deadline: %v\n", err)
-		return
+	if err := writeCrashReport(conn, report, deadline); err != nil {
+		fmt.Fprintf(os.Stderr, "supervisor: %v\n", err)
+	}
+}
+
+// dialCrashReport connects to the host listener, bounded by timeout.
+//
+// vsock.Dial carries no deadline of its own and SetDeadline cannot be applied
+// until it returns, so connect() to a host that is listening but not accepting
+// would block indefinitely — keeping a dead enclave alive rather than letting it
+// restart. Mirrors the bounded-dial pattern in nitro/proxy-client.
+func dialCrashReport(timeout time.Duration) (net.Conn, error) {
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	resultCh := make(chan dialResult, 1)
+
+	go func() {
+		conn, err := dialHost()
+		resultCh <- dialResult{conn: conn, err: err}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case result := <-resultCh:
+		return result.conn, result.err
+	case <-timer.C:
+		// Abandon the dial, closing the connection if it lands later so the
+		// goroutine does not leave a socket open behind us.
+		go func() {
+			if result := <-resultCh; result.conn != nil {
+				_ = result.conn.Close()
+			}
+		}()
+		return nil, fmt.Errorf("dial timed out after %s", timeout)
+	}
+}
+
+// writeCrashReport sends the report and blocks until the host acknowledges it.
+//
+// Waiting for the ACK is the delivery guarantee. Encode returning nil proves
+// only that the bytes reached the local socket buffer; once this process exits,
+// the init that forked it reboots and the VM — along with any unread data still
+// in flight — is destroyed. Returning only after the host has confirmed it
+// logged the report keeps the enclave alive across that window.
+//
+// deadline is the caller's overall budget, shared with the dial, so the total
+// hold on the VM stays bounded however the host misbehaves.
+func writeCrashReport(conn net.Conn, report types.CrashReport, deadline time.Time) error {
+	if err := conn.SetDeadline(deadline); err != nil {
+		return fmt.Errorf("cannot set crash report deadline: %w", err)
 	}
 	if err := json.NewEncoder(conn).Encode(report); err != nil {
-		fmt.Fprintf(os.Stderr, "supervisor: cannot send crash report: %v\n", err)
+		return fmt.Errorf("cannot send crash report: %w", err)
 	}
+
+	ack := make([]byte, len(types.CrashReportAck))
+	if _, err := io.ReadFull(conn, ack); err != nil {
+		return fmt.Errorf("crash report not acknowledged: %w", err)
+	}
+	if string(ack) != types.CrashReportAck {
+		return fmt.Errorf("unexpected crash report acknowledgement %q", ack)
+	}
+
+	return nil
 }

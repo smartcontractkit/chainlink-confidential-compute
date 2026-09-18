@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -28,7 +29,16 @@ func TestHandleCrashReport_LogsTheReport(t *testing.T) {
 		Signal:   "killed",
 		Status:   "signal: killed",
 	}
-	go func() { _ = json.NewEncoder(client).Encode(report) }()
+	ack := make(chan string, 1)
+	go func() {
+		_ = json.NewEncoder(client).Encode(report)
+		buf := make([]byte, len(types.CrashReportAck))
+		if _, err := io.ReadFull(client, buf); err != nil {
+			ack <- ""
+			return
+		}
+		ack <- string(buf)
+	}()
 
 	handleCrashReport(server, lggr)
 
@@ -41,6 +51,14 @@ func TestHandleCrashReport_LogsTheReport(t *testing.T) {
 	assert.Equal(t, "killed", fields["signal"])
 	assert.Equal(t, "signal: killed", fields["status"])
 	assert.NotContains(t, fields, "stderrTail", "stderr must not cross the trust boundary")
+
+	// The supervisor is holding the enclave VM open until this arrives.
+	select {
+	case got := <-ack:
+		assert.Equal(t, types.CrashReportAck, got)
+	case <-time.After(10 * time.Second):
+		t.Fatal("crash report was never acknowledged")
+	}
 }
 
 func TestHandleCrashReport_MalformedPayload(t *testing.T) {

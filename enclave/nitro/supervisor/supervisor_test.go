@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -168,4 +170,147 @@ func TestSupervise_EndToEnd(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The ACK is the delivery guarantee: the supervisor must not return — and so
+// must not let the VM tear down — until the host confirms it logged the report.
+func TestWriteCrashReport_WaitsForAck(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+
+	report := types.CrashReport{App: "enclave-app", ExitCode: 137, Signal: "killed"}
+
+	// Host side: decode, then hold off the ACK briefly so a send that ignored it
+	// would finish early and fail the ordering assertion below.
+	acked := make(chan struct{})
+	go func() {
+		var got types.CrashReport
+		if err := json.NewDecoder(server).Decode(&got); err != nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		close(acked)
+		_, _ = io.WriteString(server, types.CrashReportAck)
+	}()
+
+	require.NoError(t, writeCrashReport(client, report, time.Now().Add(crashReportTimeout)))
+
+	select {
+	case <-acked:
+	default:
+		t.Fatal("writeCrashReport returned before the host acknowledged")
+	}
+}
+
+func TestWriteCrashReport_ErrorsWhenAckNeverArrives(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	// Host reads the report, then closes without acknowledging.
+	go func() {
+		var got types.CrashReport
+		_ = json.NewDecoder(server).Decode(&got)
+		_ = server.Close()
+	}()
+
+	err := writeCrashReport(client, types.CrashReport{App: "enclave-app"}, time.Now().Add(crashReportTimeout))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not acknowledged")
+}
+
+// A wrong token means port 5002 is answering with something other than the host
+// listener, which should be reported rather than treated as success.
+func TestWriteCrashReport_RejectsUnexpectedAck(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+
+	go func() {
+		var got types.CrashReport
+		if err := json.NewDecoder(server).Decode(&got); err != nil {
+			return
+		}
+		_, _ = io.WriteString(server, "nope")
+	}()
+
+	err := writeCrashReport(client, types.CrashReport{App: "enclave-app"}, time.Now().Add(crashReportTimeout))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unexpected crash report acknowledgement")
+}
+
+// A host that is listening but never accepting must not hold the VM open:
+// vsock.Dial carries no deadline of its own, so dialCrashReport imposes one.
+func TestDialCrashReport_TimesOut(t *testing.T) {
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+	withDialHost(t, func() (net.Conn, error) {
+		<-blocked
+		return nil, errors.New("unreachable")
+	})
+
+	start := time.Now()
+	conn, err := dialCrashReport(50 * time.Millisecond)
+
+	require.Error(t, err)
+	assert.Nil(t, conn)
+	assert.Contains(t, err.Error(), "timed out")
+	assert.Less(t, time.Since(start), 5*time.Second, "dial must not block past its timeout")
+}
+
+// A connection that lands after the timeout is abandoned, and must be closed
+// rather than left open behind a process that is about to exit.
+func TestDialCrashReport_ClosesAbandonedConnection(t *testing.T) {
+	late := make(chan struct{})
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = server.Close() })
+
+	withDialHost(t, func() (net.Conn, error) {
+		<-late
+		return client, nil
+	})
+
+	_, err := dialCrashReport(20 * time.Millisecond)
+	require.Error(t, err)
+
+	close(late)
+
+	// The abandoned connection is closed asynchronously; reading the far end
+	// returns once it is.
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 1)
+		_, readErr := server.Read(buf)
+		done <- readErr
+	}()
+
+	select {
+	case readErr := <-done:
+		require.Error(t, readErr, "abandoned connection should have been closed")
+	case <-time.After(10 * time.Second):
+		t.Fatal("abandoned connection was never closed")
+	}
+}
+
+func TestDialCrashReport_ReturnsConnection(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	withDialHost(t, func() (net.Conn, error) { return client, nil })
+
+	conn, err := dialCrashReport(time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, client, conn)
+}
+
+// withDialHost swaps the host dialer for the duration of a test. Tests using it
+// cannot run in parallel, since dialHost is package state.
+func withDialHost(t *testing.T, dial func() (net.Conn, error)) {
+	t.Helper()
+	orig := dialHost
+	dialHost = dial
+	t.Cleanup(func() { dialHost = orig })
 }

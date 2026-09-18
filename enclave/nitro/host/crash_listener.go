@@ -19,6 +19,10 @@ const (
 	// crashReportMaxBytes caps a single report. The payload is exit status only,
 	// so anything beyond a few hundred bytes is a misbehaving peer.
 	crashReportMaxBytes = 4 << 10
+
+	// crashReportAckTimeout bounds the acknowledgement write. The peer is an
+	// enclave waiting to die, so it will not linger.
+	crashReportAckTimeout = 5 * time.Second
 )
 
 // serveCrashReports accepts enclave post-mortems until the listener is closed.
@@ -64,4 +68,16 @@ func handleCrashReport(conn net.Conn, lggr logger.Logger) {
 		"status", report.Status,
 		"waitError", report.Error,
 	)
+
+	// Acknowledged only after logging, never before: the supervisor is holding
+	// the enclave VM open waiting for this, so an ACK is a promise the report
+	// survived. A failure here means the enclave may tear down before it knows,
+	// but the report itself is already recorded.
+	if err := conn.SetWriteDeadline(time.Now().Add(crashReportAckTimeout)); err != nil {
+		lggr.Warnw("failed to set crash report ack deadline", "error", err)
+		return
+	}
+	if _, err := io.WriteString(conn, types.CrashReportAck); err != nil {
+		lggr.Warnw("failed to acknowledge enclave crash report", "error", err)
+	}
 }
