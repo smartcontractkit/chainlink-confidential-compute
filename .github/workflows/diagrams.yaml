@@ -11,12 +11,15 @@ name: Diagrams
 #
 # The commit is made through the contents API so it is signed by GitHub. Because
 # it is authored with GITHUB_TOKEN it does not re-trigger workflows, so the new
-# head commit will not have the rest of the PR's checks re-run against it. Add
-# the `skip-diagrams` label to a PR to opt out.
+# head commit will not have the rest of the PR's checks re-run against it.
+#
+# This workflow is opt-in per PR: add the `generate-diagrams` label. `labeled`
+# is in the trigger list so applying the label starts a run straight away,
+# rather than waiting for the next push to the branch.
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       force:
@@ -38,11 +41,12 @@ concurrency:
 jobs:
   diagrams:
     runs-on: ubuntu-latest
-    # Fork PRs cannot read the model secrets and must not be able to push here.
+    # Runs only on PRs carrying the opt-in label. Fork PRs cannot read the
+    # model secrets and must not be able to push here.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
-       !contains(github.event.pull_request.labels.*.name, 'skip-diagrams'))
+       contains(github.event.pull_request.labels.*.name, 'generate-diagrams'))
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
