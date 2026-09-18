@@ -1,13 +1,12 @@
 # Enclave Architecture
 
-<!-- diagram:BEGIN id=enclave-architecture digest=f0b1dc7ca2c3d9cd -->
+<!-- diagram:BEGIN id=enclave-architecture digest=74c96c1194555362 -->
 <!-- Generated from the sources listed in .github/diagrams.yaml. Do not edit by hand; edit the manifest instructions instead. -->
 
 ```mermaid
 flowchart TB
   EXT["External callers - DON signer nodes"]
   CHAIN["CapabilitiesRegistry - on-chain DON membership"]
-  NET["Internet"]
 
   subgraph HOST["HOST - untrusted - parent instance"]
     MAIN["hostServer - terminates inbound HTTP - port 8080"]
@@ -15,11 +14,12 @@ flowchart TB
     TRACKER["configTracker - on-chain config tracker"]
     PROXY["proxyserver - SOCKS5 server - AF_VSOCK CIDAny types.ProxyPort"]
     RULES["ruleSet.Allow - blocks local and loopback - public profile safeURL blocklist"]
+    CRASHH["serveCrashReports - AF_VSOCK CIDAny types.CrashReportPort"]
   end
 
   subgraph ENCLAVE["NITRO ENCLAVE - trusted - EIF image"]
     START["StartNitroEnclave - VerifyEntropySource, kvm-clock, chrony PHC"]
-    NSM["NSM - Nitro Security Module"]
+    NSM["NSM - Nitro Security Module session"]
     ENT["nsm-hwrng - kernel entropy pool"]
     SRV["enclaveServer - HTTP on AF_VSOCK port 5000"]
 
@@ -31,32 +31,25 @@ flowchart TB
       R6["GET /memory"]
     end
 
-    subgraph ENCLAVE["NITRO ENCLAVE - trust boundary"]
-        START["StartNitroEnclave"]
-        NSM["Nitro Security Module session"]
-        ENT["nsm-hwrng feeding kernel entropy pool"]
-        SRV["enclaveServer - http.Serve on AF_VSOCK 5000"]
-        ROUTES["routes /publicKeys /requests /config /settings /memory"]
-        ATT["attestor.Attestor - nitroAttestor"]
-        KC["keychain.Keychain - boxKeychain"]
-        COMB["combiner.Combiner - tdh2EasyCombiner"]
-        VER["SignatureVerifier - ed25519SignatureVerifier"]
-        EMIT["types.Emitter - ResponseEmitter or noOpEmitter"]
-        APP["types.EnclaveApp"]
-        DIALER["proxyclient.Dialer - SOCKS5 profile credentials"]
-        POLICY["policy.validateAuthority - ports 80 443 or configured endpoints"]
-        CRASHE["enclave supervisor post-mortems"]
+    ATT["attestor.Attestor - nitroAttestor"]
+    KC["keychain.Keychain - boxKeychain"]
+    COMB["combiner.Combiner - tdh2EasyCombiner"]
+    VER["SignatureVerifier - ed25519SignatureVerifier"]
+    EMIT["types.Emitter - ResponseEmitter or noOpEmitter"]
+    APP["types.EnclaveApp"]
+    SUP["enclave supervisor - post-mortem crash reports"]
 
-        subgraph APPS["EnclaveApp payloads - one per EIF"]
-            ECHO["confidential-echo"]
-            HTTPA["confidential-http"]
-            WF["confidential-workflows"]
-        end
+    subgraph APPS["EnclaveApp payloads - one per EIF"]
+      ECHO["confidential-echo"]
+      HTTPAPP["confidential-http"]
+      WFAPP["confidential-workflows"]
     end
 
     DIAL["proxyclient.Dialer - SOCKS5 dialer"]
     EPOL["policy.validateAuthority - ports 80 or 443, or configured endpoints only"]
   end
+
+  NET["Internet"]
 
   EXT -->|"signed compute requests - verified and batched to f+1 or 2f+1 quorum"| MAIN
   EXT -->|"PATCH /config signed votes"| MAIN
@@ -64,6 +57,7 @@ flowchart TB
   TRACKER -->|"POST /config"| CFG
   MAIN ==>|"HTTP over AF_VSOCK - vsock.Dial to CID 16 port 5000 - host initiates"| SRV
   CFG ==>|"POST /config and /settings - AF_VSOCK port 5000 - host initiates"| SRV
+  SUP ==>|"post-mortems - AF_VSOCK types.CrashReportPort - enclave initiates"| CRASHH
 
   START -->|"NewEnclaveServer and vsock.Listen"| SRV
   START -->|"VerifyEntropySource"| ENT
