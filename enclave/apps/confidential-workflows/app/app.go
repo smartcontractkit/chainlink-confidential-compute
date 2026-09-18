@@ -405,7 +405,10 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		}
 	}
 
-	helper = host.NewRestrictedExecutionHelper(helper, execution.Restrictions)
+	helper = newPanicSafeExecutionHelper(
+		host.NewRestrictedExecutionHelper(helper, execution.Restrictions),
+		a.logger,
+	)
 
 	// Execute the WASM binary with the deserialized ExecuteRequest.
 	// The fetched binary is brotli-compressed.
