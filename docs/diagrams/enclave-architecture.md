@@ -1,80 +1,66 @@
 # Enclave Architecture
 
-<!-- diagram:BEGIN id=enclave-architecture digest=68bcfaa0927e4e77 -->
+<!-- diagram:BEGIN id=enclave-architecture digest=f0b1dc7ca2c3d9cd -->
 <!-- Generated from the sources listed in .github/diagrams.yaml. Do not edit by hand; edit the manifest instructions instead. -->
 
 ```mermaid
-flowchart TB
-  EXT["External callers - DON signer nodes"]
-  CHAIN["CapabilitiesRegistry - on-chain DON membership"]
-  NET["Internet"]
-
-  subgraph HOST["HOST - untrusted - parent instance"]
-    MAIN["hostServer - terminates inbound HTTP - port 8080"]
-    CFG["config server - 127.0.0.1 port 8081 - localhost only"]
-    TRACKER["configTracker - on-chain config tracker"]
-    PROXY["proxyserver - SOCKS5 server - AF_VSOCK CIDAny types.ProxyPort"]
-    RULES["ruleSet.Allow - blocks local and loopback - public profile safeURL blocklist"]
-  end
-
-  subgraph ENCLAVE["NITRO ENCLAVE - trusted - EIF image"]
-    START["StartNitroEnclave - VerifyEntropySource, kvm-clock, chrony PHC"]
-    NSM["NSM - Nitro Security Module"]
-    ENT["nsm-hwrng - kernel entropy pool"]
-    SRV["enclaveServer - HTTP on AF_VSOCK port 5000"]
-
-    subgraph ROUTES["enclaveServer routes"]
-      R1["GET /publicKeys"]
-      R2["POST and PATCH /config"]
-      R4["POST /settings"]
-      R5["POST /requests"]
-      R6["GET /memory"]
+flowchart LR
+    subgraph ENCLAVE["Nitro enclave - trusted execution"]
+        direction TB
+        START["StartNitroEnclave - VerifyEntropySource, kvm-clock, chrony PHC checks"]
+        ENT["kernel entropy pool - rng_current nsm-hwrng"]
+        NSM["NSM - Nitro Security Module"]
+        SRV["enclaveServer - HTTP over vsock"]
+        ROUTES["mux routes - GET /publicKeys, POST and PATCH /config, POST /settings, POST /requests, GET /memory"]
+        ATT["Attestor - nitroAttestor over NSM session"]
+        KC["Keychain - boxKeychain NaCl box keypairs"]
+        COMB["Combiner - tdh2EasyCombiner TDH2 shares"]
+        VER["SignatureVerifier - ed25519SignatureVerifier"]
+        EMIT["Emitter - ResponseEmitter metrics in response payload"]
+        DIAL["proxyclient.Dialer - SOCKS5 over AF_VSOCK, enclave side validateAuthority"]
+        subgraph APPS["types.EnclaveApp - interchangeable payloads"]
+            APP["types.EnclaveApp"]
+            ECHO["echoEnclaveApp - no network access"]
+            HTTPAPP["httpEnclaveApp - outbound HTTP with injected secrets"]
+            WF["confidentialWorkflowsApp - fetches and runs workflow binaries"]
+        end
     end
 
-    ATT["attestor.Attestor - nitroAttestor via NSM session"]
-    KC["keychain.Keychain - boxKeychain NaCl box keypairs"]
-    COMB["combiner.Combiner - tdh2EasyCombiner"]
-    VER["SignatureVerifier - ed25519SignatureVerifier"]
-    EMIT["types.Emitter - ResponseEmitter per request"]
-
-    subgraph APPS["types.EnclaveApp - interchangeable payloads"]
-      APP["types.EnclaveApp interface"]
-      ECHO["echoEnclaveApp - confidential-echo - no network access"]
-      HTTPAPP["httpEnclaveApp - confidential-http"]
-      WFAPP["confidentialWorkflowsApp - confidential-workflows"]
+    subgraph HOST["Parent instance host - untrusted"]
+        direction TB
+        MAIN["hostServer main listener :8080 - terminates inbound HTTP, quorum batching"]
+        CFG["hostServer config listener 127.0.0.1:8081 - localhost only"]
+        PROXY["proxyserver - SOCKS5 listener on vsock CIDAny types.ProxyPort"]
+        RULES["ruleSet.Allow - policy check, profiles public, configured, test"]
+        TRACKER["configTracker - watches DON membership"]
     end
 
-    DIAL["proxyclient.Dialer - SOCKS5 dialer"]
-    EPOL["policy.validateAuthority - ports 80 or 443, or configured endpoints only"]
-  end
+    CHAIN["CapabilitiesRegistry contract - on chain"]
+    NET["Internet"]
 
-  EXT -->|"signed compute requests - verified and batched to f+1 or 2f+1 quorum"| MAIN
-  TRACKER -->|"polls GetDON"| CHAIN
-  TRACKER -->|"POST /config"| CFG
-  MAIN ==>|"HTTP over AF_VSOCK - vsock.Dial to CID 16 port 5000 - host initiates"| SRV
-  CFG ==>|"POST /config and /settings - AF_VSOCK port 5000 - host initiates"| SRV
-
-  START -->|"NewEnclaveServer and vsock.Listen"| SRV
-  START -->|"VerifyEntropySource"| ENT
-  NSM -->|"registers nsm-hwrng"| ENT
-  ATT -->|"CreateAttestation"| NSM
-  SRV -->|"serves"| ROUTES
-  SRV -->|"attests responses"| ATT
-  SRV -->|"ephemeral keypairs"| KC
-  SRV -->|"combines TDH2 shares"| COMB
-  SRV -->|"verifies signer signatures"| VER
-  SRV -->|"collects metric events"| EMIT
-  R5 -->|"app.Execute with secrets"| APP
-  R4 -->|"InjectSettings - opaque JSON"| APP
-  APP --> ECHO
-  APP --> HTTPAPP
-  APP --> WFAPP
-  HTTPAPP -->|"outbound HTTP"| DIAL
-  WFAPP -->|"binary fetch and gateway dispatch"| DIAL
-  DIAL -->|"validateAuthority"| EPOL
-  DIAL ==>|"SOCKS5 over AF_VSOCK types.ProxyPort - enclave initiates"| PROXY
-  PROXY --> RULES
-  RULES -->|"dials destination"| NET
+    START -->|"VerifyEntropySource"| ENT
+    NSM -->|"registers nsm-hwrng"| ENT
+    START -->|"NewEnclaveServer injects app and services, vsock.Listen"| SRV
+    SRV -->|"Handler mux"| ROUTES
+    SRV --> ATT
+    SRV --> KC
+    SRV --> COMB
+    SRV --> VER
+    SRV --> EMIT
+    ATT -->|"CreateAttestation"| NSM
+    SRV -->|"app.Execute, InjectSettings, OnConfigUpdate"| APP
+    APP --> ECHO
+    APP --> HTTPAPP
+    APP --> WF
+    HTTPAPP -->|"outbound HTTP"| DIAL
+    WF -->|"httpfetch, storage fetcher, remote dispatcher"| DIAL
+    DIAL -->|"AF_VSOCK dial parent CID types.ProxyPort - enclave initiates"| PROXY
+    PROXY -->|"Allow"| RULES
+    RULES -->|"net.Dialer dials allowed destination"| NET
+    MAIN -->|"AF_VSOCK CID 16 port 5000 - host initiates - /publicKeys, /requests, PATCH /config"| SRV
+    CFG -->|"AF_VSOCK CID 16 port 5000 - host initiates - POST /config, POST /settings"| SRV
+    TRACKER -->|"GetDON"| CHAIN
+    TRACKER -->|"POST /config over localhost"| CFG
 ```
 
 <!-- diagram:END id=enclave-architecture -->
