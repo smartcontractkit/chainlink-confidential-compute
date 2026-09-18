@@ -70,13 +70,30 @@ if [ "${ALLOW_RECONFIG}" = "true" ]; then APP_ARGS="${APP_ARGS} --allow-reconfig
 
 PIDS=()
 
-echo "Starting fake enclave app (${APP}) with args: ${APP_ARGS}"
-# Run from the app directory so `go run` resolves imports against the app's own
-# module. Some apps (e.g. confidential-workflows) are separate Go modules, so
-# `go run <path>/main.go` from the repo root would resolve against the root
-# module and fail to find the app's packages. cd-ing in handles both layouts:
-# apps that live in the root module and apps with their own go.mod.
-( cd "${ENCLAVE_PATH}" && exec go run ./environments/fake/ ${APP_ARGS} ) &
+# Build the app to a binary rather than `go run`-ing it, so the supervisor
+# supervises the app itself instead of the `go run` wrapper (which would mask the
+# app's exit status and signals behind its own).
+#
+# Build from the app directory so imports resolve against the app's own module.
+# Some apps (e.g. confidential-workflows) are separate Go modules, so building
+# from the repo root would resolve against the root module and fail to find the
+# app's packages. -C handles both layouts.
+APP_BINARY="${ENCLAVE_PATH}/fake-enclave-app-cid${ENCLAVE_CID}"
+echo "Building fake enclave app (${APP})..."
+go build -C "${ENCLAVE_PATH}" -o "${APP_BINARY}" ./environments/fake/
+chmod +x "${APP_BINARY}"
+
+# Run the app under the supervisor, mirroring the real EIF's /start.sh. Without
+# this the fake environment would not exercise the supervisor or the crash
+# reporting path at all, so a test passing here would say nothing about the
+# behaviour that only exists in the real enclave.
+SUPERVISOR_BINARY="${ENCLAVE_PATH}/enclave-supervisor-cid${ENCLAVE_CID}"
+echo "Building enclave supervisor..."
+go build -o "${SUPERVISOR_BINARY}" ./enclave/nitro/supervisor/
+chmod +x "${SUPERVISOR_BINARY}"
+
+echo "Starting fake enclave app (${APP}) under supervisor with args: ${APP_ARGS}"
+"${SUPERVISOR_BINARY}" "${APP_BINARY}" ${APP_ARGS} &
 PIDS+=($!)
 
 # Clean up every child process when this script exits.
@@ -109,11 +126,18 @@ go build -C ./enclave/nitro/host -o "${HOST_BINARY}" .
 chmod +x "${HOST_BINARY}"
 
 echo "Starting fake host-server on port ${HTTP_PORT}..."
+# Mirror the real script and send the host's own output to a file, so tests can
+# assert on what it logged (e.g. an enclave crash report). Per-CID so concurrent
+# fake enclaves do not clobber each other.
+# Redirect rather than pipe through tee: $! after a pipeline is the PID of the
+# last element, so piping would record tee's PID here and the EXIT trap would
+# leave the host server alive holding VSOCK 5001. Matches the real script.
+HOST_LOGFILE="${ENCLAVE_PATH}/host-server-cid${ENCLAVE_CID}.log"
 "${HOST_BINARY}" \
     --port="${HTTP_PORT}" \
     --config-port="${CONFIG_HTTP_PORT}" \
     --enclave-cid="${ENCLAVE_CID}" \
-    --enclave-port="${ENCLAVE_VSOCK_PORT}" &
+    --enclave-port="${ENCLAVE_VSOCK_PORT}" > "${HOST_LOGFILE}" 2>&1 &
 HOST_PID=$!
 PIDS+=("${HOST_PID}")
 

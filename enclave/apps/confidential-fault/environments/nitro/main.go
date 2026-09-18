@@ -1,19 +1,19 @@
+// Command main runs the test-only confidential-fault enclave app, which fails on
+// demand so the supervisor and crash-reporting path can be exercised against a
+// real enclave. Never built or deployed outside tests.
 package main
 
 import (
-	"crypto/tls"
 	"flag"
 	"log"
 	"time"
 
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/app"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-fault/app"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
-	proxyclient "github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
-	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 )
 
 var (
@@ -41,15 +41,9 @@ func main() {
 		logger.Fatalf("Failed to open Nitro attestor: %v", err)
 	}
 	defer cleanup()
-	outboundDialer := proxyclient.NewWorkflowControlledDialer(types.ProxyParentCID, types.ProxyPort)
 
 	err = nitro.StartNitroEnclave(
-		app.NewHTTPEnclaveApp(
-			util.NewRestrictedHTTPClientWithDialer(outboundDialer.DialContext),
-			app.WithTLSClientFactory(func(config *tls.Config) types.HTTPClient {
-				return util.NewRestrictedHTTPClientWithTLSAndDialer(config, outboundDialer.DialContext)
-			}),
-		),
+		app.NewFaultEnclaveApp(),
 		att,
 		keychain.NewBoxKeychain(logger, rotationOverride, expirationOverride, nil),
 		combiner.NewTDH2EasyCombiner(),

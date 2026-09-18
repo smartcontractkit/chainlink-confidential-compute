@@ -6,6 +6,10 @@ const (
 	AppIDConfidentialHTTP      = "confidential-http@1.0.0-alpha"
 	AppIDConfidentialWorkflows = "confidential-workflows@1.0.0-alpha"
 	AppIDConfidentialEcho      = "confidential-echo@1.0.0-alpha"
+	// AppIDConfidentialFault is a test-only fixture app that fails on demand, so
+	// the enclave supervisor and crash-reporting path can be exercised against a
+	// real enclave. It is never built or deployed outside tests.
+	AppIDConfidentialFault = "confidential-fault@1.0.0-alpha"
 )
 
 // Relevant constants for Confidential Compute, beneficial to be examined next to each other to understand end-to-end behavior.
@@ -127,7 +131,7 @@ const (
 	// The enclave app sets this on the ExecuteError when the guest hits the
 	// execution-timeout context; the executor matches it to classify the failure
 	// as a user error (workflow ran over budget) rather than infrastructure.
-	ErrWasmExecutionTimeout     = "wasm execution deadline exceeded"
+	ErrWasmExecutionTimeout = "wasm execution deadline exceeded"
 
 	// ErrVaultSystemErrorFallback is the literal string the chainlink core vault plugin returns
 	// in SecretResponse.Error for any non-user-classified failure. See userFacingError() in
@@ -148,8 +152,12 @@ const ServiceConfidentialComputeVersionLegacy = "0.0.6"
 type ProxyProfile string
 
 const (
-	ProxyParentCID         uint32       = 3
-	ProxyPort              uint32       = 5001
+	ProxyParentCID uint32 = 3
+	ProxyPort      uint32 = 5001
+	// CrashReportPort is the host-side vsock port the enclave supervisor dials to
+	// deliver a post-mortem when the enclave application exits. Distinct from
+	// ProxyPort so a crash report never contends with outbound request brokering.
+	CrashReportPort        uint32       = 5002
 	ProxyProfilePublic     ProxyProfile = "public"
 	ProxyProfileConfigured ProxyProfile = "configured"
 	ProxyProfileTest       ProxyProfile = "test"

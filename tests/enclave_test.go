@@ -14,10 +14,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
+	faultapp "github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-fault/app"
 	enclavetypes "github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
@@ -210,10 +212,16 @@ func ExecuteEnclaveAppE2E(
 		context.Background(), nodes, enclaveIDs, reqID, publicData, ciphertexts, secretNames,
 		&tdh2KeyStorage, &signingKeyStorage, enclaveKeys, httpClient, appID, version,
 	)
-	require.NoError(t, err)
+	if err != nil {
+		// Returned rather than fatal: a caller may be deliberately provoking a
+		// failed execution (see the fault-injection tests).
+		return nil, err
+	}
 
 	execResp, err := validateAndCoalesceResponses(allResponses, len(signingKeyStorage.PublicKeys), len(nodes))
-	require.NoError(t, err)
+	if err != nil {
+		return nil, err
+	}
 
 	return execResp, nil
 }
@@ -669,4 +677,162 @@ func TestConfidentialHttpEnclave(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEnclaveSupervisorReportsCrashE2E drives the enclave supervisor through a
+// real enclave: it asks confidential-fault to fail in a given way and asserts
+// what the host observed.
+//
+// It goes through SetupEnclaveApp deliberately, so the same test exercises the
+// fake local processes by default and a real AWS Nitro enclave when ENCLAVE_TYPE
+// selects one. Only the real path covers what matters most — the production
+// Dockerfile's /start.sh handing off to the supervisor, a genuine vsock round
+// trip, and the enclave VM staying alive long enough to deliver the report
+// before AWS's init reboots it.
+//
+// A case with no wantStatus is a survival case: the enclave must still be
+// serving afterwards and no crash report may appear. Those are the control for
+// the rest — without them a supervisor that reported on every request would
+// still pass.
+//
+// Each fatal fault kills the enclave, so every case needs its own enclave and
+// the test is correspondingly slow.
+func TestEnclaveSupervisorReportsCrashE2E(t *testing.T) {
+	const enclaveAppName = "confidential-fault"
+
+	for name, tc := range map[string]struct {
+		fault string
+		// wantStatus is the os.ProcessState rendering the host should log. Empty
+		// means the enclave is expected to survive the fault.
+		wantStatus string
+		wantSignal string
+	}{
+		"deliberate exit": {
+			fault:      faultapp.FaultExit,
+			wantStatus: "exit status 9",
+		},
+		"uncatchable signal": {
+			// The shape of an OOM kill.
+			fault:      faultapp.FaultKill,
+			wantStatus: "signal: " + syscall.SIGKILL.String(),
+			wantSignal: syscall.SIGKILL.String(),
+		},
+		"runtime fatal error": {
+			// The shape of a SIGSEGV inside cgo: the Go runtime intercepts the
+			// signal, prints a traceback and exits 2, so no signal reaches the
+			// wait status.
+			fault:      faultapp.FaultRuntimeSignal,
+			wantStatus: "exit status 2",
+		},
+		"panic on a spawned goroutine": {
+			// Invisible to net/http's recover, so it reaches the runtime.
+			fault:      faultapp.FaultGoroutinePanic,
+			wantStatus: "exit status 2",
+		},
+		"recovered handler panic": {
+			// net/http recovers a panic on the request goroutine and closes just
+			// that connection, so the enclave lives. The execute call fails at
+			// the transport level, which is the expected outcome rather than a
+			// test failure.
+			fault: faultapp.FaultHandlerPanic,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cleanup := SetupEnclaveApp(t, enclaveAppName)
+			defer cleanup()
+
+			logPath := hostServerLogPath(t, enclaveAppName)
+
+			exec := EnclaveExecution{
+				AppName:        enclaveAppName,
+				AppID:          types.AppIDConfidentialFault,
+				PublicData:     []byte(tc.fault),
+				Secrets:        [][]byte{[]byte("unused")},
+				SecretNames:    []string{"unused"},
+				Threshold:      2,
+				FaultTolerance: 1,
+				NumParties:     3,
+			}
+
+			// The enclave may die, or drop the connection, moments after being
+			// asked to fail, so a transport error here is an expected outcome.
+			if _, err := ExecuteEnclaveAppE2E(t, exec); err != nil {
+				t.Logf("execute returned %v (expected when the fault interrupts the response)", err)
+			}
+
+			if tc.wantStatus == "" {
+				// Survival case: the enclave must still serve, and must not have
+				// reported a crash.
+				exec.PublicData = []byte(faultapp.FaultNone)
+				resp, err := ExecuteEnclaveAppE2E(t, exec)
+				require.NoError(t, err, "enclave should survive fault %q", tc.fault)
+				assert.Equal(t, faultapp.FaultNone, string(resp.Output))
+
+				if data, readErr := os.ReadFile(logPath); readErr == nil {
+					assert.NotContains(t, string(data), "enclave application exited",
+						"fault %q must not produce a crash report", tc.fault)
+				}
+				return
+			}
+
+			report := requireCrashReportLogged(t, logPath)
+			assert.Contains(t, report, `"status":"`+tc.wantStatus+`"`)
+			if tc.wantSignal != "" {
+				assert.Contains(t, report, `"signal":"`+tc.wantSignal+`"`)
+			}
+			// Recorded by the kernel at termination, so it survives a child that
+			// nothing had a chance to poll.
+			assert.Regexp(t, `"peakRSSBytes":[1-9]`, report)
+		})
+	}
+}
+
+// hostServerLogPath returns the file the host server's own output is written to.
+// The real and fake launch scripts use different names, and the file may not
+// exist yet when this is called.
+func hostServerLogPath(t *testing.T, appName string) string {
+	t.Helper()
+
+	appDir := filepath.Join(findProjectRoot(t), "enclave", "apps", appName)
+	candidates := []string{
+		filepath.Join(appDir, "host-server.log"),
+		filepath.Join(appDir, fmt.Sprintf("host-server-cid%s.log", enclaveCID)),
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	// Not written yet; the real script's name is the one to poll for.
+	return candidates[0]
+}
+
+// requireCrashReportLogged polls the host log for the crash report line and
+// returns it. The enclave dies asynchronously after responding, so the report
+// lands shortly after the request completes.
+func requireCrashReportLogged(t *testing.T, logPath string) string {
+	t.Helper()
+
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, candidate := range []string{
+			logPath,
+			filepath.Join(filepath.Dir(logPath), fmt.Sprintf("host-server-cid%s.log", enclaveCID)),
+		} {
+			data, err := os.ReadFile(candidate)
+			if err != nil {
+				continue
+			}
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.Contains(line, "enclave application exited") {
+					t.Logf("crash report: %s", line)
+					return line
+				}
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	t.Fatalf("host never logged an enclave crash report (checked %s)", logPath)
+	return ""
 }
