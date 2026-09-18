@@ -34,6 +34,9 @@ func TestBuildCrashReport_SignalledChild(t *testing.T) {
 	report := buildCrashReport("enclave-app", cmd.ProcessState, waitErr)
 	assert.Equal(t, "enclave-app", report.App)
 	assert.Equal(t, syscall.SIGSEGV.String(), report.Signal)
+	// The kernel records ru_maxrss at termination, so the peak outlives the
+	// child even though nothing polled it.
+	assert.NotZero(t, report.PeakRSSBytes)
 	assert.Equal(t, 128+int(syscall.SIGSEGV), report.ExitCode)
 	// ProcessState's rendering carries the signal name, and " (core dumped)"
 	// when the kernel dumped, which the structured fields cannot express.
@@ -77,6 +80,7 @@ func TestBuildCrashReport_WaitFailure(t *testing.T) {
 	assert.Equal(t, 1, report.ExitCode)
 	assert.Equal(t, "wait blew up", report.Error)
 	assert.Empty(t, report.Status)
+	assert.Zero(t, report.PeakRSSBytes, "no process state means no rusage")
 }
 
 // The report has to survive a JSON round trip over vsock, and must not regain a
@@ -88,10 +92,11 @@ func TestCrashReport_RoundTripsOverAConnection(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
 
 	want := types.CrashReport{
-		App:      "enclave-app",
-		ExitCode: 137,
-		Signal:   "killed",
-		Status:   "signal: killed",
+		App:          "enclave-app",
+		ExitCode:     137,
+		Signal:       "killed",
+		Status:       "signal: killed",
+		PeakRSSBytes: 10 << 30,
 	}
 
 	go func() { _ = json.NewEncoder(client).Encode(want) }()
@@ -164,6 +169,7 @@ func TestSupervise_EndToEnd(t *testing.T) {
 				assert.Equal(t, tc.wantSignal, report.Signal)
 				assert.Equal(t, tc.wantCode, report.ExitCode)
 				assert.Equal(t, tc.wantStatus, report.Status)
+				assert.NotZero(t, report.PeakRSSBytes)
 				assert.Equal(t, report.ExitCode, code, "supervisor should surface the child's status")
 			default:
 				t.Fatal("supervisor produced no crash report")

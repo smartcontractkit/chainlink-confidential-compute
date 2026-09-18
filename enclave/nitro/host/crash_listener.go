@@ -67,6 +67,7 @@ func handleCrashReport(conn net.Conn, lggr logger.Logger) {
 		"signal", report.Signal,
 		"status", report.Status,
 		"waitError", report.Error,
+		"peakRSSBytes", report.PeakRSSBytes,
 	)
 
 	// Acknowledged only after logging, never before: the supervisor is holding

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -108,6 +109,8 @@ func buildCrashReport(app string, state *os.ProcessState, waitErr error) types.C
 	report.Status = state.String()
 	report.ExitCode = state.ExitCode()
 
+	report.PeakRSSBytes = peakRSSBytes(state)
+
 	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 		// ExitCode is -1 for a signalled process. Normalise to 128+signal, which
 		// is what the enclave init reports as the VM's own status.
@@ -116,6 +119,25 @@ func buildCrashReport(app string, state *os.ProcessState, waitErr error) types.C
 	}
 
 	return report
+}
+
+// peakRSSBytes returns the child's high-water resident set from its rusage.
+//
+// This is the one memory figure worth carrying across. The host's /memory poll
+// can only report a peak that some later poll observed, and an allocation burst
+// fast enough to trigger the OOM killer is never followed by one — the process
+// is already gone. The kernel records ru_maxrss at termination regardless.
+func peakRSSBytes(state *os.ProcessState) uint64 {
+	rusage, ok := state.SysUsage().(*syscall.Rusage)
+	if !ok || rusage.Maxrss <= 0 {
+		return 0
+	}
+	// ru_maxrss is kilobytes on Linux, where the enclave runs, but bytes on
+	// Darwin, where the tests do.
+	if runtime.GOOS == "darwin" {
+		return uint64(rusage.Maxrss)
+	}
+	return uint64(rusage.Maxrss) * 1024
 }
 
 func sendCrashReport(report types.CrashReport) {

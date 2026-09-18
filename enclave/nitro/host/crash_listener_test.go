@@ -24,10 +24,11 @@ func TestHandleCrashReport_LogsTheReport(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close() })
 
 	report := types.CrashReport{
-		App:      "enclave-app",
-		ExitCode: 137,
-		Signal:   "killed",
-		Status:   "signal: killed",
+		App:          "enclave-app",
+		ExitCode:     137,
+		Signal:       "killed",
+		Status:       "signal: killed",
+		PeakRSSBytes: 10 << 30,
 	}
 	ack := make(chan string, 1)
 	go func() {
@@ -50,6 +51,7 @@ func TestHandleCrashReport_LogsTheReport(t *testing.T) {
 	assert.EqualValues(t, 137, fields["exitCode"])
 	assert.Equal(t, "killed", fields["signal"])
 	assert.Equal(t, "signal: killed", fields["status"])
+	assert.EqualValues(t, uint64(10<<30), fields["peakRSSBytes"])
 	assert.NotContains(t, fields, "stderrTail", "stderr must not cross the trust boundary")
 
 	// The supervisor is holding the enclave VM open until this arrives.
