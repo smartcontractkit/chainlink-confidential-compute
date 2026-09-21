@@ -35,7 +35,7 @@ on:
 # A pull_request run has no inputs, so it falls back to these. Edit the
 # fallbacks on the branch to choose what a PR run copies.
 env:
-  TAGS: ${{ inputs.tags || 'enclave-workflows-sha-dde166e nitro-workflows-sha-dde166e' }}
+  TAGS: ${{ inputs.tags || 'enclave-workflows-sha-22dfa7b nitro-workflows-sha-22dfa7b' }}
   SOURCE_ACCOUNT: ${{ inputs.source_account || '129896631554' }}
   SOURCE_REGION: ${{ inputs.source_region || 'us-east-2' }}
   ECR_REPOSITORY: ${{ inputs.repository || 'containers/enclave' }}
