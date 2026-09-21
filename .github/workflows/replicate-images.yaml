@@ -1,0 +1,106 @@
+# Manually copy already-published enclave image tags into the accounts that are
+# missing them, for when a build lands in some registries but not others.
+name: Replicate Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: 'Tags to copy, whitespace separated (e.g. "enclave-workflows-sha-dde166e nitro-workflows-sha-dde166e")'
+        required: true
+        type: string
+      source_account:
+        description: Account that already has the images
+        required: true
+        default: "129896631554"
+        type: string
+      source_region:
+        description: Region of the source account
+        required: true
+        default: us-east-2
+        type: string
+      repository:
+        description: ECR repository holding the images
+        required: true
+        default: containers/enclave
+        type: string
+  # workflow_dispatch only registers once the file is on the default branch, so
+  # a labelled PR is the only way to run this beforehand. Mirrors the trigger
+  # that build-deploy-nitro-enclave.yaml uses for its deploy-images label.
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    branches:
+      - main
+
+# A pull_request run has no inputs, so it falls back to these. Edit the
+# fallbacks on the branch to choose what a PR run copies.
+env:
+  TAGS: ${{ inputs.tags || 'enclave-workflows-sha-22dfa7b nitro-workflows-sha-22dfa7b' }}
+  SOURCE_ACCOUNT: ${{ inputs.source_account || '129896631554' }}
+  SOURCE_REGION: ${{ inputs.source_region || 'us-east-2' }}
+  ECR_REPOSITORY: ${{ inputs.repository || 'containers/enclave' }}
+
+jobs:
+  # Matrix uses `include` as its only key so each entry is its own job. Adding a
+  # second matrix key here would collapse these into a single leg pinned to the
+  # last account, which is how the images went missing in the first place.
+  replicate:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'replicate-images')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - account: "312157985241"
+            region: "us-west-2"
+          - account: "816722353863"
+            region: "us-west-2"
+          - account: "648030273096"
+            region: "us-west-2"
+          - account: "129896631554"
+            region: "us-east-2"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
+
+      # Both registries need a docker login. The ECR tokens persist in the
+      # docker config, so the source login survives re-configuring the AWS
+      # credentials for the target account below.
+      - name: Configure AWS credentials (source)
+        uses: aws-actions/configure-aws-credentials@be2e7ad815e27b890489a89ce2717b0f9e26b56e
+        with:
+          role-to-assume: arn:aws:iam::${{ env.SOURCE_ACCOUNT }}:role/custom-ga-confidential-compute-deployer
+          aws-region: ${{ env.SOURCE_REGION }}
+          role-duration-seconds: 3600
+
+      - name: Login to source ECR
+        uses: aws-actions/amazon-ecr-login@d71acafb877819c463f4efa25c0be407a9913780
+        with:
+          registries: ${{ env.SOURCE_ACCOUNT }}
+
+      - name: Configure AWS credentials (target)
+        uses: aws-actions/configure-aws-credentials@be2e7ad815e27b890489a89ce2717b0f9e26b56e
+        with:
+          role-to-assume: arn:aws:iam::${{ matrix.account }}:role/custom-ga-confidential-compute-deployer
+          aws-region: ${{ matrix.region }}
+          role-duration-seconds: 3600
+
+      - name: Login to target ECR
+        uses: aws-actions/amazon-ecr-login@d71acafb877819c463f4efa25c0be407a9913780
+        with:
+          registries: ${{ matrix.account }}
+
+      - name: Copy tags
+        env:
+          SOURCE_REGISTRY: ${{ env.SOURCE_ACCOUNT }}.dkr.ecr.${{ env.SOURCE_REGION }}.amazonaws.com
+          TARGET_REGISTRY: ${{ matrix.account }}.dkr.ecr.${{ matrix.region }}.amazonaws.com
+          REPOSITORY: ${{ env.ECR_REPOSITORY }}
+          TAGS: ${{ env.TAGS }}
+        run: .github/scripts/copy-multiarch-image.sh
