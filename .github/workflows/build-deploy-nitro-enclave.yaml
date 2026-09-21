@@ -381,23 +381,59 @@ jobs:
     needs: build-enclave-and-plugin
     strategy:
       fail-fast: false
+      # NOTE: include entries must be fully enumerated (account x app).
+      # Mixing partial include entries with a separate `app:` key does NOT
+      # cross-product; GitHub merges them and only the last account survives.
       matrix:
         include:
           - account: "312157985241"
             region: "us-west-2"
+            app:
+              name: confidential-http
+              nitro_prefix: nitro-enclave
+              plugin_prefix: enclave
           - account: "816722353863"
             region: "us-west-2"
+            app:
+              name: confidential-http
+              nitro_prefix: nitro-enclave
+              plugin_prefix: enclave
           - account: "648030273096"
             region: "us-west-2"
+            app:
+              name: confidential-http
+              nitro_prefix: nitro-enclave
+              plugin_prefix: enclave
           - account: "129896631554"
             region: "us-east-2"
-        app:
-          - name: confidential-http
-            nitro_prefix: nitro-enclave
-            plugin_prefix: enclave
-          - name: confidential-workflows
-            nitro_prefix: nitro-workflows
-            plugin_prefix: enclave-workflows
+            app:
+              name: confidential-http
+              nitro_prefix: nitro-enclave
+              plugin_prefix: enclave
+          - account: "312157985241"
+            region: "us-west-2"
+            app:
+              name: confidential-workflows
+              nitro_prefix: nitro-workflows
+              plugin_prefix: enclave-workflows
+          - account: "816722353863"
+            region: "us-west-2"
+            app:
+              name: confidential-workflows
+              nitro_prefix: nitro-workflows
+              plugin_prefix: enclave-workflows
+          - account: "648030273096"
+            region: "us-west-2"
+            app:
+              name: confidential-workflows
+              nitro_prefix: nitro-workflows
+              plugin_prefix: enclave-workflows
+          - account: "129896631554"
+            region: "us-east-2"
+            app:
+              name: confidential-workflows
+              nitro_prefix: nitro-workflows
+              plugin_prefix: enclave-workflows
     runs-on: ubuntu-latest
     permissions:
       contents: read
