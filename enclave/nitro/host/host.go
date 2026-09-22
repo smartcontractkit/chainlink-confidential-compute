@@ -197,6 +197,24 @@ func (h *hostServer) handleGetPublicKeys(w http.ResponseWriter, r *http.Request)
 	}
 	defer util.SafeClose(resp)
 
+	// Read one extra byte to distinguish oversized responses.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, types.MaxEnclaveResponseBodyBytes+1))
+	if err != nil {
+		logger.Warnw("failed to read enclave publicKeys response", "error", err)
+		http.Error(w, "failed to read enclave publicKeys response", http.StatusBadGateway)
+		return
+	}
+	if int64(len(body)) > types.MaxEnclaveResponseBodyBytes {
+		logger.Warnw("enclave publicKeys response exceeds size limit")
+		http.Error(w, "enclave publicKeys response exceeds size limit", http.StatusBadGateway)
+		return
+	}
+	if resp.StatusCode == http.StatusOK {
+		if err := h.maybeRecoverConfig(body); err != nil {
+			logger.Warnw("failed to recover host config", "error", err)
+		}
+	}
+
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
@@ -204,7 +222,7 @@ func (h *hostServer) handleGetPublicKeys(w http.ResponseWriter, r *http.Request)
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	if _, err := io.Copy(w, resp.Body); err != nil {
+	if _, err := w.Write(body); err != nil {
 		logger.Errorw("error copying publicKeys response",
 			"event", "PUBKEYS_ERR",
 			"error", err)
@@ -215,6 +233,26 @@ func (h *hostServer) handleGetPublicKeys(w http.ResponseWriter, r *http.Request)
 		"event", "RESPONSE_OK_PUBKEYS",
 		"statusCode", resp.StatusCode,
 		"waitDuration", time.Since(arrivalTime).String())
+}
+
+// maybeRecoverConfig restores an empty config, ie. when the host container restarted but the enclave stayed alive.
+func (h *hostServer) maybeRecoverConfig(body []byte) error {
+	h.configMutex.Lock()
+	defer h.configMutex.Unlock()
+	if !h.config.IsZero() {
+		return nil
+	}
+
+	var resp types.PublicKeyResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return err
+	}
+	if resp.Config.T == 0 || len(resp.Config.Signers) == 0 || len(resp.Config.MasterPublicKey) == 0 {
+		return errors.New("incomplete enclave config")
+	}
+	h.config = resp.Config
+	h.logger.Infow("host recovered local config", "source", "publicKeys", "configHash", fmt.Sprintf("%x", resp.Config.Hash()), "T", resp.Config.T, "F", resp.Config.F)
+	return nil
 }
 
 // handleSetConfig handles POST on the /config endpoint, which sets the enclave's
@@ -467,11 +505,11 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 			"prefix", fmt.Sprintf("%x", prefix))
 	}
 
-	// If T and F are both zero, the node is not configured. Reject the request.
 	h.configMutex.RLock()
-	t := h.config.T
-	f := h.config.F
+	config := h.config.Copy()
 	h.configMutex.RUnlock()
+	t, f := config.T, config.F
+	// If T and F are both zero, the node is not configured. Reject the request.
 	if t == 0 && f == 0 {
 		reqLog.Warnw("rejecting request: not configured",
 			"event", "REJECT",
@@ -490,7 +528,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	// Validate the domain separated hash of the request.
 	var signer []byte
 	prefixedRequestHash := types.MakePeerIDSignatureDomainSeparatedPayload(util.GetConfidentialComputePayloadPrefix(), requestHash[:])
-	if signer, err = h.verifier.VerifySignature(prefixedRequestHash, execReq.Signature, h.config.Signers); err != nil {
+	if signer, err = h.verifier.VerifySignature(prefixedRequestHash, execReq.Signature, config.Signers); err != nil {
 		h.processRequestMutex.Unlock()
 		reqLog.Warnw("rejecting request: signature verification failed",
 			"event", "REJECT",
@@ -534,8 +572,8 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 			"F", f,
 			"threshold", quorumThreshold(f))
 		br = &batchRequest{
-			requests:    make([]types.SignedComputeRequest, 0, len(h.config.Signers)),
-			responseCh:  make([]chan *batchResponse, 0, len(h.config.Signers)),
+			requests:    make([]types.SignedComputeRequest, 0, len(config.Signers)),
+			responseCh:  make([]chan *batchResponse, 0, len(config.Signers)),
 			signersSeen: make(map[string]bool),
 			createdAt:   time.Now(),
 			doneCh:      make(chan struct{}),
