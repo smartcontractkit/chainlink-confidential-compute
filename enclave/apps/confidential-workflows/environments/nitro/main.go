@@ -13,7 +13,7 @@ import (
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/memlimit"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
+	proxyclient "github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
@@ -31,6 +31,7 @@ var (
 
 func main() {
 	flag.Parse()
+
 	// Two loggers because the call boundary takes two types: the keychain and
 	// the nitro starter want a stdlib *log.Logger, while the confidential-
 	// workflows app and its RemoteDispatcher consume chainlink-common's
