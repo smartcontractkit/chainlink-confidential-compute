@@ -73,7 +73,7 @@ func main() {
 		if gw.RequestTimeout <= 0 {
 			gw.RequestTimeout = *gatewayTimeout
 		}
-		return nitrotransport.Dispatcher(gw, types.EnclaveConfig{}, att, kc, appLogger)
+		return nitrotransport.Dispatcher(gw, types.EnclaveConfig{}, att, kc, appLogger, 0)
 	}
 
 	// allow-reconfig is measured into the PCR, so the host cannot enable the fixture profile.

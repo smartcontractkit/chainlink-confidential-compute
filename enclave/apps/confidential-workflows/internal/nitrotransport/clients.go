@@ -25,15 +25,13 @@ func HTTPFetcher(timeout time.Duration) *httpfetch.Fetcher {
 	return f
 }
 
-func Dispatcher(gw app.GatewayConfig, config types.EnclaveConfig, att attestor.Attestor, keys app.RequestKeyProvider, lggr logger.Logger) (app.RemoteDispatcher, error) {
-	if gw.RequestTimeout <= 0 {
-		gw.RequestTimeout = types.DefaultGatewayRequestTimeout
-	}
+func Dispatcher(gw app.GatewayConfig, config types.EnclaveConfig, att attestor.Attestor, keys app.RequestKeyProvider, lggr logger.Logger, startOffset uint64) (app.RemoteDispatcher, error) {
 	dialer, err := proxyclient.NewConfiguredEndpointDialer(types.ProxyParentCID, types.ProxyPort, gw.URL)
 	if err != nil {
 		return nil, err
 	}
-	client := gateway.NewGatewayClient(gw.URL, att, gateway.WithHTTPClient(&http.Client{
+	// The coordinator already resolved the timeout, including a disabled deadline.
+	client := gateway.NewGatewayClient(gw.URL, att, gateway.WithStartOffset(startOffset), gateway.WithHTTPClient(&http.Client{
 		Timeout:   gw.RequestTimeout,
 		Transport: &http.Transport{DialContext: dialer.DialContext, DisableKeepAlives: true, ForceAttemptHTTP2: true},
 	}))
