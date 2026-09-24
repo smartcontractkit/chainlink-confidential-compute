@@ -61,6 +61,9 @@ type enclaveMemorySnapshot struct {
 	processRSSBytes int64
 	availableBytes  int64
 	peakRSSBytes    int64
+	workersPresent  bool
+	workerRSSBytes  int64
+	workerCount     int64
 }
 
 type hostMetrics struct {
@@ -206,7 +209,7 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	}
 	goRuntimeMemory, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.memory.go_runtime",
-		metric.WithDescription("Memory mapped by the enclave Go runtime, quantized to the nearest MiB inside the enclave"),
+		metric.WithDescription("Memory mapped by the enclave coordinator Go runtime, excluding workers, quantized to the nearest MiB inside the enclave"),
 		metric.WithUnit("By"),
 		metric.WithInt64Callback(metrics.observeGoRuntimeMemory),
 	)
@@ -224,7 +227,7 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	}
 	processRSSMemory, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.memory.rss",
-		metric.WithDescription("Resident memory of the enclave process, including native Wasmtime allocations, quantized to the nearest MiB inside the enclave"),
+		metric.WithDescription("Resident memory of the enclave coordinator process, excluding workers, quantized to the nearest MiB inside the enclave"),
 		metric.WithUnit("By"),
 		metric.WithInt64Callback(metrics.observeProcessRSSMemory),
 	)
@@ -243,12 +246,22 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	}
 	peakRSSMemory, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.memory.rss_peak",
-		metric.WithDescription("High-water mark of the enclave process's resident set (/proc/self/status VmHWM), quantized to the nearest MiB inside the enclave; monotonic, so a spike between two polls stays visible"),
+		metric.WithDescription("High-water mark of the enclave coordinator's resident set (/proc/self/status VmHWM), excluding workers, quantized to the nearest MiB inside the enclave"),
 		metric.WithUnit("By"),
 		metric.WithInt64Callback(metrics.observePeakRSSMemory),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create enclave peak RSS memory gauge: %w", err)
+	}
+	if _, err = meter.Int64ObservableGauge("confidential_compute.enclave.memory.workers_rss",
+		metric.WithDescription("Sum of execution-worker RSS, quantized to the nearest MiB inside the enclave; shared pages may be counted more than once"),
+		metric.WithUnit("By"), metric.WithInt64Callback(metrics.observeWorkerRSS)); err != nil {
+		return nil, fmt.Errorf("create worker RSS gauge: %w", err)
+	}
+	if _, err = meter.Int64ObservableGauge("confidential_compute.enclave.workers.active",
+		metric.WithDescription("Active enclave execution processes at the last memory sample"),
+		metric.WithUnit("1"), metric.WithInt64Callback(metrics.observeWorkerCount)); err != nil {
+		return nil, fmt.Errorf("create worker count gauge: %w", err)
 	}
 
 	metrics.workflowActive = active
@@ -370,13 +383,33 @@ func (m *hostMetrics) observePeakRSSMemory(_ context.Context, observer metric.In
 }
 
 func (m *hostMetrics) recordEnclaveMemory(estimate types.MemoryEstimateResponse) {
-	m.memory.Store(&enclaveMemorySnapshot{
+	snapshot := &enclaveMemorySnapshot{
 		totalBytes:      mibToBytes(estimate.TotalMB),
 		goRuntimeBytes:  mibToBytes(estimate.UsedMB),
 		processRSSBytes: mibToBytes(estimate.RSSMB),
 		availableBytes:  mibToBytes(estimate.AvailableMB),
 		peakRSSBytes:    mibToBytes(estimate.PeakRSSMB),
-	})
+	}
+	if estimate.Workers != nil {
+		snapshot.workersPresent = true
+		snapshot.workerRSSBytes = mibToBytes(estimate.Workers.RSSMB)
+		snapshot.workerCount = int64(estimate.Workers.Count)
+	}
+	m.memory.Store(snapshot)
+}
+
+func (m *hostMetrics) observeWorkerRSS(_ context.Context, observer metric.Int64Observer) error {
+	if s := m.memory.Load(); s != nil && s.workersPresent {
+		observer.Observe(s.workerRSSBytes)
+	}
+	return nil
+}
+
+func (m *hostMetrics) observeWorkerCount(_ context.Context, observer metric.Int64Observer) error {
+	if s := m.memory.Load(); s != nil && s.workersPresent {
+		observer.Observe(s.workerCount)
+	}
+	return nil
 }
 
 func (m *hostMetrics) clearEnclaveMemory() {

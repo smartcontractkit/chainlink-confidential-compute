@@ -1,10 +1,44 @@
 package server
 
 import (
+	"encoding/json"
+	"net/http/httptest"
+	"os"
+	"runtime"
 	"testing"
 
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+type workerMemoryApp struct {
+	types.EnclaveApp
+	pids []int
+}
+
+func (a workerMemoryApp) WorkerPIDs() []int { return a.pids }
+
+func TestWorkerMemoryIsSeparateFromCoordinator(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("procfs is Linux-specific")
+	}
+	s := &enclaveServer{app: workerMemoryApp{pids: []int{os.Getpid()}}}
+	w := httptest.NewRecorder()
+	s.handleMemory(w, httptest.NewRequest("GET", "/memory", nil))
+	var response types.MemoryEstimateResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	require.NotNil(t, response.Workers)
+	require.Equal(t, 1, response.Workers.Count)
+	require.Positive(t, response.Workers.RSSMB)
+	require.Positive(t, response.RSSMB)
+	require.Zero(t, readWorkerRSSBytes([]int{-1, 0, 2147483647}))
+	s.app = workerMemoryApp{}
+	w = httptest.NewRecorder()
+	s.handleMemory(w, httptest.NewRequest("GET", "/memory", nil))
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	require.Equal(t, &types.WorkerMemory{}, response.Workers)
+}
 
 func TestParseSizeFieldsMemInfo(t *testing.T) {
 	const meminfo = `MemTotal:       11534336 kB

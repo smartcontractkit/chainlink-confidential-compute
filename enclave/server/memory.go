@@ -28,8 +28,7 @@ type memInfo struct {
 // together for the same reason as memInfo.
 type procStatus struct {
 	// rssBytes is the process's resident set size (VmRSS). Unlike the Go
-	// runtime's own accounting it includes native allocations such as the
-	// wasmtime WASM linear memory that dominate the footprint under load.
+	// runtime's own accounting it includes native allocations outside Go.
 	rssBytes uint64
 	// peakRSSBytes is the high-water mark of that resident set (VmHWM). Being
 	// monotonic, it still shows a spike shorter than the host's poll interval,
@@ -73,8 +72,12 @@ func readMemInfo() memInfo {
 // readProcStatus reads the enclave process's resident-set figures from
 // /proc/self/status, with the same degradation behaviour as readMemInfo.
 func readProcStatus() procStatus {
+	return readProcStatusFile("/proc/self/status")
+}
+
+func readProcStatusFile(path string) procStatus {
 	var status procStatus
-	data, err := os.ReadFile("/proc/self/status")
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return status
 	}
@@ -83,6 +86,16 @@ func readProcStatus() procStatus {
 		"VmHWM": &status.peakRSSBytes,
 	})
 	return status
+}
+
+func readWorkerRSSBytes(pids []int) uint64 {
+	var total uint64
+	for _, pid := range pids {
+		if pid > 0 {
+			total += readProcStatusFile("/proc/" + strconv.Itoa(pid) + "/status").rssBytes
+		}
+	}
+	return total
 }
 
 // parseSizeFields extracts the requested "Key: <n> kB" fields into their
