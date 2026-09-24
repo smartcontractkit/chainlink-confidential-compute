@@ -504,6 +504,27 @@ func TestHostMetricsEnclaveMemory(t *testing.T) {
 	assert.False(t, found)
 }
 
+func TestHostMetricsWorkerMemory(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+	const rss = "confidential_compute.enclave.memory.workers_rss"
+	const count = "confidential_compute.enclave.workers.active"
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{})
+	data := collectHostMetrics(t, reader)
+	assertNoGaugePoint(t, data, rss, nil)
+	assertNoGaugePoint(t, data, count, nil)
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{Workers: &types.WorkerMemory{Count: 2, RSSMB: 600}})
+	data = collectHostMetrics(t, reader)
+	assert.Equal(t, int64(600*1024*1024), gaugeValue(t, data, rss, nil))
+	assert.Equal(t, int64(2), gaugeValue(t, data, count, nil))
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{Workers: &types.WorkerMemory{}})
+	data = collectHostMetrics(t, reader)
+	assert.Equal(t, int64(0), gaugeValue(t, data, rss, nil))
+	assert.Equal(t, int64(0), gaugeValue(t, data, count, nil))
+	metrics.clearEnclaveMemory()
+	data = collectHostMetrics(t, reader)
+	assertNoGaugePoint(t, data, rss, nil)
+}
+
 func TestHostMetricsEnclaveMemoryHeadroomFields(t *testing.T) {
 	metrics, reader := newTestHostMetrics(t)
 

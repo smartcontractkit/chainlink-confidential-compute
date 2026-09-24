@@ -259,6 +259,10 @@ func (s *enclaveServer) handleMemory(w http.ResponseWriter, r *http.Request) {
 		AvailableMB: bytesToMB(info.availableBytes),
 		PeakRSSMB:   bytesToMB(status.peakRSSBytes),
 	}
+	if workers, ok := s.app.(interface{ WorkerPIDs() []int }); ok {
+		pids := workers.WorkerPIDs()
+		resp.Workers = &types.WorkerMemory{Count: len(pids), RSSMB: bytesToMB(readWorkerRSSBytes(pids))}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
