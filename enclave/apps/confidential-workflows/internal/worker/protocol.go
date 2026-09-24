@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/wasmlimits"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
@@ -31,6 +32,7 @@ type GatewayConfig struct {
 }
 
 type Job struct {
+	Limits           wasmlimits.Config
 	Version          int
 	RequestID        [32]byte
 	Execution        []byte

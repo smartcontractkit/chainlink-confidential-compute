@@ -95,6 +95,10 @@ func (f *Fetcher) SetDefaultTimeout(d time.Duration) {
 	f.defaultTimeout.Store(int64(d))
 }
 
+func (f *Fetcher) DefaultTimeout() time.Duration {
+	return time.Duration(f.defaultTimeout.Load())
+}
+
 // Fetch executes a single HTTP request. On success the returned Response has
 // StatusCode, Headers, and Body populated. Errors are policy violations
 // (method/scheme/IP/port), transport failures, or body-size overruns.
