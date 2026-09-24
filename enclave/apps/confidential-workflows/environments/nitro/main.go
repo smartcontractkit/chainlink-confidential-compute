@@ -1,24 +1,26 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"flag"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/app"
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/nitrotransport"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/worker"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/memlimit"
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/wasmruntime"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
-	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
@@ -56,6 +58,11 @@ func main() {
 
 	kc := keychain.NewBoxKeychain(logger, nil, nil, nil)
 	comb := combiner.NewTDH2EasyCombiner()
+	processes, err := worker.NewProcesses("/usr/bin/workflow-worker", nil, nil, kc, appLogger)
+	if err != nil {
+		logger.Fatalf("Failed to configure worker: %v", err)
+	}
+	defer processes.Close()
 
 	// A Nitro EIF is measured (PCR), so environment-specific endpoints cannot be
 	// baked in. The gateway URL, storage endpoint, and storage key are all
@@ -66,16 +73,7 @@ func main() {
 		if gw.RequestTimeout <= 0 {
 			gw.RequestTimeout = *gatewayTimeout
 		}
-		dialer, err := proxyclient.NewConfiguredEndpointDialer(types.ProxyParentCID, types.ProxyPort, gw.URL)
-		if err != nil {
-			return nil, err
-		}
-		client := gateway.NewGatewayClient(gw.URL, att, gateway.WithHTTPClient(&http.Client{
-			Timeout:   gw.RequestTimeout,
-			Transport: tunnelTransport(dialer, true),
-		}))
-		verifier := signatureverifier.NewEd25519SignatureVerifier()
-		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier, gw.RetryBackoff, gw.RetryTimeout), nil
+		return nitrotransport.Dispatcher(gw, types.EnclaveConfig{}, att, kc, appLogger)
 	}
 
 	// allow-reconfig is measured into the PCR, so the host cannot enable the fixture profile.
@@ -96,9 +94,7 @@ func main() {
 		)
 	}
 
-	// Cap concurrent executions at (enclave memory - reserve) / per-exec so a burst
-	// can't exhaust the fixed enclave memory and wedge the VM. Derived from memory
-	// read at startup, so it scales with the enclave's sizing.
+	// Admission budgets for cold workers but does not enforce a native RSS limit.
 	limit := memlimit.Derive()
 	appLogger.Infow("Confidential workflows concurrency limit",
 		"maxConcurrentExecutions", limit.MaxConcurrent,
@@ -111,15 +107,11 @@ func main() {
 		sdkpb.TeeType_TEE_TYPE_AWS_NITRO,
 		appLogger,
 		app.Config{
-			RunWasm:                 wasmruntime.Execute,
+			Worker:                  processes,
+			GatewayTimeout:          *gatewayTimeout,
 			RemoteDispatcherFactory: dispatcherFactory,
 			StorageFetcherFactory:   storageFactory,
-			HTTPFetcher: httpfetch.NewFetcherWithClient(
-				httpfetch.DefaultPolicy(),
-				util.NewRestrictedHTTPClientWithDialer(
-					proxyclient.NewWorkflowControlledDialer(types.ProxyParentCID, types.ProxyPort).DialContext,
-				),
-			),
+			HTTPFetcher:             nitrotransport.HTTPFetcher(0),
 			MaxConcurrentExecutions: limit.MaxConcurrent,
 		},
 	)
@@ -127,18 +119,28 @@ func main() {
 		logger.Fatalf("Failed to construct confidential workflows app: %v", err)
 	}
 
-	err = nitro.StartNitroEnclave(
-		confApp,
-		att,
-		kc,
-		comb,
-		logger,
-		emitter.NewNoOpEmitter(),
-		vsockPort,
-		*allowReconfig,
-	)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	done := make(chan error, 1)
+	go func() {
+		done <- nitro.StartNitroEnclave(
+			confApp,
+			att,
+			kc,
+			comb,
+			logger,
+			emitter.NewNoOpEmitter(),
+			vsockPort,
+			*allowReconfig,
+		)
+	}()
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+	}
 	if err != nil {
-		logger.Fatalf("Failed to start Nitro enclave: %v", err)
+		_ = processes.Close()
+		logger.Fatalf("Nitro enclave stopped: %v", err)
 	}
 }
 

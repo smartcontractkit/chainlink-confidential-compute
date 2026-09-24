@@ -32,10 +32,12 @@ COPY enclave/ ./enclave/
 COPY types/ ./types/
 COPY util/ ./util/
 
-# Build with CGO enabled. wasmtime-go links libwasmtime.a statically via #cgo directives.
+# Only the worker links Wasmtime. Both binaries are measured in the same EIF.
 RUN cd enclave/apps/${APP_NAME} && \
-    CGO_ENABLED=1 GOOS=linux go build \
-        -o /enclave-app ./environments/nitro/
+    GOMAXPROCS=1 CGO_ENABLED=0 GOOS=linux go build -p 1 \
+        -o /enclave-app ./environments/nitro/ && \
+    GOMAXPROCS=1 CGO_ENABLED=1 GOOS=linux go build -p 1 \
+        -o /workflow-worker ./environments/nitro-worker/
 
 FROM amazonlinux:latest
 
@@ -55,6 +57,7 @@ RUN echo "refclock PHC /dev/ptp0 poll 0 offset 0 prefer" > /etc/chrony.conf && \
     echo "makestep 1.0 3" >> /etc/chrony.conf
 
 COPY --from=builder /enclave-app /usr/bin/
+COPY --from=builder /workflow-worker /usr/bin/
 
 ARG ALLOW_RECONFIG=
 ENV ALLOW_RECONFIG=$ALLOW_RECONFIG
