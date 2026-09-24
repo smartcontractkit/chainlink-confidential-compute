@@ -119,7 +119,7 @@ type remoteDispatcher struct {
 	configMu sync.RWMutex
 	config   types.EnclaveConfig
 	logger   logger.Logger
-	keychain keychain.Keychain
+	keychain RequestKeyProvider
 	combiner combiner.Combiner
 	verifier signatureverifier.SignatureVerifier
 
@@ -130,6 +130,10 @@ type remoteDispatcher struct {
 	// or secret fetch (all attempts, including backoffs), independent of the
 	// per-attempt HTTP timeout on the gateway client.
 	retryTimeout time.Duration
+}
+
+type RequestKeyProvider interface {
+	GetKeyPairForRequest([32]byte) (keychain.Keypair, error)
 }
 
 var _ RemoteDispatcher = (*remoteDispatcher)(nil)
@@ -158,7 +162,7 @@ func NewRemoteDispatcher(
 	att attestor.Attestor,
 	config types.EnclaveConfig,
 	lggr logger.Logger,
-	kc keychain.Keychain,
+	kc RequestKeyProvider,
 	comb combiner.Combiner,
 	verifier signatureverifier.SignatureVerifier,
 	retryBackoff, retryTimeout time.Duration,
