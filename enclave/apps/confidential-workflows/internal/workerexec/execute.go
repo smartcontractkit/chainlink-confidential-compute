@@ -4,6 +4,7 @@ package workerexec
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -63,7 +64,7 @@ func Execute(job worker.Job, lggr logger.Logger, att attestor.Attestor, fetcher 
 		dispatcher, err = nitrotransport.Dispatcher(app.GatewayConfig{
 			URL: job.Gateway.URL, RequestTimeout: job.Gateway.RequestTimeout,
 			RetryBackoff: job.Gateway.RetryBackoff, RetryTimeout: job.Gateway.RetryTimeout,
-		}, job.Config, att, keys, lggr)
+		}, job.Config, att, keys, lggr, binary.BigEndian.Uint64(job.RequestID[:8]))
 		if err != nil {
 			return fail("cannot construct worker dispatcher")
 		}

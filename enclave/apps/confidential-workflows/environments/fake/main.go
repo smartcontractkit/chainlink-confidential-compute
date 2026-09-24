@@ -91,7 +91,7 @@ func main() {
 		if gw.RequestTimeout <= 0 {
 			gw.RequestTimeout = *gatewayTimeout
 		}
-		return nitrotransport.Dispatcher(gw, types.EnclaveConfig{}, att, kc, appLogger)
+		return nitrotransport.Dispatcher(gw, types.EnclaveConfig{}, att, kc, appLogger, 0)
 	}
 
 	storageFactory := func(storageURL string, useTLS bool, privateKey string, maxBytes int64, timeout time.Duration, lggr cllogger.Logger) (app.RawFetcher, ed25519.PublicKey, error) {
