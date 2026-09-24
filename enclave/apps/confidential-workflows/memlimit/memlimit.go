@@ -1,32 +1,22 @@
-// Package memlimit derives the enclave's concurrent-execution cap from its
-// total memory, so a burst of workflow executions can't exhaust the fixed
-// enclave memory budget and wedge the VM.
-//
-// The cap is (T - reserve) / perExec, where T is the enclave's total RAM read
-// once at startup (see totalMemoryMB). It is a static, worst-case bound: it
-// assumes every concurrent execution uses its full per-execution memory budget,
-// so any workflow is safe regardless of what it actually allocates. We do not
-// poll free memory at admission time (deliberately, to keep admission simple
-// and side-channel-free).
+// Package memlimit derives a static admission heuristic from enclave RAM.
+// It is not an RSS limit: native compilation and Go allocations can exceed
+// the per-worker budget. TODO: add cgroup resource containment separately.
 package memlimit
 
 const (
 	// ReserveMB is memory set aside for everything other than concurrent
 	// workflow executions: the Go runtime, the enclave server and host, TLS
-	// buffers, and the WASM host's base working set. On the 2048 MiB staging
-	// enclave this yields (2048-1024)/128 = 8, matching the previously
-	// load-tested default, and it re-derives automatically if the enclave's
-	// memory changes.
+	// buffers, and cached compressed artifacts.
 	ReserveMB uint64 = 1024
 
-	// PerExecMB mirrors chainlink-common's defaultMinMemoryMBs, the per-module
-	// WASM linear-memory floor a workflow execution can grow into. Keep in sync
-	// if that default changes.
-	PerExecMB uint64 = 128
+	// Cold one-shot workers measured approximately 400 MiB peak RSS on the Go
+	// SDK fixtures, versus 140 MiB warm. Budget for cold compilation, not just
+	// the 128 MB Wasm linear-memory limit. Revalidate on target Nitro hardware.
+	PerExecMB uint64 = 512
 
 	// FallbackConcurrency is used when total memory can't be read (non-Linux
 	// dev builds, or a sysinfo error). Conservative on purpose.
-	FallbackConcurrency int64 = 8
+	FallbackConcurrency int64 = 2
 )
 
 // Result is the derived concurrent-execution cap plus the inputs used to
