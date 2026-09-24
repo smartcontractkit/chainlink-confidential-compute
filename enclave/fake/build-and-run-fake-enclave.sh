@@ -70,19 +70,25 @@ if [ "${ALLOW_RECONFIG}" = "true" ]; then APP_ARGS="${APP_ARGS} --allow-reconfig
 
 PIDS=()
 
+WORKER_DIR=""
+trap 'trap - EXIT INT TERM; kill -TERM "${PIDS[@]}" 2>/dev/null || true; wait "${PIDS[@]}" 2>/dev/null || true; if [ -n "${WORKER_DIR}" ]; then rm -rf "${WORKER_DIR}"; fi' EXIT INT TERM
+APP_COMMAND=(go run ./environments/fake/)
+if [ "${APP}" = "confidential-workflows" ]; then
+    WORKER_DIR=$(mktemp -d "${HOME}/workflow-worker.XXXXXX")
+    ( cd "${ENCLAVE_PATH}" && GOMAXPROCS=1 go build -p 1 -o "${WORKER_DIR}/workflow-worker" ./environments/fake-worker/ )
+    ( cd "${ENCLAVE_PATH}" && GOMAXPROCS=1 go build -p 1 -o "${WORKER_DIR}/enclave-app" ./environments/fake/ )
+    APP_ARGS="${APP_ARGS} --worker-path=${WORKER_DIR}/workflow-worker"
+    APP_COMMAND=("${WORKER_DIR}/enclave-app")
+fi
+
 echo "Starting fake enclave app (${APP}) with args: ${APP_ARGS}"
 # Run from the app directory so `go run` resolves imports against the app's own
 # module. Some apps (e.g. confidential-workflows) are separate Go modules, so
 # `go run <path>/main.go` from the repo root would resolve against the root
 # module and fail to find the app's packages. cd-ing in handles both layouts:
 # apps that live in the root module and apps with their own go.mod.
-( cd "${ENCLAVE_PATH}" && exec go run ./environments/fake/ ${APP_ARGS} ) &
+( cd "${ENCLAVE_PATH}" && exec "${APP_COMMAND[@]}" ${APP_ARGS} ) &
 PIDS+=($!)
-
-# Clean up every child process when this script exits.
-# EXIT is not run for untrapped fatal signals; clear traps before terminating
-# and waiting for children.
-trap 'trap - EXIT INT TERM; kill -TERM "${PIDS[@]}" 2>/dev/null || true; wait "${PIDS[@]}" 2>/dev/null || true' EXIT INT TERM
 
 # Wait for the enclave app to be listening on its loopback vsock port before
 # starting the host proxy, mirroring the real script's socat readiness probe.
