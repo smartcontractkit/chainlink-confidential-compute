@@ -7,29 +7,12 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/config"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
-	"github.com/smartcontractkit/chainlink-common/pkg/services"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
-	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
-	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/wasmlimits"
 )
 
-type wasmModuleLimiters struct {
-	memory                     limits.BoundLimiter[config.Size]
-	maxCompressedBinary        limits.BoundLimiter[config.Size]
-	maxDecompressedBinary      limits.BoundLimiter[config.Size]
-	maxResponseSize            limits.BoundLimiter[config.Size]
-	pendingCalls               limits.ResourcePoolLimiter[int]
-	enableUserMetrics          limits.GateLimiter
-	maxUserMetricPayload       limits.BoundLimiter[config.Size]
-	maxUserMetricNameLength    limits.BoundLimiter[int]
-	maxUserMetricLabels        limits.BoundLimiter[int]
-	maxUserMetricLabelValueLen limits.BoundLimiter[int]
-	maxSubscriptions           limits.BoundLimiter[int]
-	maxLogLenBytes             uint32
-}
-
-func newWASMModuleLimiters(ctx context.Context, lggr logger.Logger, snapshot *limiterSettingsSnapshot) *wasmModuleLimiters {
+func resolveWASMLimits(ctx context.Context, lggr logger.Logger, snapshot *limiterSettingsSnapshot) wasmlimits.Config {
 	cfg := cresettings.Default.PerWorkflow
 	memory := resolveWASMSetting(ctx, lggr, snapshot, cfg.WASMMemoryLimit)
 	if memory < config.MByte {
@@ -68,19 +51,12 @@ func newWASMModuleLimiters(ctx context.Context, lggr logger.Logger, snapshot *li
 			cresettings.Default.WASMPollOneoffSubscriptionLimit.Key, subscriptions)
 	}
 
-	return &wasmModuleLimiters{
-		memory:                     limits.NewUpperBoundLimiter(memory),
-		maxCompressedBinary:        limits.NewUpperBoundLimiter(compressed),
-		maxDecompressedBinary:      limits.NewUpperBoundLimiter(decompressed),
-		maxResponseSize:            limits.NewUpperBoundLimiter(response),
-		pendingCalls:               limits.WorkflowResourcePoolLimiter(pendingCalls),
-		enableUserMetrics:          limits.NewGateLimiter(userMetrics),
-		maxUserMetricPayload:       limits.NewUpperBoundLimiter(metricPayload),
-		maxUserMetricNameLength:    limits.NewUpperBoundLimiter(metricName),
-		maxUserMetricLabels:        limits.NewUpperBoundLimiter(metricLabels),
-		maxUserMetricLabelValueLen: limits.NewUpperBoundLimiter(metricLabelValue),
-		maxSubscriptions:           limits.NewUpperBoundLimiter(subscriptions),
-		maxLogLenBytes:             uint32(logLine),
+	return wasmlimits.Config{
+		Memory: memory, MaxCompressedBinary: compressed, MaxDecompressedBinary: decompressed,
+		MaxResponseSize: response, PendingCalls: pendingCalls, EnableUserMetrics: userMetrics,
+		MaxUserMetricPayload: metricPayload, MaxUserMetricNameLength: metricName,
+		MaxUserMetricLabels: metricLabels, MaxUserMetricLabelValueLen: metricLabelValue,
+		MaxSubscriptions: subscriptions, MaxLogLenBytes: uint32(logLine),
 	}
 }
 
@@ -105,25 +81,4 @@ func validateMaxLogLenBytes(limit config.Size) error {
 		return fmt.Errorf("log line limit must be between 1 byte and %d bytes: %s", math.MaxInt32, limit)
 	}
 	return nil
-}
-
-func (l *wasmModuleLimiters) apply(cfg *host.ModuleConfig) {
-	cfg.MemoryLimiter = l.memory
-	cfg.MaxCompressedBinaryLimiter = l.maxCompressedBinary
-	cfg.MaxDecompressedBinaryLimiter = l.maxDecompressedBinary
-	cfg.MaxResponseSizeLimiter = l.maxResponseSize
-	cfg.PendingCallsLimiter = l.pendingCalls
-	cfg.EnableUserMetricsLimiter = l.enableUserMetrics
-	cfg.MaxUserMetricPayloadLimiter = l.maxUserMetricPayload
-	cfg.MaxUserMetricNameLengthLimiter = l.maxUserMetricNameLength
-	cfg.MaxUserMetricLabelsPerMetricLimiter = l.maxUserMetricLabels
-	cfg.MaxUserMetricLabelValueLengthLimiter = l.maxUserMetricLabelValueLen
-	cfg.MaxSubscriptionsLimiter = l.maxSubscriptions
-	cfg.MaxLogLenBytes = l.maxLogLenBytes
-}
-
-func (l *wasmModuleLimiters) Close() error {
-	return services.CloseAll(l.memory, l.maxCompressedBinary, l.maxDecompressedBinary,
-		l.maxResponseSize, l.pendingCalls, l.enableUserMetrics, l.maxUserMetricPayload,
-		l.maxUserMetricNameLength, l.maxUserMetricLabels, l.maxUserMetricLabelValueLen, l.maxSubscriptions)
 }

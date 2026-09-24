@@ -14,6 +14,7 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/wasmruntime"
 	"github.com/smartcontractkit/cre-sdk-go/internal_testing/capabilities/basictrigger"
 	"google.golang.org/protobuf/types/known/anypb"
 
@@ -53,6 +54,7 @@ func makeExecution(t *testing.T, workflowID, binaryURL string, binaryHash []byte
 
 func TestNewConfidentialWorkflowsAppRequiresProductionTransports(t *testing.T) {
 	valid := Config{
+		RunWasm:     wasmruntime.Execute,
 		HTTPFetcher: httpfetch.NewFetcherWithClient(httpfetch.DefaultPolicy(), util.NewUnrestrictedClient()),
 		StorageFetcherFactory: storageFetcherFactory(func() types.HTTPClient {
 			return util.NewUnrestrictedClient()
@@ -63,6 +65,7 @@ func TestNewConfidentialWorkflowsAppRequiresProductionTransports(t *testing.T) {
 	}
 
 	tests := map[string]func(*Config){
+		"WASM runner":               func(c *Config) { c.RunWasm = nil },
 		"HTTP fetcher":              func(c *Config) { c.HTTPFetcher = nil },
 		"storage fetcher factory":   func(c *Config) { c.StorageFetcherFactory = nil },
 		"remote dispatcher factory": func(c *Config) { c.RemoteDispatcherFactory = nil },

@@ -11,6 +11,7 @@ import (
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/app"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/wasmruntime"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/fake/runner"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
@@ -111,6 +112,7 @@ func main() {
 		sdkpb.TeeType_TEE_TYPE_AWS_NITRO,
 		appLogger,
 		app.Config{
+			RunWasm:                 wasmruntime.Execute,
 			RemoteDispatcherFactory: dispatcherFactory,
 			StorageFetcherFactory:   storageFactory,
 			HTTPFetcher: httpfetch.NewFetcherWithClient(

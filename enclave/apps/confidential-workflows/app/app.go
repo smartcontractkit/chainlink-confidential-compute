@@ -17,6 +17,7 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/settings"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/host"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/wasmlimits"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
@@ -37,6 +38,7 @@ type confidentialWorkflowsApp struct {
 	httpFetcher         *httpfetch.Fetcher
 	requirementsHandler host.RequirementsHandler
 	tpe                 sdkpb.TeeType
+	runWasm             WasmRunner
 
 	// limiter bounds concurrent executions so a burst can't exhaust the fixed
 	// enclave memory and wedge the VM. Unbounded unless WithMaxConcurrentExecutions
@@ -73,10 +75,17 @@ var _ types.EnclaveApp = (*confidentialWorkflowsApp)(nil)
 
 // Config requires explicit transports to prevent direct network access.
 type Config struct {
+	RunWasm                 WasmRunner
 	HTTPFetcher             *httpfetch.Fetcher
 	StorageFetcherFactory   StorageFetcherFactory
 	RemoteDispatcherFactory RemoteDispatcherFactory
 	MaxConcurrentExecutions int64
+}
+
+type WasmRunner func(context.Context, logger.Logger, wasmlimits.Config, []byte, *sdkpb.ExecuteRequest, bool, host.ExecutionHelper, time.Duration) (*sdkpb.ExecutionResult, error)
+
+func WithWasmRunner(run WasmRunner) Option {
+	return func(a *confidentialWorkflowsApp) { a.runWasm = run }
 }
 
 type Option func(*confidentialWorkflowsApp)
@@ -272,6 +281,9 @@ func (a *confidentialWorkflowsApp) OnConfigUpdate(config types.EnclaveConfig) {
 
 // NewConfidentialWorkflowsApp requires every production transport explicitly.
 func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config Config) (types.EnclaveApp, error) {
+	if config.RunWasm == nil {
+		return nil, errors.New("WASM runner is required")
+	}
 	if config.HTTPFetcher == nil {
 		return nil, errors.New("HTTP fetcher is required")
 	}
@@ -283,6 +295,7 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 	}
 
 	a := &confidentialWorkflowsApp{
+		runWasm:           config.RunWasm,
 		logger:            lggr,
 		fetcher:           NewBinaryFetcher(lggr),
 		httpFetcher:       config.HTTPFetcher,
@@ -445,7 +458,11 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	if execution.GetOrgId() == "" {
 		executionLogger.Warnw("Workflow execution is missing org ID")
 	}
-	result, err := executeWasm(execCtx, executionLogger, a.limiterSettings.Snapshot(), binary, execution.SdkExecuteRequest, true, helper, execTimeout)
+	if a.runWasm == nil {
+		return nil, &types.ExecuteError{Error: "WASM runner is not configured", Code: http.StatusInternalServerError}
+	}
+	resolved := resolveWASMLimits(execCtx, executionLogger, a.limiterSettings.Snapshot())
+	result, err := a.runWasm(execCtx, executionLogger, resolved, binary, execution.SdkExecuteRequest, true, helper, execTimeout)
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to
