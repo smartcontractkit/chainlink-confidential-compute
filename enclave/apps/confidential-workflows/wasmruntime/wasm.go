@@ -1,4 +1,5 @@
-package app
+// Package wasmruntime is the native Wasmtime boundary. Coordinators must not import it.
+package wasmruntime
 
 import (
 	"context"
@@ -10,7 +11,7 @@ import (
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 )
 
-// executeWasm creates a chainlink-common WASM host module from the binary
+// Execute creates a chainlink-common WASM host module from the binary
 // and runs the given ExecuteRequest.
 // Production binaries are brotli-compressed; tests pass isCompressed=false.
 //
@@ -25,7 +26,7 @@ import (
 // compute (the ctx deadline alone unblocks host calls but not the guest). It
 // surfaces as context.DeadlineExceeded. Non-positive leaves the host's own
 // default (10 minutes) in place.
-func executeWasm(ctx context.Context, hostLogger logger.Logger, binary []byte, execReq *sdkpb.ExecuteRequest, isCompressed bool, helper host.ExecutionHelper, timeout time.Duration) (*sdkpb.ExecutionResult, error) {
+func Execute(ctx context.Context, hostLogger logger.Logger, binary []byte, execReq *sdkpb.ExecuteRequest, isCompressed bool, helper host.ExecutionHelper, timeout time.Duration) (*sdkpb.ExecutionResult, error) {
 	modCfg := &host.ModuleConfig{
 		Logger:         hostLogger,
 		IsUncompressed: !isCompressed,

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/wasmruntime"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	storage_service "github.com/smartcontractkit/chainlink-protos/storage-service/go"
@@ -80,7 +81,7 @@ func newStorageBackedAppWithSettings(t *testing.T, rawBinary []byte, mutate func
 	t.Helper()
 
 	addr := startFakeStorage(t, rawBinary)
-	allOpts := append([]Option{WithStorageService(addr, false), withInsecureArtifactHTTP()}, opts...)
+	allOpts := append([]Option{WithWasmRunner(wasmruntime.Execute), WithStorageService(addr, false), withInsecureArtifactHTTP()}, opts...)
 	a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), allOpts...)
 	settings := testSettings(addr)
 	if mutate != nil {
