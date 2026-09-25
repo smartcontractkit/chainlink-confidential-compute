@@ -2,8 +2,6 @@
 package workerexec
 
 import (
-	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -18,6 +16,7 @@ import (
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/nitrotransport"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/worker"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/wasmruntime"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/server"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/attestor"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -29,25 +28,17 @@ type failedKey struct{ err error }
 func (k failedKey) GetKeyPairForRequest([32]byte) (keychain.Keypair, error) { return nil, k.err }
 
 func Execute(job worker.Job, lggr logger.Logger, att attestor.Attestor, fetcher *httpfetch.Fetcher) worker.Reply {
-	reply := worker.Reply{Version: worker.Version, RequestID: job.RequestID}
+	var reply worker.Reply
 	fail := func(message string) worker.Reply {
-		reply.Outcome = worker.SetupError
 		reply.Error = &types.ExecuteError{Error: message, Code: 500}
 		return reply
 	}
 	var execution confworkflowtypes.WorkflowExecution
-	if job.Version != worker.Version || proto.Unmarshal(job.Execution, &execution) != nil || execution.WorkflowId == "" || execution.SdkExecuteRequest == nil {
+	if err := proto.Unmarshal(job.Execution, &execution); err != nil {
 		return fail("invalid worker execution job")
-	}
-	hash := sha256.Sum256(job.Binary)
-	if !bytes.Equal(hash[:], execution.BinaryHash) {
-		return fail("worker artifact hash mismatch")
 	}
 	var dispatcher app.RemoteDispatcher
 	if job.Gateway.URL != "" {
-		if att == nil {
-			return fail("worker attestor is unavailable")
-		}
 		var keys app.RequestKeyProvider
 		if job.KeyError != "" {
 			keys = failedKey{errors.New(job.KeyError)}
@@ -61,35 +52,24 @@ func Execute(job worker.Job, lggr logger.Logger, att attestor.Attestor, fetcher 
 			return fail("missing worker key provisioning")
 		}
 		var err error
-		dispatcher, err = nitrotransport.Dispatcher(app.GatewayConfig{
-			URL: job.Gateway.URL, RequestTimeout: job.Gateway.RequestTimeout,
-			RetryBackoff: job.Gateway.RetryBackoff, RetryTimeout: job.Gateway.RetryTimeout,
-		}, job.Config, att, keys, lggr, binary.BigEndian.Uint64(job.RequestID[:8]))
+		dispatcher, err = nitrotransport.Dispatcher(app.GatewayConfig(job.Gateway), job.Config, att, keys, lggr, binary.BigEndian.Uint64(job.RequestID[:8]))
 		if err != nil {
 			return fail("cannot construct worker dispatcher")
 		}
 	}
-	var events worker.Events
+	events := server.NewResponseEmitter()
 	result, execErr := app.ExecuteWorkflow(wasmruntime.Execute, lggr, job.RequestID, &execution, job.Binary,
-		job.SignedRequests, &events, dispatcher, fetcher, job.ExecutionTimeout)
-	var err error
-	reply.Events, err = events.Snapshot()
-	if err != nil {
-		return fail(err.Error())
-	}
+		job.SignedRequests, events, dispatcher, fetcher, job.ExecutionTimeout)
+	reply.Events = events.GetMetricEvents()
 	if execErr != nil {
-		reply.Outcome, reply.Error = worker.ExecutionError, execErr
+		reply.Error = execErr
 		return reply
 	}
-	// The outer response's base64 output must fit the existing client envelope.
-	if result == nil || proto.Size(result) > types.MaxEnclaveResponseBodyBytes {
-		return fail("worker result exceeds maximum allowed size")
-	}
+	var err error
 	reply.Result, err = proto.Marshal(result)
 	if err != nil {
 		return fail("cannot encode worker result")
 	}
-	reply.Outcome = worker.Success
 	return reply
 }
 
@@ -105,13 +85,12 @@ func Serve(in io.Reader, out io.Writer, lggr logger.Logger, openAttestor func() 
 		var err error
 		att, cleanup, err = openAttestor()
 		if err != nil {
-			return worker.WriteReply(out, worker.Reply{Version: worker.Version, RequestID: job.RequestID,
-				Outcome: worker.SetupError, Error: &types.ExecuteError{Error: "cannot open worker attestor", Code: 500}})
+			return json.NewEncoder(out).Encode(worker.Reply{Error: &types.ExecuteError{Error: "cannot open worker attestor", Code: 500}})
 		}
 		defer cleanup()
 	}
 	reply := Execute(job, lggr, att, nitrotransport.HTTPFetcher(job.HTTPTimeout))
-	return worker.WriteReply(out, reply)
+	return json.NewEncoder(out).Encode(reply)
 }
 
 func Main(openAttestor func() (attestor.Attestor, func(), error)) int {

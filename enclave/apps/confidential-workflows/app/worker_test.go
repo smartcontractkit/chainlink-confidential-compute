@@ -29,28 +29,30 @@ func (w localWorker) Run(_ context.Context, job worker.Job) (worker.Reply, error
 	w.app.mu.Lock()
 	dispatcher := w.app.dispatcher
 	w.app.mu.Unlock()
-	var events worker.Events
+	events := server.NewResponseEmitter()
 	result, execErr := ExecuteWorkflow(wasmruntime.Execute, w.app.logger, job.RequestID, &execution, job.Binary,
-		job.SignedRequests, &events, dispatcher, w.app.httpFetcher, job.ExecutionTimeout)
-	reply := worker.Reply{Version: worker.Version, RequestID: job.RequestID, Outcome: worker.ExecutionError, Error: execErr}
+		job.SignedRequests, events, dispatcher, w.app.httpFetcher, job.ExecutionTimeout)
+	reply := worker.Reply{Error: execErr, Events: events.GetMetricEvents()}
 	var err error
-	reply.Events, err = events.Snapshot()
-	if err == nil && execErr == nil {
-		reply.Outcome = worker.Success
+	if execErr == nil {
 		reply.Result, err = proto.Marshal(result)
 	}
 	return reply, err
 }
 
 type capturingWorker struct {
-	jobs []worker.Job
-	err  error
+	jobs   []worker.Job
+	err    error
+	result []byte
 }
 
 func (w *capturingWorker) Run(_ context.Context, job worker.Job) (worker.Reply, error) {
 	w.jobs = append(w.jobs, job)
 	result, _ := proto.Marshal(&sdkpb.ExecutionResult{Result: &sdkpb.ExecutionResult_Value{Value: values.Proto(values.NewString("done"))}})
-	return worker.Reply{Version: worker.Version, RequestID: job.RequestID, Outcome: worker.Success, Result: result,
+	if w.result != nil {
+		result = w.result
+	}
+	return worker.Reply{Result: result,
 		Events: []types.MetricEvent{
 			{Event: "capability_execution", Details: map[string]any{"duration_seconds": 0.123}},
 			{Event: "capability_execution", Details: map[string]any{"duration_seconds": 0.456}},
@@ -114,4 +116,7 @@ func TestWorkerSnapshotsEffectiveState(t *testing.T) {
 	_, execErr = a.Execute(id, types.AppIDConfidentialWorkflows, input, nil, emitter)
 	require.Equal(t, "workflow worker failed", execErr.Error)
 	require.NotContains(t, execErr.Error, types.ErrWasmExecutionTimeout)
+	w.err, w.result = nil, []byte("bad protobuf")
+	_, execErr = a.Execute(id, types.AppIDConfidentialWorkflows, input, nil, emitter)
+	require.Equal(t, "invalid worker result", execErr.Error)
 }

@@ -54,7 +54,6 @@ func (p *Processes) Run(ctx context.Context, job Job) (Reply, error) {
 			}
 		}
 	}
-	job.Version = Version
 	data, err := json.Marshal(job)
 	if err != nil {
 		return Reply{}, errors.New("encoding worker job")
@@ -91,11 +90,7 @@ func (p *Processes) Run(ctx context.Context, job Job) (Reply, error) {
 	if err != nil {
 		return Reply{}, fmt.Errorf("worker: %w", err)
 	}
-	var reply Reply
-	if err := Decode(&out.buf, MaxReplyBytes, &reply, nil); err != nil {
-		return Reply{}, err
-	}
-	return reply, reply.Validate(job.RequestID)
+	return DecodeReply(out.buf.Bytes())
 }
 
 // Stdout contains only the final reply, so its first byte starts the exit grace.

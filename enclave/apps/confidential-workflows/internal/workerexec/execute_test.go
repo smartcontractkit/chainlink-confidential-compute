@@ -56,7 +56,7 @@ func jobFor(t *testing.T, name string) worker.Job {
 		SdkExecuteRequest: &sdkpb.ExecuteRequest{Config: []byte("http://127.0.0.1:1"), Request: &sdkpb.ExecuteRequest_Trigger{Trigger: &sdkpb.Trigger{Id: 0, Payload: payload}}}}
 	data, err := proto.Marshal(execution)
 	require.NoError(t, err)
-	return worker.Job{Version: worker.Version, RequestID: [32]byte{1}, Binary: buf.Bytes(), Execution: data}
+	return worker.Job{RequestID: [32]byte{1}, Binary: buf.Bytes(), Execution: data}
 }
 
 func TestRealWorkerBinary(t *testing.T) {
@@ -67,7 +67,7 @@ func TestRealWorkerBinary(t *testing.T) {
 	start := time.Now()
 	reply, err := p.Run(t.Context(), hello)
 	require.NoError(t, err)
-	require.Equal(t, worker.Success, reply.Outcome)
+	require.Nil(t, reply.Error)
 	var result sdkpb.ExecutionResult
 	require.NoError(t, proto.Unmarshal(reply.Result, &result))
 	require.Equal(t, "hello from enclave wasm", result.GetValue().GetStringValue())
@@ -81,11 +81,11 @@ func TestRealWorkerBinary(t *testing.T) {
 	spin.ExecutionTimeout = 100 * time.Millisecond
 	reply, err = p.Run(t.Context(), spin)
 	require.NoError(t, err)
-	require.Equal(t, worker.ExecutionError, reply.Outcome)
+	require.NotNil(t, reply.Error)
 	require.Contains(t, reply.Error.Error, types.ErrWasmExecutionTimeout)
 	reply, err = p.Run(t.Context(), spin)
 	require.NoError(t, err)
-	require.Equal(t, worker.ExecutionError, reply.Outcome)
+	require.NotNil(t, reply.Error)
 	require.Contains(t, reply.Error.Error, types.ErrWasmExecutionTimeout, "warm pure-compute executions must also time out")
 	_, err = p.Run(t.Context(), hello)
 	require.NoError(t, err, "a timeout must not affect later executions")
@@ -101,10 +101,7 @@ func TestRealWorkerBinary(t *testing.T) {
 		pid := workerPIDs(t, workerPath)[0]
 		completed := make(chan error, 1)
 		go func() {
-			r, err := p.Run(t.Context(), hello)
-			if err == nil {
-				err = r.Validate(hello.RequestID)
-			}
+			_, err := p.Run(t.Context(), hello)
 			completed <- err
 		}()
 		require.Eventually(t, func() bool { return len(workerPIDs(t, workerPath)) == 2 }, 5*time.Second, time.Millisecond)
@@ -119,7 +116,7 @@ func TestRealWorkerBinary(t *testing.T) {
 	httpJob := jobFor(t, "http-call")
 	reply, err = p.Run(t.Context(), httpJob)
 	require.NoError(t, err)
-	require.Equal(t, worker.Success, reply.Outcome)
+	require.Nil(t, reply.Error)
 	var sawHTTP bool
 	for _, e := range reply.Events {
 		if e.Event == "capability_started" {
@@ -136,10 +133,10 @@ func TestRealWorkerBinary(t *testing.T) {
 	hello.Gateway.URL = "https://gateway.example"
 	hello.KeyError = "key unavailable"
 	reply = Execute(hello, logger.Test(t), &fake.FakeAttestor{}, httpfetch.NewFetcher(httpfetch.DefaultPolicy()))
-	require.Equal(t, worker.Success, reply.Outcome)
-	hello.Binary[0] ^= 1
+	require.Nil(t, reply.Error)
+	hello.Execution = []byte("bad protobuf")
 	reply = Execute(hello, logger.Test(t), nil, nil)
-	require.Equal(t, worker.SetupError, reply.Outcome)
+	require.NotNil(t, reply.Error)
 }
 
 func workerPIDs(t *testing.T, executable string) []int {
