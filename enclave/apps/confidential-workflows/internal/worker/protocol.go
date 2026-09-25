@@ -38,7 +38,7 @@ func (Job) String() string   { return "[private execution job]" }
 func (Job) GoString() string { return "[private execution job]" }
 
 type Reply struct {
-	// An empty protobuf is valid; nil means the result is absent.
+	// Result is the encoded ConfidentialWorkflowResponse. Empty is valid; nil is absent.
 	Result []byte
 	Error  *types.ExecuteError `json:",omitempty"`
 	Events []types.MetricEvent `json:",omitempty"`

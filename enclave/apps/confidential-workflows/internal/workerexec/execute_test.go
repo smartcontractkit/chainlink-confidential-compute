@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	"github.com/bytecodealliance/wasmtime-go/v47"
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
@@ -46,9 +47,14 @@ func jobFor(t *testing.T, name string) worker.Job {
 	path := build(t, "../../app/testdata/"+name, ".", name+".wasm", "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0")
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
+	return jobFromWasm(t, raw)
+}
+
+func jobFromWasm(t *testing.T, raw []byte) worker.Job {
+	t.Helper()
 	var buf bytes.Buffer
 	w := brotli.NewWriter(&buf)
-	_, err = w.Write(raw)
+	_, err := w.Write(raw)
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 	hash := sha256.Sum256(buf.Bytes())
@@ -79,6 +85,22 @@ func defaultLimits() wasmlimits.Config {
 	}
 }
 
+func TestNilSDKResult(t *testing.T) {
+	raw, err := wasmtime.Wat2Wasm(`(module
+		(import "env" "version_v2" (func))
+		(memory (export "memory") 1)
+		(func (export "_start")))`)
+	require.NoError(t, err)
+	path := build(t, "../..", "./environments/nitro-worker", "worker", "CGO_ENABLED=1")
+	p, err := worker.NewProcesses(path, nil, []string{"HOME=" + t.TempDir()}, nil, logger.Test(t))
+	require.NoError(t, err)
+	reply, err := p.Run(t.Context(), jobFromWasm(t, raw))
+	require.NoError(t, err)
+	require.Nil(t, reply.Error)
+	require.NotNil(t, reply.Result)
+	require.Empty(t, reply.Result, "the baseline response has no SDK result field")
+}
+
 func TestRealWorkerBinary(t *testing.T) {
 	workerPath := build(t, "../..", "./environments/nitro-worker", "worker", "CGO_ENABLED=1")
 	p, err := worker.NewProcesses(workerPath, nil, []string{"HOME=" + t.TempDir(), "GOMAXPROCS=1"}, nil, logger.Test(t))
@@ -88,9 +110,9 @@ func TestRealWorkerBinary(t *testing.T) {
 	reply, err := p.Run(t.Context(), hello)
 	require.NoError(t, err)
 	require.Nil(t, reply.Error)
-	var result sdkpb.ExecutionResult
+	var result confworkflowtypes.ConfidentialWorkflowResponse
 	require.NoError(t, proto.Unmarshal(reply.Result, &result))
-	require.Equal(t, "hello from enclave wasm", result.GetValue().GetStringValue())
+	require.Equal(t, "hello from enclave wasm", result.GetSdkExecutionResult().GetValue().GetStringValue())
 	t.Logf("cold worker: %s", time.Since(start))
 	start = time.Now()
 	_, err = p.Run(t.Context(), hello)
@@ -145,7 +167,7 @@ func TestRealWorkerBinary(t *testing.T) {
 	}
 	require.True(t, sawHTTP, "helper events must cross the process boundary")
 	require.NoError(t, proto.Unmarshal(reply.Result, &result))
-	encoded, err := json.Marshal(result)
+	encoded, err := json.Marshal(&result)
 	require.NoError(t, err)
 	require.Contains(t, string(encoded), "400", "workflow HTTP restrictions must still apply")
 

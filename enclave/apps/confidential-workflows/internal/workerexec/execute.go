@@ -58,18 +58,9 @@ func Execute(job worker.Job, lggr logger.Logger, att attestor.Attestor, fetcher 
 		}
 	}
 	events := server.NewResponseEmitter()
-	result, execErr := app.ExecuteWorkflow(wasmruntime.Execute, lggr, job.Limits, job.RequestID, &execution, job.Binary,
+	reply.Result, reply.Error = app.ExecuteWorkflow(wasmruntime.Execute, lggr, job.Limits, job.RequestID, &execution, job.Binary,
 		job.SignedRequests, events, dispatcher, fetcher, job.ExecutionTimeout)
 	reply.Events = events.GetMetricEvents()
-	if execErr != nil {
-		reply.Error = execErr
-		return reply
-	}
-	var err error
-	reply.Result, err = proto.Marshal(result)
-	if err != nil {
-		return fail("cannot encode worker result")
-	}
 	return reply
 }
 
