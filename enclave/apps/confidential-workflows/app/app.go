@@ -430,21 +430,15 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	if reply.Error != nil {
 		return nil, reply.Error
 	}
-	result := &sdkpb.ExecutionResult{}
-	if err := proto.Unmarshal(reply.Result, result); err != nil {
+	var response confworkflowtypes.ConfidentialWorkflowResponse
+	if err := proto.Unmarshal(reply.Result, &response); err != nil {
 		return nil, &types.ExecuteError{Error: "invalid worker result", Code: http.StatusInternalServerError}
 	}
-
-	// The capability framework expects ConfidentialWorkflowResponse, not the raw SDK result.
-	cwRespBytes, err := proto.Marshal(&confworkflowtypes.ConfidentialWorkflowResponse{SdkExecutionResult: result})
-	if err != nil {
-		return nil, &types.ExecuteError{Error: fmt.Sprintf("marshalling workflow response: %s", err), Code: http.StatusInternalServerError}
-	}
-	return cwRespBytes, nil
+	return reply.Result, nil
 }
 
 // ExecuteWorkflow reuses the same helper and timeout policy in workers and local tests.
-func ExecuteWorkflow(run WasmRunner, lggr logger.Logger, requestID [32]byte, execution *confworkflowtypes.WorkflowExecution, binary []byte, signedRequests []types.SignedComputeRequest, emitter types.Emitter, dispatcher RemoteDispatcher, fetcher *httpfetch.Fetcher, execTimeout time.Duration) (*sdkpb.ExecutionResult, *types.ExecuteError) {
+func ExecuteWorkflow(run WasmRunner, lggr logger.Logger, requestID [32]byte, execution *confworkflowtypes.WorkflowExecution, binary []byte, signedRequests []types.SignedComputeRequest, emitter types.Emitter, dispatcher RemoteDispatcher, fetcher *httpfetch.Fetcher, execTimeout time.Duration) ([]byte, *types.ExecuteError) {
 	helper := host.NewRestrictedExecutionHelper(&enclaveExecutionHelper{
 		requestID: requestID, workflowID: execution.WorkflowId, owner: execution.GetOwner(),
 		executionID: execution.GetExecutionId(), orgID: execution.GetOrgId(), signedRequests: signedRequests,
@@ -486,7 +480,12 @@ func ExecuteWorkflow(run WasmRunner, lggr logger.Logger, requestID [32]byte, exe
 		}
 	}
 
-	return result, nil
+	// Wrapping here preserves a nil SDK result as a valid, empty response.
+	response, err := proto.Marshal(&confworkflowtypes.ConfidentialWorkflowResponse{SdkExecutionResult: result})
+	if err != nil {
+		return nil, &types.ExecuteError{Error: fmt.Sprintf("marshalling workflow response: %s", err), Code: http.StatusInternalServerError}
+	}
+	return response, nil
 }
 
 // TEEs can't tell what region they are in, so we just check the TEE type and rely on the DON to ensure it's sending to the right place

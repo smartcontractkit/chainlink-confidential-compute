@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/smartcontractkit/chainlink-protos/cre/go/values"
@@ -15,7 +16,8 @@ import (
 )
 
 func successReply(value string) Reply {
-	result, _ := proto.Marshal(&sdkpb.ExecutionResult{Result: &sdkpb.ExecutionResult_Value{Value: values.Proto(values.NewString(value))}})
+	result, _ := proto.Marshal(&confworkflowtypes.ConfidentialWorkflowResponse{SdkExecutionResult: &sdkpb.ExecutionResult{
+		Result: &sdkpb.ExecutionResult_Value{Value: values.Proto(values.NewString(value))}}})
 	return Reply{Result: result}
 }
 
@@ -66,8 +68,8 @@ func TestSupportedExternalResponseFitsReply(t *testing.T) {
 	require.Equal(t, r, decoded)
 }
 
-func TestEmptySDKResultIsDistinctFromMissingResult(t *testing.T) {
-	result, err := proto.Marshal(&sdkpb.ExecutionResult{})
+func TestEmptyResponseIsDistinctFromMissingResult(t *testing.T) {
+	result, err := proto.Marshal(&confworkflowtypes.ConfidentialWorkflowResponse{})
 	require.NoError(t, err)
 	data, err := json.Marshal(Reply{Result: result})
 	require.NoError(t, err)

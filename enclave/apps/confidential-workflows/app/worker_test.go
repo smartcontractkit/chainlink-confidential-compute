@@ -32,12 +32,7 @@ func (w localWorker) Run(_ context.Context, job worker.Job) (worker.Reply, error
 	events := server.NewResponseEmitter()
 	result, execErr := ExecuteWorkflow(wasmruntime.Execute, w.app.logger, job.RequestID, &execution, job.Binary,
 		job.SignedRequests, events, dispatcher, w.app.httpFetcher, job.ExecutionTimeout)
-	reply := worker.Reply{Error: execErr, Events: events.GetMetricEvents()}
-	var err error
-	if execErr == nil {
-		reply.Result, err = proto.Marshal(result)
-	}
-	return reply, err
+	return worker.Reply{Result: result, Error: execErr, Events: events.GetMetricEvents()}, nil
 }
 
 type capturingWorker struct {
@@ -48,7 +43,8 @@ type capturingWorker struct {
 
 func (w *capturingWorker) Run(_ context.Context, job worker.Job) (worker.Reply, error) {
 	w.jobs = append(w.jobs, job)
-	result, _ := proto.Marshal(&sdkpb.ExecutionResult{Result: &sdkpb.ExecutionResult_Value{Value: values.Proto(values.NewString("done"))}})
+	result, _ := proto.Marshal(&confworkflowtypes.ConfidentialWorkflowResponse{SdkExecutionResult: &sdkpb.ExecutionResult{
+		Result: &sdkpb.ExecutionResult_Value{Value: values.Proto(values.NewString("done"))}}})
 	if w.result != nil {
 		result = w.result
 	}
@@ -119,4 +115,10 @@ func TestWorkerSnapshotsEffectiveState(t *testing.T) {
 	w.err, w.result = nil, []byte("bad protobuf")
 	_, execErr = a.Execute(id, types.AppIDConfidentialWorkflows, input, nil, emitter)
 	require.Equal(t, "invalid worker result", execErr.Error)
+	for _, encoded := range [][]byte{{}, {0x0a, 0x00}} {
+		w.result = encoded
+		output, execErr := a.Execute(id, types.AppIDConfidentialWorkflows, input, nil, emitter)
+		require.Nil(t, execErr)
+		require.Equal(t, encoded, output, "nil and empty SDK results must retain their distinct encodings")
+	}
 }
