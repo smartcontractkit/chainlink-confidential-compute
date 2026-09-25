@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -20,7 +21,7 @@ import (
 
 type localWorker struct{ app *confidentialWorkflowsApp }
 
-func (w localWorker) Run(job worker.Job) (worker.Reply, error) {
+func (w localWorker) Run(_ context.Context, job worker.Job) (worker.Reply, error) {
 	var execution confworkflowtypes.WorkflowExecution
 	if err := proto.Unmarshal(job.Execution, &execution); err != nil {
 		return worker.Reply{}, err
@@ -46,7 +47,7 @@ type capturingWorker struct {
 	err  error
 }
 
-func (w *capturingWorker) Run(job worker.Job) (worker.Reply, error) {
+func (w *capturingWorker) Run(_ context.Context, job worker.Job) (worker.Reply, error) {
 	w.jobs = append(w.jobs, job)
 	result, _ := proto.Marshal(&sdkpb.ExecutionResult{Result: &sdkpb.ExecutionResult_Value{Value: values.Proto(values.NewString("done"))}})
 	return worker.Reply{Version: worker.Version, RequestID: job.RequestID, Outcome: worker.Success, Result: result,

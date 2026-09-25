@@ -5,8 +5,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -93,9 +93,10 @@ func Execute(job worker.Job, lggr logger.Logger, att attestor.Attestor, fetcher 
 	return reply
 }
 
-func Serve(in io.Reader, out io.Writer, length int64, lggr logger.Logger, openAttestor func() (attestor.Attestor, func(), error)) error {
+func Serve(in io.Reader, out io.Writer, lggr logger.Logger, openAttestor func() (attestor.Attestor, func(), error)) error {
 	var job worker.Job
-	if err := worker.Decode(in, length, &job, nil); err != nil {
+	data, err := io.ReadAll(in)
+	if err != nil || json.Unmarshal(data, &job) != nil {
 		return errors.New("invalid worker input")
 	}
 	var att attestor.Attestor
@@ -114,15 +115,9 @@ func Serve(in io.Reader, out io.Writer, length int64, lggr logger.Logger, openAt
 }
 
 func Main(openAttestor func() (attestor.Attestor, func(), error)) int {
-	length := flag.Int64("job-bytes", 0, "Exact maximum job size on stdin")
-	parent := flag.Int("parent-pid", 0, "Expected coordinator PID")
-	flag.Parse()
-	if *parent <= 0 || os.Getppid() != *parent || *length <= 0 || flag.NArg() != 0 {
-		return 1
-	}
 	lggr := logger.NewWithSync(os.Stderr)
-	defer lggr.Sync()
-	if err := Serve(os.Stdin, os.Stdout, *length, lggr, openAttestor); err != nil {
+	defer func() { _ = lggr.Sync() }()
+	if err := Serve(os.Stdin, os.Stdout, lggr, openAttestor); err != nil {
 		fmt.Fprintln(os.Stderr, "worker protocol failed")
 		return 1
 	}

@@ -59,7 +59,7 @@ func TestFakeCoordinatorLifecycle(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return resp.StatusCode == http.StatusOK
 	}, 10*time.Second, 10*time.Millisecond)
@@ -67,7 +67,9 @@ func TestFakeCoordinatorLifecycle(t *testing.T) {
 	select {
 	case err := <-done:
 		stopped = true
-		require.NoError(t, err)
+		var exit *exec.ExitError
+		require.ErrorAs(t, err, &exit)
+		require.Equal(t, syscall.SIGTERM, exit.Sys().(syscall.WaitStatus).Signal())
 	case <-time.After(5 * time.Second):
 		t.Fatal("coordinator did not exit after SIGTERM")
 	}
