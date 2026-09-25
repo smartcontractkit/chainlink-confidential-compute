@@ -52,6 +52,22 @@ func newWASMModuleLimiters(ctx context.Context, lggr logger.Logger, snapshot *li
 	metricLabelValue := resolveWASMSetting(ctx, lggr, snapshot, cfg.UserMetricLabelValueLength)
 	subscriptions := resolveWASMSetting(ctx, lggr, snapshot, cresettings.Default.WASMPollOneoffSubscriptionLimit)
 
+	if lggr != nil {
+		lggr.Debugw("Applied CRE WASM limits",
+			cfg.WASMMemoryLimit.Key, memory,
+			cfg.WASMCompressedBinarySizeLimit.Key, compressed,
+			cfg.WASMBinarySizeLimit.Key, decompressed,
+			cfg.ExecutionResponseLimit.Key, response,
+			cfg.CapabilityConcurrencyLimit.Key, pendingCalls,
+			cfg.LogLineLimit.Key, logLine,
+			cfg.UserMetricEnabled.Key, userMetrics,
+			cfg.UserMetricPayloadLimit.Key, metricPayload,
+			cfg.UserMetricNameLengthLimit.Key, metricName,
+			cfg.UserMetricLabelsPerMetric.Key, metricLabels,
+			cfg.UserMetricLabelValueLength.Key, metricLabelValue,
+			cresettings.Default.WASMPollOneoffSubscriptionLimit.Key, subscriptions)
+	}
+
 	return &wasmModuleLimiters{
 		memory:                     limits.NewUpperBoundLimiter(memory),
 		maxCompressedBinary:        limits.NewUpperBoundLimiter(compressed),

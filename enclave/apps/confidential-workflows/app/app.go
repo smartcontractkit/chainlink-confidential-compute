@@ -186,9 +186,8 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	var limiterSettings settings.Getter
 	if len(req.CRESettings) > 0 {
 		var err error
-		// Initialize with the default logger to avoid the empty-orgId error
-		// being logged on every scoped lookup; mutableSettings logs actual
-		// fallback conditions.
+		// Use the Nop logger to avoid an empty-orgId error on every scoped
+		// lookup. Execution logs report missing org IDs and setting fallbacks.
 		// ref: https://github.com/smartcontractkit/chainlink/blob/2b6b3d42d648cf66c205006a0fb305373dd54f42/core/services/chainlink/application.go#L312
 		limiterSettings, err = (settings.GetterConfig{}).NewJSONGetter(req.CRESettings)
 		if err != nil {
@@ -442,7 +441,11 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		execCtx, cancel = context.WithTimeout(execCtx, execTimeout)
 		defer cancel()
 	}
-	result, err := executeWasm(execCtx, a.logger, a.limiterSettings.Snapshot(), binary, execution.SdkExecuteRequest, true, helper, execTimeout)
+	executionLogger := logger.With(a.logger, append(contexts.CREValue(execCtx).LoggerKVs(), "execution_id", execution.GetExecutionId())...)
+	if execution.GetOrgId() == "" {
+		executionLogger.Warnw("Workflow execution is missing org ID")
+	}
+	result, err := executeWasm(execCtx, executionLogger, a.limiterSettings.Snapshot(), binary, execution.SdkExecuteRequest, true, helper, execTimeout)
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to

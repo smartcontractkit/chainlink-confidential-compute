@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
 	"github.com/smartcontractkit/cre-sdk-go/internal_testing/capabilities/basictrigger"
 	"google.golang.org/protobuf/types/known/anypb"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/smartcontractkit/cre-sdk-go/internal_testing/capabilities/basicaction"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/protobuf/proto"
 
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
@@ -127,6 +129,60 @@ func TestExecute_LimiterSettingsFallBackWithoutOwner(t *testing.T) {
 	output, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
 	require.Nil(t, execErr, "expected limiter defaults, got: %+v", execErr)
 	require.NotEmpty(t, output)
+}
+
+func TestExecute_LimiterDiagnostics(t *testing.T) {
+	raw := buildTestWasm(t, "hello")
+	var compressed bytes.Buffer
+	w := brotli.NewWriter(&compressed)
+	_, err := w.Write(raw)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	binary := compressed.Bytes()
+	hash := sha256.Sum256(binary)
+
+	for _, org := range []string{"org", ""} {
+		t.Run("org="+org, func(t *testing.T) {
+			app, locator := newStorageBackedAppWithSettings(t, binary, func(s *WorkflowSettings) {
+				s.CRESettings = json.RawMessage(`{"global":{"PerWorkflow":{
+					"WASMMemoryLimit":"256mb", "LogLineLimit":"banana"
+				}}}`)
+			})
+			lggr, logs := logger.TestObserved(t, zapcore.DebugLevel)
+			app.(*confidentialWorkflowsApp).logger = lggr
+			execution := makeExecution(t, "wf-hello", locator, hash[:])
+			execution.OrgId = org
+			execution.Owner = "owner"
+			execution.ExecutionId = "execution"
+			data, err := proto.Marshal(execution)
+			require.NoError(t, err)
+			_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+			require.Nil(t, execErr)
+
+			resolved := logs.FilterMessage("Applied CRE WASM limits").All()
+			require.Len(t, resolved, 1)
+			fields := resolved[0].ContextMap()
+			assert.Len(t, fields, 16) // 12 settings and four execution identifiers.
+			assert.Equal(t, "256mb", fields[cresettings.Default.PerWorkflow.WASMMemoryLimit.Key])
+			assert.Equal(t, cresettings.Default.PerWorkflow.LogLineLimit.DefaultValue.String(), fields[cresettings.Default.PerWorkflow.LogLineLimit.Key])
+
+			fallback := logs.FilterMessage("Failed to resolve CRE WASM setting. Using default value").All()
+			require.Len(t, fallback, 1)
+			missingOrg := logs.FilterMessage("Workflow execution is missing org ID").All()
+			if org == "" {
+				require.Len(t, missingOrg, 1)
+			} else {
+				assert.Empty(t, missingOrg)
+			}
+			for _, entry := range append(append(resolved, fallback...), missingOrg...) {
+				fields := entry.ContextMap()
+				assert.Equal(t, org, fields["org"])
+				assert.Equal(t, "owner", fields["owner"])
+				assert.Equal(t, "wf-hello", fields["workflow"])
+				assert.Equal(t, "execution", fields["execution_id"])
+			}
+		})
+	}
 }
 
 // TestExecute_HttpCallWasm is the WASM-level integration test for the
