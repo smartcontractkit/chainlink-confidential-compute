@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -57,12 +56,13 @@ import (
 //     negative value disables the wait.
 //   - CRESettings: standard CRE scoped settings used by the WASM module
 //     limiters. The object may contain global, org, owner and workflow
-//     overrides and is replaced as a unit on every injection. Raising
+//     overrides and is replaced as a unit on every injection, including runtime
+//     reinjection via POST /settings. Each execution snapshots these settings;
+//     they are not automatically synchronized with the CRE backend. Raising
 //     WASMCompressedBinarySizeLimit also requires raising MaxBinarySize because
 //     the storage download cap is enforced first. WASMMemoryLimit is truncated
-//     to whole megabytes by the WASM host. Owner- and workflow-scoped overrides
-//     require a non-empty execution owner; otherwise only org and global
-//     overrides are consulted.
+//     to whole megabytes by the WASM host. Missing required scope metadata or
+//     invalid values fall back to the corresponding CRE defaults.
 type WorkflowSettings struct {
 	StorageKey            string   `json:"storageKey"`
 	StorageServiceURL     string   `json:"storageServiceUrl"`
@@ -90,59 +90,33 @@ type WorkflowSettings struct {
 
 type mutableSettings struct {
 	mu      sync.RWMutex
-	current *mutableSettingsState
-	lggr    logger.Logger
-	parsers map[string]settingParser
+	current *limiterSettingsSnapshot
 }
 
-type mutableSettingsState struct {
+type limiterSettingsSnapshot struct {
 	getter settings.Getter
 	logged sync.Map
-}
-
-func newMutableSettings(lggr logger.Logger) *mutableSettings {
-	return &mutableSettings{lggr: lggr, parsers: wasmLimiterSettingParsers()}
 }
 
 func (s *mutableSettings) SetGetter(getter settings.Getter) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.current = &mutableSettingsState{getter: getter}
+	s.current = &limiterSettingsSnapshot{getter: getter}
 }
 
-func (s *mutableSettings) GetScoped(ctx context.Context, scope settings.Scope, key string) (string, error) {
+func (s *mutableSettings) Snapshot() *limiterSettingsSnapshot {
 	s.mu.RLock()
-	current := s.current
-	s.mu.RUnlock()
-	if current == nil || current.getter == nil {
-		return "", nil
-	}
-	value, err := current.getter.GetScoped(ctx, scope, key)
-	if err != nil && scope > settings.ScopeOrg {
-		s.logOnce(current, "retry", "Failed to get CRE limiter setting. Retrying at org scope", scope, key, err)
-		value, err = current.getter.GetScoped(ctx, settings.ScopeOrg, key)
-	}
-	if err != nil {
-		s.logOnce(current, "lookup", "Failed to get CRE limiter setting. Using default value", scope, key, err)
-		return "", nil
-	}
-	if value != "" {
-		if parse, ok := s.parsers[key]; ok {
-			if err := parse(value); err != nil {
-				s.logOnce(current, "parse", "Failed to parse CRE limiter setting. Using default value", scope, key, err)
-				return "", nil
-			}
-		}
-	}
-	return value, nil
+	defer s.mu.RUnlock()
+	return s.current
 }
 
-func (s *mutableSettings) logOnce(current *mutableSettingsState, kind, message string, scope settings.Scope, key string, err error) {
-	if s.lggr == nil {
+// Limit fallback warnings to once per setting per injected document.
+func (s *limiterSettingsSnapshot) logFallback(lggr logger.Logger, key string, err error) {
+	if s == nil || lggr == nil {
 		return
 	}
-	if _, loaded := current.logged.LoadOrStore(kind+"|"+key, struct{}{}); !loaded {
-		s.lggr.Errorw(message, "scope", scope, "key", key, "err", err)
+	if _, loaded := s.logged.LoadOrStore(key, struct{}{}); !loaded {
+		lggr.Warnw("Failed to resolve CRE WASM setting. Using default value", "key", key, "err", err)
 	}
 }
 

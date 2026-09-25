@@ -10,7 +10,6 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
-	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/smartcontractkit/cre-sdk-go/internal_testing/capabilities/basictrigger"
 	"github.com/stretchr/testify/assert"
@@ -49,7 +48,7 @@ func TestExecuteWasm_Hello(t *testing.T) {
 		},
 	}
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
-	result, err := executeWasm(ctx, limits.Factory{Logger: logger.Test(t)}, binary, execReq, false, &enclaveExecutionHelper{}, 0)
+	result, err := executeWasm(ctx, logger.Test(t), nil, binary, execReq, false, &enclaveExecutionHelper{}, 0)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
@@ -74,7 +73,7 @@ func TestExecuteWasm_Timeout(t *testing.T) {
 
 	start := time.Now()
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
-	result, err := executeWasm(ctx, limits.Factory{Logger: logger.Test(t)}, binary, execReq, false, &enclaveExecutionHelper{}, time.Second)
+	result, err := executeWasm(ctx, logger.Test(t), nil, binary, execReq, false, &enclaveExecutionHelper{}, time.Second)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Nil(t, result)
 	assert.Less(t, time.Since(start), 30*time.Second, "the epoch deadline should interrupt the guest promptly")

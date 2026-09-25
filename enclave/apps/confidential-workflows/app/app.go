@@ -15,7 +15,6 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings"
-	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/host"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -290,7 +289,7 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 		httpFetcher:       config.HTTPFetcher,
 		tpe:               tpe,
 		limiter:           newExecutionLimiter(config.MaxConcurrentExecutions),
-		limiterSettings:   newMutableSettings(lggr),
+		limiterSettings:   &mutableSettings{},
 		storageFactory:    config.StorageFetcherFactory,
 		dispatcherFactory: config.RemoteDispatcherFactory,
 	}
@@ -307,7 +306,7 @@ func NewTestConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, opts
 		httpFetcher:     httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
 		tpe:             tpe,
 		limiter:         newExecutionLimiter(0),
-		limiterSettings: newMutableSettings(lggr),
+		limiterSettings: &mutableSettings{},
 		storageFactory: storageFetcherFactory(func() types.HTTPClient {
 			return util.NewRestrictedHTTPClient()
 		}),
@@ -443,9 +442,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		execCtx, cancel = context.WithTimeout(execCtx, execTimeout)
 		defer cancel()
 	}
-	// The enclave has no OpenTelemetry provider, so Meter remains nil.
-	limitsFactory := limits.Factory{Logger: a.logger, Settings: a.limiterSettings}
-	result, err := executeWasm(execCtx, limitsFactory, binary, execution.SdkExecuteRequest, true, helper, execTimeout)
+	result, err := executeWasm(execCtx, a.logger, a.limiterSettings.Snapshot(), binary, execution.SdkExecuteRequest, true, helper, execTimeout)
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to

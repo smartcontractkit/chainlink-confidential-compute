@@ -1,27 +1,29 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/config"
 	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
-	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
 )
 
 func TestWASMModuleLimiters_Defaults(t *testing.T) {
 	defaults := cresettings.Default.PerWorkflow
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
-	moduleLimiters, err := newWASMModuleLimiters(ctx, limits.Factory{Logger: logger.Test(t)})
-	require.NoError(t, err)
+	moduleLimiters := newWASMModuleLimiters(ctx, logger.Test(t), nil)
 	t.Cleanup(func() { require.NoError(t, moduleLimiters.Close()) })
 
 	cfg := &host.ModuleConfig{}
@@ -105,8 +107,7 @@ func TestWASMModuleLimiters_InjectedOverrides(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, a.storageFetcher.Close()) })
 
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
-	moduleLimiters, err := newWASMModuleLimiters(ctx, limits.Factory{Logger: a.logger, Settings: a.limiterSettings})
-	require.NoError(t, err)
+	moduleLimiters := newWASMModuleLimiters(ctx, a.logger, a.limiterSettings.Snapshot())
 	t.Cleanup(func() { require.NoError(t, moduleLimiters.Close()) })
 	cfg := &host.ModuleConfig{}
 	moduleLimiters.apply(cfg)
@@ -162,8 +163,7 @@ func TestInjectSettings_LimiterSettings(t *testing.T) {
 	memoryLimit := func(t *testing.T, a *confidentialWorkflowsApp) config.Size {
 		t.Helper()
 		ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
-		moduleLimiters, err := newWASMModuleLimiters(ctx, limits.Factory{Logger: a.logger, Settings: a.limiterSettings})
-		require.NoError(t, err)
+		moduleLimiters := newWASMModuleLimiters(ctx, a.logger, a.limiterSettings.Snapshot())
 		defer func() { require.NoError(t, moduleLimiters.Close()) }()
 		limit, err := moduleLimiters.memory.Limit(ctx)
 		require.NoError(t, err)
@@ -187,29 +187,6 @@ func TestInjectSettings_LimiterSettings(t *testing.T) {
 	})
 }
 
-func TestWASMModuleLimiterSettingParsers(t *testing.T) {
-	cfg := cresettings.Default.PerWorkflow
-	want := []string{
-		cfg.WASMMemoryLimit.Key,
-		cfg.WASMCompressedBinarySizeLimit.Key,
-		cfg.WASMBinarySizeLimit.Key,
-		cfg.ExecutionResponseLimit.Key,
-		cfg.CapabilityConcurrencyLimit.Key,
-		cfg.LogLineLimit.Key,
-		cfg.UserMetricEnabled.Key,
-		cfg.UserMetricPayloadLimit.Key,
-		cfg.UserMetricNameLengthLimit.Key,
-		cfg.UserMetricLabelsPerMetric.Key,
-		cfg.UserMetricLabelValueLength.Key,
-		cresettings.Default.WASMPollOneoffSubscriptionLimit.Key,
-	}
-	got := make([]string, 0, len(wasmLimiterSettingParsers()))
-	for key := range wasmLimiterSettingParsers() {
-		got = append(got, key)
-	}
-	assert.ElementsMatch(t, want, got)
-}
-
 func TestWASMModuleLimiters_InvalidOrUnreachableOverrideUsesDefault(t *testing.T) {
 	defaultMemoryLimit := cresettings.Default.PerWorkflow.WASMMemoryLimit.DefaultValue
 	tests := []struct {
@@ -228,13 +205,13 @@ func TestWASMModuleLimiters_InvalidOrUnreachableOverrideUsesDefault(t *testing.T
 			name: "global override without owner",
 			raw:  `{"global":{"PerWorkflow":{"WASMMemoryLimit":"256mb"}}}`,
 			cre:  contexts.CRE{Workflow: "workflow"},
-			want: config.Size(256) * config.MByte,
+			want: defaultMemoryLimit,
 		},
 		{
 			name: "org override without owner",
 			raw:  `{"global":{"PerWorkflow":{"WASMMemoryLimit":"64mb"}},"org":{"org":{"PerWorkflow":{"WASMMemoryLimit":"96mb"}}}}`,
 			cre:  contexts.CRE{Org: "org", Workflow: "workflow"},
-			want: config.Size(96) * config.MByte,
+			want: defaultMemoryLimit,
 		},
 		{
 			name: "invalid value",
@@ -254,11 +231,10 @@ func TestWASMModuleLimiters_InvalidOrUnreachableOverrideUsesDefault(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			getter, err := (settings.GetterConfig{}).NewJSONGetter([]byte(test.raw))
 			require.NoError(t, err)
-			source := newMutableSettings(logger.Test(t))
+			source := &mutableSettings{}
 			source.SetGetter(getter)
 			ctx := contexts.WithCRE(t.Context(), test.cre)
-			moduleLimiters, err := newWASMModuleLimiters(ctx, limits.Factory{Logger: logger.Test(t), Settings: source})
-			require.NoError(t, err)
+			moduleLimiters := newWASMModuleLimiters(ctx, logger.Test(t), source.Snapshot())
 			t.Cleanup(func() { require.NoError(t, moduleLimiters.Close()) })
 
 			got, err := moduleLimiters.memory.Limit(ctx)
@@ -275,17 +251,142 @@ func TestWASMModuleLimiters_InvalidLogLineLimitUsesDefault(t *testing.T) {
 				`{"workflow":{"workflow":{"PerWorkflow":{"LogLineLimit":%q}}}}`, value,
 			)))
 			require.NoError(t, err)
-			source := newMutableSettings(logger.Test(t))
+			source := &mutableSettings{}
 			source.SetGetter(getter)
 			ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
 
-			moduleLimiters, err := newWASMModuleLimiters(ctx, limits.Factory{Logger: logger.Test(t), Settings: source})
-			require.NoError(t, err)
+			moduleLimiters := newWASMModuleLimiters(ctx, logger.Test(t), source.Snapshot())
 			t.Cleanup(func() { require.NoError(t, moduleLimiters.Close()) })
 			cfg := &host.ModuleConfig{}
 			moduleLimiters.apply(cfg)
 
 			assert.Equal(t, uint32(cresettings.Default.PerWorkflow.LogLineLimit.DefaultValue), cfg.MaxLogLenBytes)
+		})
+	}
+}
+
+func TestWASMModuleLimiters_ScopeResolution(t *testing.T) {
+	getter, err := (settings.GetterConfig{}).NewJSONGetter([]byte(`{
+		"global":{"PerWorkflow":{"WASMMemoryLimit":"200mb"}},
+		"org":{"org":{"PerWorkflow":{"WASMMemoryLimit":"201mb"}}},
+		"owner":{"owner":{"PerWorkflow":{"WASMMemoryLimit":"202mb"}}},
+		"workflow":{"workflow":{"PerWorkflow":{"WASMMemoryLimit":"203mb"}}}
+	}`))
+	require.NoError(t, err)
+	for _, test := range []struct {
+		name string
+		cre  contexts.CRE
+		want config.Size
+	}{
+		{"workflow", contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"}, 203 * config.MByte},
+		{"owner", contexts.CRE{Org: "org", Owner: "owner", Workflow: "other"}, 202 * config.MByte},
+		{"org", contexts.CRE{Org: "org", Owner: "other", Workflow: "other"}, 201 * config.MByte},
+		{"global without org", contexts.CRE{Owner: "other", Workflow: "other"}, 200 * config.MByte},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lggr, logs := logger.TestObserved(t, zapcore.WarnLevel)
+			ctx := contexts.WithCRE(t.Context(), test.cre)
+			l := newWASMModuleLimiters(ctx, lggr, &limiterSettingsSnapshot{getter: getter})
+			t.Cleanup(func() { require.NoError(t, l.Close()) })
+			got, err := l.memory.Limit(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got)
+			assert.Zero(t, logs.Len())
+		})
+	}
+}
+
+type settingsGetterFunc func(context.Context, settings.Scope, string) (string, error)
+
+func (f settingsGetterFunc) GetScoped(ctx context.Context, scope settings.Scope, key string) (string, error) {
+	return f(ctx, scope, key)
+}
+
+func TestWASMModuleLimiters_Snapshot(t *testing.T) {
+	getter, err := (settings.GetterConfig{}).NewJSONGetter([]byte(`{"global":{"PerWorkflow":{
+		"WASMMemoryLimit":"256mb", "LogLineLimit":"2kb", "CapabilityConcurrencyLimit":"7"
+	}}}`))
+	require.NoError(t, err)
+	source := &mutableSettings{}
+	calls := make(map[string]int)
+	source.SetGetter(settingsGetterFunc(func(ctx context.Context, scope settings.Scope, key string) (string, error) {
+		calls[key]++
+		// Replace settings during resolution; all values must still come from
+		// the captured getter, even those read after the replacement.
+		source.SetGetter(nil)
+		return getter.GetScoped(ctx, scope, key)
+	}))
+	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Owner: "owner", Workflow: "workflow"})
+	l := newWASMModuleLimiters(ctx, logger.Test(t), source.Snapshot())
+	t.Cleanup(func() { require.NoError(t, l.Close()) })
+	for range 2 {
+		memory, err := l.memory.Limit(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, 256*config.MByte, memory)
+		pendingCalls, err := l.pendingCalls.Limit(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, 7, pendingCalls)
+		assert.Equal(t, uint32(2*config.KByte), l.maxLogLenBytes)
+	}
+	require.Len(t, calls, 12)
+	for key, count := range calls {
+		assert.Equal(t, 1, count, key)
+	}
+	next := newWASMModuleLimiters(ctx, logger.Test(t), source.Snapshot())
+	t.Cleanup(func() { require.NoError(t, next.Close()) })
+	memory, err := next.memory.Limit(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, cresettings.Default.PerWorkflow.WASMMemoryLimit.DefaultValue, memory)
+	assert.Equal(t, uint32(cresettings.Default.PerWorkflow.LogLineLimit.DefaultValue), next.maxLogLenBytes)
+}
+
+func TestWASMModuleLimiters_FallbackLogsBoundedPerInjection(t *testing.T) {
+	getter, err := (settings.GetterConfig{}).NewJSONGetter([]byte(`{"global":{"PerWorkflow":{"WASMMemoryLimit":"banana"}}}`))
+	require.NoError(t, err)
+	source := &mutableSettings{}
+	lggr, logs := logger.TestObserved(t, zapcore.WarnLevel)
+	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Owner: "owner", Workflow: "workflow"})
+	for generation := 1; generation <= 2; generation++ {
+		source.SetGetter(getter)
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Go(func() {
+				l := newWASMModuleLimiters(ctx, lggr, source.Snapshot())
+				defer func() { assert.NoError(t, l.Close()) }()
+				memory, err := l.memory.Limit(ctx)
+				assert.NoError(t, err)
+				assert.Equal(t, cresettings.Default.PerWorkflow.WASMMemoryLimit.DefaultValue, memory)
+			})
+		}
+		wg.Wait()
+		assert.Equal(t, generation, logs.Len())
+	}
+	assert.Equal(t, cresettings.Default.PerWorkflow.WASMMemoryLimit.Key, logs.All()[0].ContextMap()["key"])
+}
+
+func TestWASMModuleLimiters_PendingCallsAndClose(t *testing.T) {
+	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Owner: "owner", Workflow: "workflow"})
+	for _, used := range []bool{false, true} {
+		t.Run(fmt.Sprintf("used=%t", used), func(t *testing.T) {
+			l := newWASMModuleLimiters(ctx, logger.Test(t), nil)
+			if used {
+				limit := cresettings.Default.PerWorkflow.CapabilityConcurrencyLimit.DefaultValue
+				require.NoError(t, l.pendingCalls.Use(ctx, limit))
+				err := l.pendingCalls.Use(ctx, 1)
+				require.ErrorContains(t, err, "resource limited for workflow[workflow]")
+				require.NoError(t, l.pendingCalls.Free(ctx, limit))
+				free, err := l.pendingCalls.Wait(ctx, 1)
+				require.NoError(t, err)
+				free()
+			}
+			done := make(chan error, 1)
+			go func() { done <- l.Close() }()
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("limiter Close blocked")
+			}
 		})
 	}
 }

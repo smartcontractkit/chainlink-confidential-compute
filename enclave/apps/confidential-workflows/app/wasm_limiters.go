@@ -2,12 +2,11 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"math"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/config"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/services"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
@@ -28,164 +27,68 @@ type wasmModuleLimiters struct {
 	maxUserMetricLabelValueLen limits.BoundLimiter[int]
 	maxSubscriptions           limits.BoundLimiter[int]
 	maxLogLenBytes             uint32
-	closers                    []io.Closer
 }
 
-type settingParser func(string) error
+func newWASMModuleLimiters(ctx context.Context, lggr logger.Logger, snapshot *limiterSettingsSnapshot) *wasmModuleLimiters {
+	cfg := cresettings.Default.PerWorkflow
+	memory := resolveWASMSetting(ctx, lggr, snapshot, cfg.WASMMemoryLimit)
+	if memory < config.MByte {
+		snapshot.logFallback(lggr, cfg.WASMMemoryLimit.Key, fmt.Errorf("WASM memory limit must be at least 1 MB: %s", memory))
+		memory = cfg.WASMMemoryLimit.DefaultValue
+	}
+	logLine := resolveWASMSetting(ctx, lggr, snapshot, cfg.LogLineLimit)
+	if err := validateMaxLogLenBytes(logLine); err != nil {
+		snapshot.logFallback(lggr, cfg.LogLineLimit.Key, err)
+		logLine = cfg.LogLineLimit.DefaultValue
+	}
+	compressed := resolveWASMSetting(ctx, lggr, snapshot, cfg.WASMCompressedBinarySizeLimit)
+	decompressed := resolveWASMSetting(ctx, lggr, snapshot, cfg.WASMBinarySizeLimit)
+	response := resolveWASMSetting(ctx, lggr, snapshot, cfg.ExecutionResponseLimit)
+	pendingCalls := resolveWASMSetting(ctx, lggr, snapshot, cfg.CapabilityConcurrencyLimit)
+	userMetrics := resolveWASMSetting(ctx, lggr, snapshot, cfg.UserMetricEnabled)
+	metricPayload := resolveWASMSetting(ctx, lggr, snapshot, cfg.UserMetricPayloadLimit)
+	metricName := resolveWASMSetting(ctx, lggr, snapshot, cfg.UserMetricNameLengthLimit)
+	metricLabels := resolveWASMSetting(ctx, lggr, snapshot, cfg.UserMetricLabelsPerMetric)
+	metricLabelValue := resolveWASMSetting(ctx, lggr, snapshot, cfg.UserMetricLabelValueLength)
+	subscriptions := resolveWASMSetting(ctx, lggr, snapshot, cresettings.Default.WASMPollOneoffSubscriptionLimit)
 
-func parserFor[T any](setting settings.Setting[T]) settingParser {
-	return func(value string) error {
-		_, err := setting.Parse(value)
-		return err
+	return &wasmModuleLimiters{
+		memory:                     limits.NewUpperBoundLimiter(memory),
+		maxCompressedBinary:        limits.NewUpperBoundLimiter(compressed),
+		maxDecompressedBinary:      limits.NewUpperBoundLimiter(decompressed),
+		maxResponseSize:            limits.NewUpperBoundLimiter(response),
+		pendingCalls:               limits.WorkflowResourcePoolLimiter(pendingCalls),
+		enableUserMetrics:          limits.NewGateLimiter(userMetrics),
+		maxUserMetricPayload:       limits.NewUpperBoundLimiter(metricPayload),
+		maxUserMetricNameLength:    limits.NewUpperBoundLimiter(metricName),
+		maxUserMetricLabels:        limits.NewUpperBoundLimiter(metricLabels),
+		maxUserMetricLabelValueLen: limits.NewUpperBoundLimiter(metricLabelValue),
+		maxSubscriptions:           limits.NewUpperBoundLimiter(subscriptions),
+		maxLogLenBytes:             uint32(logLine),
 	}
 }
 
-func memoryLimitParser(setting settings.Setting[config.Size]) settingParser {
-	return func(value string) error {
-		limit, err := setting.Parse(value)
-		if err != nil {
-			return err
-		}
-		if limit < config.MByte {
-			return fmt.Errorf("WASM memory limit must be at least 1 MB")
-		}
-		return nil
+func resolveWASMSetting[T any](ctx context.Context, lggr logger.Logger, snapshot *limiterSettingsSnapshot, setting settings.Setting[T]) T {
+	var getter settings.Getter
+	if snapshot != nil {
+		getter = snapshot.getter
 	}
-}
-
-func logLineLimitParser(setting settings.Setting[config.Size]) settingParser {
-	return func(value string) error {
-		limit, err := setting.Parse(value)
-		if err != nil {
-			return err
-		}
-		return validateMaxLogLenBytes(limit)
+	value, err := setting.GetOrDefault(ctx, getter)
+	if err != nil {
+		// GetOrDefault returns the default alongside the error. Keep settings
+		// failures non-fatal rather than passing the error to the WASM host.
+		snapshot.logFallback(lggr, setting.Key, err)
 	}
+	return value
 }
 
 func validateMaxLogLenBytes(limit config.Size) error {
 	// The WASM host receives the log length as an int32 before comparing it to
 	// MaxLogLenBytes, so values outside this range cannot be enforced correctly.
 	if limit < 1 || limit > config.Size(math.MaxInt32) {
-		return fmt.Errorf("log line limit must be between 1 byte and %d bytes", math.MaxInt32)
+		return fmt.Errorf("log line limit must be between 1 byte and %d bytes: %s", math.MaxInt32, limit)
 	}
 	return nil
-}
-
-func wasmLimiterSettingParsers() map[string]settingParser {
-	cfg := cresettings.Default.PerWorkflow
-	subscriptions := cresettings.Default.WASMPollOneoffSubscriptionLimit
-	return map[string]settingParser{
-		cfg.WASMMemoryLimit.Key:               memoryLimitParser(cfg.WASMMemoryLimit),
-		cfg.WASMCompressedBinarySizeLimit.Key: parserFor(cfg.WASMCompressedBinarySizeLimit),
-		cfg.WASMBinarySizeLimit.Key:           parserFor(cfg.WASMBinarySizeLimit),
-		cfg.ExecutionResponseLimit.Key:        parserFor(cfg.ExecutionResponseLimit),
-		cfg.CapabilityConcurrencyLimit.Key:    parserFor(cfg.CapabilityConcurrencyLimit),
-		cfg.LogLineLimit.Key:                  logLineLimitParser(cfg.LogLineLimit),
-		cfg.UserMetricEnabled.Key:             parserFor(cfg.UserMetricEnabled),
-		cfg.UserMetricPayloadLimit.Key:        parserFor(cfg.UserMetricPayloadLimit),
-		cfg.UserMetricNameLengthLimit.Key:     parserFor(cfg.UserMetricNameLengthLimit),
-		cfg.UserMetricLabelsPerMetric.Key:     parserFor(cfg.UserMetricLabelsPerMetric),
-		cfg.UserMetricLabelValueLength.Key:    parserFor(cfg.UserMetricLabelValueLength),
-		subscriptions.Key:                     parserFor(subscriptions),
-	}
-}
-
-func newWASMModuleLimiters(ctx context.Context, factory limits.Factory) (_ *wasmModuleLimiters, err error) {
-	l := &wasmModuleLimiters{}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, l.Close())
-		}
-	}()
-
-	cfg := cresettings.Default.PerWorkflow
-	l.maxLogLenBytes = resolveMaxLogLenBytes(ctx, factory, cfg.LogLineLimit)
-
-	l.memory, err = limits.MakeUpperBoundLimiter(factory, cfg.WASMMemoryLimit)
-	if err != nil {
-		return nil, fmt.Errorf("building WASM memory limiter: %w", err)
-	}
-	l.closers = append(l.closers, l.memory)
-
-	l.maxCompressedBinary, err = limits.MakeUpperBoundLimiter(factory, cfg.WASMCompressedBinarySizeLimit)
-	if err != nil {
-		return nil, fmt.Errorf("building compressed WASM binary limiter: %w", err)
-	}
-	l.closers = append(l.closers, l.maxCompressedBinary)
-
-	l.maxDecompressedBinary, err = limits.MakeUpperBoundLimiter(factory, cfg.WASMBinarySizeLimit)
-	if err != nil {
-		return nil, fmt.Errorf("building decompressed WASM binary limiter: %w", err)
-	}
-	l.closers = append(l.closers, l.maxDecompressedBinary)
-
-	l.maxResponseSize, err = limits.MakeUpperBoundLimiter(factory, cfg.ExecutionResponseLimit)
-	if err != nil {
-		return nil, fmt.Errorf("building WASM response limiter: %w", err)
-	}
-	l.closers = append(l.closers, l.maxResponseSize)
-
-	l.pendingCalls, err = limits.MakeResourcePoolLimiter(factory, cfg.CapabilityConcurrencyLimit)
-	if err != nil {
-		return nil, fmt.Errorf("building pending calls limiter: %w", err)
-	}
-	l.closers = append(l.closers, l.pendingCalls)
-
-	l.enableUserMetrics, err = limits.MakeGateLimiter(factory, cfg.UserMetricEnabled)
-	if err != nil {
-		return nil, fmt.Errorf("building user metrics gate limiter: %w", err)
-	}
-	l.closers = append(l.closers, l.enableUserMetrics)
-
-	l.maxUserMetricPayload, err = limits.MakeUpperBoundLimiter(factory, cfg.UserMetricPayloadLimit)
-	if err != nil {
-		return nil, fmt.Errorf("building user metric payload limiter: %w", err)
-	}
-	l.closers = append(l.closers, l.maxUserMetricPayload)
-
-	l.maxUserMetricNameLength, err = limits.MakeUpperBoundLimiter(factory, cfg.UserMetricNameLengthLimit)
-	if err != nil {
-		return nil, fmt.Errorf("building user metric name length limiter: %w", err)
-	}
-	l.closers = append(l.closers, l.maxUserMetricNameLength)
-
-	l.maxUserMetricLabels, err = limits.MakeUpperBoundLimiter(factory, cfg.UserMetricLabelsPerMetric)
-	if err != nil {
-		return nil, fmt.Errorf("building user metric labels limiter: %w", err)
-	}
-	l.closers = append(l.closers, l.maxUserMetricLabels)
-
-	l.maxUserMetricLabelValueLen, err = limits.MakeUpperBoundLimiter(factory, cfg.UserMetricLabelValueLength)
-	if err != nil {
-		return nil, fmt.Errorf("building user metric label value length limiter: %w", err)
-	}
-	l.closers = append(l.closers, l.maxUserMetricLabelValueLen)
-
-	l.maxSubscriptions, err = limits.MakeUpperBoundLimiter(factory, cresettings.Default.WASMPollOneoffSubscriptionLimit)
-	if err != nil {
-		return nil, fmt.Errorf("building WASI poll_oneoff subscription limiter: %w", err)
-	}
-	l.closers = append(l.closers, l.maxSubscriptions)
-
-	return l, nil
-}
-
-func resolveMaxLogLenBytes(ctx context.Context, factory limits.Factory, setting settings.Setting[config.Size]) uint32 {
-	limit, err := setting.GetOrDefault(ctx, factory.Settings)
-	if err != nil {
-		if factory.Logger != nil {
-			factory.Logger.Errorw("Failed to get CRE log line limit. Using default value", "key", setting.Key, "err", err)
-		}
-		limit = setting.DefaultValue
-	}
-	if err := validateMaxLogLenBytes(limit); err != nil {
-		if factory.Logger != nil {
-			factory.Logger.Errorw("CRE log line limit is outside the supported range. Using default value", "key", setting.Key, "value", limit, "err", err)
-		}
-		limit = setting.DefaultValue
-	}
-	return uint32(limit)
 }
 
 func (l *wasmModuleLimiters) apply(cfg *host.ModuleConfig) {
@@ -204,5 +107,7 @@ func (l *wasmModuleLimiters) apply(cfg *host.ModuleConfig) {
 }
 
 func (l *wasmModuleLimiters) Close() error {
-	return services.CloseAll(l.closers...)
+	return services.CloseAll(l.memory, l.maxCompressedBinary, l.maxDecompressedBinary,
+		l.maxResponseSize, l.pendingCalls, l.enableUserMetrics, l.maxUserMetricPayload,
+		l.maxUserMetricNameLength, l.maxUserMetricLabels, l.maxUserMetricLabelValueLen, l.maxSubscriptions)
 }

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 )
@@ -14,28 +14,24 @@ import (
 // and runs the given ExecuteRequest.
 // Production binaries are brotli-compressed; tests pass isCompressed=false.
 //
-// limitsFactory supplies the settings source and logger for the module's
-// caller-owned limiters. Its logger is also passed to host.ModuleConfig so
-// WASM host diagnostics land alongside the rest of the enclave's output.
+// limiterSettings is the settings snapshot for this execution. The logger is
+// also passed to host.ModuleConfig for WASM host diagnostics.
 //
 // timeout bounds the module run: the WASM host turns it into a wasmtime epoch
 // deadline, which is the only thing that interrupts a guest spinning in pure
 // compute (the ctx deadline alone unblocks host calls but not the guest). It
 // surfaces as context.DeadlineExceeded. Non-positive leaves the host's own
 // default (10 minutes) in place.
-func executeWasm(ctx context.Context, limitsFactory limits.Factory, binary []byte, execReq *sdkpb.ExecuteRequest, isCompressed bool, helper host.ExecutionHelper, timeout time.Duration) (*sdkpb.ExecutionResult, error) {
-	moduleLimiters, err := newWASMModuleLimiters(ctx, limitsFactory)
-	if err != nil {
-		return nil, fmt.Errorf("creating WASM module limiters: %w", err)
-	}
+func executeWasm(ctx context.Context, lggr logger.Logger, limiterSettings *limiterSettingsSnapshot, binary []byte, execReq *sdkpb.ExecuteRequest, isCompressed bool, helper host.ExecutionHelper, timeout time.Duration) (*sdkpb.ExecutionResult, error) {
+	moduleLimiters := newWASMModuleLimiters(ctx, lggr, limiterSettings)
 	defer func() {
-		if err := moduleLimiters.Close(); err != nil && limitsFactory.Logger != nil {
-			limitsFactory.Logger.Warnf("closing WASM module limiters: %v", err)
+		if err := moduleLimiters.Close(); err != nil && lggr != nil {
+			lggr.Warnf("closing WASM module limiters: %v", err)
 		}
 	}()
 
 	modCfg := &host.ModuleConfig{
-		Logger:         limitsFactory.Logger,
+		Logger:         lggr,
 		IsUncompressed: !isCompressed,
 	}
 	moduleLimiters.apply(modCfg)
