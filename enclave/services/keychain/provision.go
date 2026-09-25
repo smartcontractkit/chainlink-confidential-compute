@@ -1,7 +1,6 @@
 package keychain
 
 import (
-	"bytes"
 	"errors"
 	"time"
 
@@ -43,7 +42,7 @@ type requestKeychain struct {
 }
 
 // NewRequestKeychain imports one request's key without starting rotation.
-func NewRequestKeychain(requestID [32]byte, snapshot BoxKeySnapshot) (Keychain, error) {
+func NewRequestKeychain(requestID [32]byte, snapshot BoxKeySnapshot) (*requestKeychain, error) {
 	var public [32]byte
 	curve25519.ScalarBaseMult(&public, &snapshot.PrivateKey)
 	if public != snapshot.PublicKey || snapshot.CreationTime.IsZero() || snapshot.TTL <= 0 {
@@ -60,19 +59,4 @@ func (k *requestKeychain) GetKeyPairForRequest(id [32]byte) (Keypair, error) {
 		return nil, errors.New("key is bound to a different request")
 	}
 	return k.key, nil
-}
-
-func (k *requestKeychain) GetKeyPair(public []byte) (Keypair, error) {
-	if !bytes.Equal(public, k.key.publicKey[:]) {
-		return nil, errors.New("keypair not found")
-	}
-	return k.key, nil
-}
-
-func (k *requestKeychain) GetKeyPairs() ([]Keypair, error) { return []Keypair{k.key}, nil }
-func (*requestKeychain) CreateKeyPair() (Keypair, error) {
-	return nil, errors.New("worker keychain cannot create keys")
-}
-func (*requestKeychain) DeleteKeyPair([]byte) error {
-	return errors.New("worker keychain cannot delete keys")
 }
