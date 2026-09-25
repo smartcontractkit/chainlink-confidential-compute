@@ -21,7 +21,6 @@ type capturingWorker struct {
 	err  error
 }
 
-func (*capturingWorker) PIDs() []int { return nil }
 func (w *capturingWorker) Run(job worker.Job) (worker.Reply, error) {
 	w.jobs = append(w.jobs, job)
 	result, _ := proto.Marshal(&sdkpb.ExecutionResult{Result: &sdkpb.ExecutionResult_Value{Value: values.Proto(values.NewString("done"))}})

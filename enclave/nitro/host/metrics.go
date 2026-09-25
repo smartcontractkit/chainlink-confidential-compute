@@ -61,9 +61,6 @@ type enclaveMemorySnapshot struct {
 	processRSSBytes int64
 	availableBytes  int64
 	peakRSSBytes    int64
-	workersPresent  bool
-	workerRSSBytes  int64
-	workerCount     int64
 }
 
 type hostMetrics struct {
@@ -253,16 +250,6 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	if err != nil {
 		return nil, fmt.Errorf("create enclave peak RSS memory gauge: %w", err)
 	}
-	if _, err = meter.Int64ObservableGauge("confidential_compute.enclave.memory.workers_rss",
-		metric.WithDescription("Sum of execution-worker RSS, quantized to the nearest MiB inside the enclave; shared pages may be counted more than once"),
-		metric.WithUnit("By"), metric.WithInt64Callback(metrics.observeWorkerRSS)); err != nil {
-		return nil, fmt.Errorf("create worker RSS gauge: %w", err)
-	}
-	if _, err = meter.Int64ObservableGauge("confidential_compute.enclave.workers.active",
-		metric.WithDescription("Active enclave execution processes at the last memory sample"),
-		metric.WithUnit("1"), metric.WithInt64Callback(metrics.observeWorkerCount)); err != nil {
-		return nil, fmt.Errorf("create worker count gauge: %w", err)
-	}
 
 	metrics.workflowActive = active
 	metrics.workflowsActiveMax = activeMax
@@ -383,33 +370,13 @@ func (m *hostMetrics) observePeakRSSMemory(_ context.Context, observer metric.In
 }
 
 func (m *hostMetrics) recordEnclaveMemory(estimate types.MemoryEstimateResponse) {
-	snapshot := &enclaveMemorySnapshot{
+	m.memory.Store(&enclaveMemorySnapshot{
 		totalBytes:      mibToBytes(estimate.TotalMB),
 		goRuntimeBytes:  mibToBytes(estimate.UsedMB),
 		processRSSBytes: mibToBytes(estimate.RSSMB),
 		availableBytes:  mibToBytes(estimate.AvailableMB),
 		peakRSSBytes:    mibToBytes(estimate.PeakRSSMB),
-	}
-	if estimate.Workers != nil {
-		snapshot.workersPresent = true
-		snapshot.workerRSSBytes = mibToBytes(estimate.Workers.RSSMB)
-		snapshot.workerCount = int64(estimate.Workers.Count)
-	}
-	m.memory.Store(snapshot)
-}
-
-func (m *hostMetrics) observeWorkerRSS(_ context.Context, observer metric.Int64Observer) error {
-	if s := m.memory.Load(); s != nil && s.workersPresent {
-		observer.Observe(s.workerRSSBytes)
-	}
-	return nil
-}
-
-func (m *hostMetrics) observeWorkerCount(_ context.Context, observer metric.Int64Observer) error {
-	if s := m.memory.Load(); s != nil && s.workersPresent {
-		observer.Observe(s.workerCount)
-	}
-	return nil
+	})
 }
 
 func (m *hostMetrics) clearEnclaveMemory() {
