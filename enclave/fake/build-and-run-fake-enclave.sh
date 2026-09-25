@@ -71,7 +71,7 @@ if [ "${ALLOW_RECONFIG}" = "true" ]; then APP_ARGS="${APP_ARGS} --allow-reconfig
 PIDS=()
 
 WORKER_DIR=""
-trap 'trap - EXIT INT TERM; kill -TERM "${PIDS[@]}" 2>/dev/null || true; wait "${PIDS[@]}" 2>/dev/null || true; if [ -n "${WORKER_DIR}" ]; then rm -rf "${WORKER_DIR}"; fi' EXIT INT TERM
+trap 'trap - EXIT INT TERM; kill -TERM ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true; wait ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true; if [ -n "${WORKER_DIR}" ]; then rm -rf "${WORKER_DIR}"; fi' EXIT INT TERM
 APP_COMMAND=(go run ./environments/fake/)
 if [ "${APP}" = "confidential-workflows" ]; then
     WORKER_DIR=$(mktemp -d "${HOME}/workflow-worker.XXXXXX")
