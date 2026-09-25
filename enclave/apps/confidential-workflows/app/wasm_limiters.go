@@ -1,9 +1,11 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/config"
 	"github.com/smartcontractkit/chainlink-common/pkg/services"
@@ -25,6 +27,7 @@ type wasmModuleLimiters struct {
 	maxUserMetricLabels        limits.BoundLimiter[int]
 	maxUserMetricLabelValueLen limits.BoundLimiter[int]
 	maxSubscriptions           limits.BoundLimiter[int]
+	maxLogLenBytes             uint32
 	closers                    []io.Closer
 }
 
@@ -50,6 +53,25 @@ func memoryLimitParser(setting settings.Setting[config.Size]) settingParser {
 	}
 }
 
+func logLineLimitParser(setting settings.Setting[config.Size]) settingParser {
+	return func(value string) error {
+		limit, err := setting.Parse(value)
+		if err != nil {
+			return err
+		}
+		return validateMaxLogLenBytes(limit)
+	}
+}
+
+func validateMaxLogLenBytes(limit config.Size) error {
+	// The WASM host receives the log length as an int32 before comparing it to
+	// MaxLogLenBytes, so values outside this range cannot be enforced correctly.
+	if limit < 1 || limit > config.Size(math.MaxInt32) {
+		return fmt.Errorf("log line limit must be between 1 byte and %d bytes", math.MaxInt32)
+	}
+	return nil
+}
+
 func wasmLimiterSettingParsers() map[string]settingParser {
 	cfg := cresettings.Default.PerWorkflow
 	subscriptions := cresettings.Default.WASMPollOneoffSubscriptionLimit
@@ -59,6 +81,7 @@ func wasmLimiterSettingParsers() map[string]settingParser {
 		cfg.WASMBinarySizeLimit.Key:           parserFor(cfg.WASMBinarySizeLimit),
 		cfg.ExecutionResponseLimit.Key:        parserFor(cfg.ExecutionResponseLimit),
 		cfg.CapabilityConcurrencyLimit.Key:    parserFor(cfg.CapabilityConcurrencyLimit),
+		cfg.LogLineLimit.Key:                  logLineLimitParser(cfg.LogLineLimit),
 		cfg.UserMetricEnabled.Key:             parserFor(cfg.UserMetricEnabled),
 		cfg.UserMetricPayloadLimit.Key:        parserFor(cfg.UserMetricPayloadLimit),
 		cfg.UserMetricNameLengthLimit.Key:     parserFor(cfg.UserMetricNameLengthLimit),
@@ -68,7 +91,7 @@ func wasmLimiterSettingParsers() map[string]settingParser {
 	}
 }
 
-func newWASMModuleLimiters(factory limits.Factory) (_ *wasmModuleLimiters, err error) {
+func newWASMModuleLimiters(ctx context.Context, factory limits.Factory) (_ *wasmModuleLimiters, err error) {
 	l := &wasmModuleLimiters{}
 	defer func() {
 		if err != nil {
@@ -77,6 +100,7 @@ func newWASMModuleLimiters(factory limits.Factory) (_ *wasmModuleLimiters, err e
 	}()
 
 	cfg := cresettings.Default.PerWorkflow
+	l.maxLogLenBytes = resolveMaxLogLenBytes(ctx, factory, cfg.LogLineLimit)
 
 	l.memory, err = limits.MakeUpperBoundLimiter(factory, cfg.WASMMemoryLimit)
 	if err != nil {
@@ -147,6 +171,23 @@ func newWASMModuleLimiters(factory limits.Factory) (_ *wasmModuleLimiters, err e
 	return l, nil
 }
 
+func resolveMaxLogLenBytes(ctx context.Context, factory limits.Factory, setting settings.Setting[config.Size]) uint32 {
+	limit, err := setting.GetOrDefault(ctx, factory.Settings)
+	if err != nil {
+		if factory.Logger != nil {
+			factory.Logger.Errorw("Failed to get CRE log line limit. Using default value", "key", setting.Key, "err", err)
+		}
+		limit = setting.DefaultValue
+	}
+	if err := validateMaxLogLenBytes(limit); err != nil {
+		if factory.Logger != nil {
+			factory.Logger.Errorw("CRE log line limit is outside the supported range. Using default value", "key", setting.Key, "value", limit, "err", err)
+		}
+		limit = setting.DefaultValue
+	}
+	return uint32(limit)
+}
+
 func (l *wasmModuleLimiters) apply(cfg *host.ModuleConfig) {
 	cfg.MemoryLimiter = l.memory
 	cfg.MaxCompressedBinaryLimiter = l.maxCompressedBinary
@@ -159,6 +200,7 @@ func (l *wasmModuleLimiters) apply(cfg *host.ModuleConfig) {
 	cfg.MaxUserMetricLabelsPerMetricLimiter = l.maxUserMetricLabels
 	cfg.MaxUserMetricLabelValueLengthLimiter = l.maxUserMetricLabelValueLen
 	cfg.MaxSubscriptionsLimiter = l.maxSubscriptions
+	cfg.MaxLogLenBytes = l.maxLogLenBytes
 }
 
 func (l *wasmModuleLimiters) Close() error {

@@ -24,7 +24,7 @@ import (
 // surfaces as context.DeadlineExceeded. Non-positive leaves the host's own
 // default (10 minutes) in place.
 func executeWasm(ctx context.Context, limitsFactory limits.Factory, binary []byte, execReq *sdkpb.ExecuteRequest, isCompressed bool, helper host.ExecutionHelper, timeout time.Duration) (*sdkpb.ExecutionResult, error) {
-	moduleLimiters, err := newWASMModuleLimiters(limitsFactory)
+	moduleLimiters, err := newWASMModuleLimiters(ctx, limitsFactory)
 	if err != nil {
 		return nil, fmt.Errorf("creating WASM module limiters: %w", err)
 	}
