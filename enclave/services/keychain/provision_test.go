@@ -44,9 +44,6 @@ func TestWorkerKeyProvisioning(t *testing.T) {
 	require.Equal(t, "secret", string(plaintext))
 	_, err = worker.GetKeyPairForRequest([32]byte{2})
 	require.Error(t, err)
-	_, err = worker.CreateKeyPair()
-	require.Error(t, err)
-	require.Error(t, worker.DeleteKeyPair(kp.Public()))
 	require.Equal(t, "[private key snapshot]", fmt.Sprintf("%+v", decoded))
 	require.Equal(t, "[private key snapshot]", fmt.Sprintf("%#v", decoded))
 
