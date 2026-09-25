@@ -90,7 +90,6 @@ type Config struct {
 
 type WorkerRunner interface {
 	Run(worker.Job) (worker.Reply, error)
-	PIDs() []int
 }
 
 func WithWorker(w WorkerRunner) Option {
@@ -489,13 +488,6 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		return nil, &types.ExecuteError{Error: fmt.Sprintf("marshalling workflow response: %s", err), Code: http.StatusInternalServerError}
 	}
 	return cwRespBytes, nil
-}
-
-func (a *confidentialWorkflowsApp) WorkerPIDs() []int {
-	if a.worker == nil {
-		return nil
-	}
-	return a.worker.PIDs()
 }
 
 // ExecuteWorkflow reuses the same helper and timeout policy in workers and local tests.

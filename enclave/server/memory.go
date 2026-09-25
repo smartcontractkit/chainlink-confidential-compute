@@ -72,12 +72,8 @@ func readMemInfo() memInfo {
 // readProcStatus reads the enclave process's resident-set figures from
 // /proc/self/status, with the same degradation behaviour as readMemInfo.
 func readProcStatus() procStatus {
-	return readProcStatusFile("/proc/self/status")
-}
-
-func readProcStatusFile(path string) procStatus {
 	var status procStatus
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile("/proc/self/status")
 	if err != nil {
 		return status
 	}
@@ -86,16 +82,6 @@ func readProcStatusFile(path string) procStatus {
 		"VmHWM": &status.peakRSSBytes,
 	})
 	return status
-}
-
-func readWorkerRSSBytes(pids []int) uint64 {
-	var total uint64
-	for _, pid := range pids {
-		if pid > 0 {
-			total += readProcStatusFile("/proc/" + strconv.Itoa(pid) + "/status").rssBytes
-		}
-	}
-	return total
 }
 
 // parseSizeFields extracts the requested "Key: <n> kB" fields into their
