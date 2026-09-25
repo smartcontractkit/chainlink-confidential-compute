@@ -439,8 +439,8 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	cfg, gw := a.lastConfig.Copy(), a.gatewayConfig
 	a.mu.Unlock()
 	reply, runErr := a.worker.Run(context.Background(), worker.Job{
-		Limits:  resolved,
-		Version: worker.Version, RequestID: requestID, Execution: inputData, Binary: binary,
+		Limits:    resolved,
+		RequestID: requestID, Execution: inputData, Binary: binary,
 		Config: cfg, Gateway: worker.GatewayConfig(gw),
 		HTTPTimeout: a.httpFetcher.DefaultTimeout(), ExecutionTimeout: time.Duration(a.executionTimeout.Load()), SignedRequests: rawSignedRequests,
 	})

@@ -49,7 +49,7 @@ func TestProcessChild(t *testing.T) {
 			os.Exit(7)
 		}
 	}
-	r := successReply(job.RequestID, "hello")
+	r := successReply("hello")
 	switch *mode {
 	case "panic":
 		go func() { panic("test callback panic") }()
@@ -66,7 +66,7 @@ func TestProcessChild(t *testing.T) {
 		_, _ = fmt.Fprint(os.Stdout, "not JSON")
 		time.Sleep(time.Hour)
 	case "truncated":
-		_, _ = fmt.Fprint(os.Stdout, `{"Version":`)
+		_, _ = fmt.Fprint(os.Stdout, `{"Result":`)
 		os.Exit(0)
 	case "oversize", "oversize-hang":
 		_, _ = fmt.Fprint(os.Stdout, strings.Repeat(" ", MaxReplyBytes+1))
@@ -74,12 +74,14 @@ func TestProcessChild(t *testing.T) {
 			time.Sleep(time.Hour)
 		}
 		os.Exit(0)
-	case "wrong-id":
-		r.RequestID[0] ^= 1
+	case "empty":
+		r = Reply{}
+	case "both":
+		r.Error = &types.ExecuteError{Error: "contradictory", Code: 500}
 	case "error":
-		r.Outcome, r.Result, r.Error = ExecutionError, nil, &types.ExecuteError{Error: types.ErrWasmExecutionTimeout, Code: 504}
+		r.Result, r.Error = nil, &types.ExecuteError{Error: types.ErrWasmExecutionTimeout, Code: 504}
 	case "large":
-		r = successReply(job.RequestID, strings.Repeat("x", 8<<20))
+		r = successReply(strings.Repeat("x", 8<<20))
 	case "slow":
 		time.Sleep(200 * time.Millisecond)
 	case "descendant":
@@ -92,7 +94,7 @@ func TestProcessChild(t *testing.T) {
 			os.Exit(9)
 		}
 	}
-	if err := WriteReply(os.Stdout, r); err != nil {
+	if err := json.NewEncoder(os.Stdout).Encode(r); err != nil {
 		os.Exit(5)
 	}
 	if *mode == "reply-hang" {
@@ -128,7 +130,7 @@ func readPID(t *testing.T, path string) int {
 }
 
 func TestProcessOutcomes(t *testing.T) {
-	for _, mode := range []string{"success", "error", "large", "early", "panic", "abort", "malformed", "garbage-hang", "truncated", "oversize", "oversize-hang", "wrong-id", "reply-hang", "reply-fail", "trailing"} {
+	for _, mode := range []string{"success", "error", "large", "early", "panic", "abort", "malformed", "garbage-hang", "truncated", "oversize", "oversize-hang", "empty", "both", "reply-hang", "reply-fail", "trailing"} {
 		t.Run(mode, func(t *testing.T) {
 			p := processForTest(t, mode)
 			start := time.Now()
@@ -136,7 +138,7 @@ func TestProcessOutcomes(t *testing.T) {
 			require.Less(t, time.Since(start), 8*time.Second)
 			if mode == "success" || mode == "error" || mode == "large" {
 				require.NoError(t, err)
-				require.NoError(t, r.Validate([32]byte{1}))
+				require.True(t, r.Result != nil || r.Error != nil)
 			} else {
 				require.Error(t, err)
 			}
