@@ -85,7 +85,11 @@ func Serve(in io.Reader, out io.Writer, lggr logger.Logger, openAttestor func() 
 }
 
 func Main(openAttestor func() (attestor.Attestor, func(), error)) int {
-	lggr := logger.NewWithSync(os.Stderr)
+	lggr, err := logger.New()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cannot construct worker logger")
+		return 1
+	}
 	defer func() { _ = lggr.Sync() }()
 	if err := Serve(os.Stdin, os.Stdout, lggr, openAttestor); err != nil {
 		fmt.Fprintln(os.Stderr, "worker protocol failed")
