@@ -39,7 +39,6 @@ type confidentialWorkflowsApp struct {
 	httpFetcher         *httpfetch.Fetcher
 	requirementsHandler host.RequirementsHandler
 	tpe                 sdkpb.TeeType
-	runWasm             WasmRunner
 	worker              WorkerRunner
 	gatewayTimeout      time.Duration
 
@@ -79,7 +78,6 @@ var _ types.EnclaveApp = (*confidentialWorkflowsApp)(nil)
 
 // Config requires explicit transports to prevent direct network access.
 type Config struct {
-	RunWasm                 WasmRunner
 	Worker                  WorkerRunner
 	GatewayTimeout          time.Duration
 	HTTPFetcher             *httpfetch.Fetcher
@@ -92,15 +90,7 @@ type WorkerRunner interface {
 	Run(worker.Job) (worker.Reply, error)
 }
 
-func WithWorker(w WorkerRunner) Option {
-	return func(a *confidentialWorkflowsApp) { a.worker = w }
-}
-
 type WasmRunner func(context.Context, logger.Logger, wasmlimits.Config, []byte, *sdkpb.ExecuteRequest, bool, host.ExecutionHelper, time.Duration) (*sdkpb.ExecutionResult, error)
-
-func WithWasmRunner(run WasmRunner) Option {
-	return func(a *confidentialWorkflowsApp) { a.runWasm = run }
-}
 
 type Option func(*confidentialWorkflowsApp)
 
@@ -299,8 +289,8 @@ func (a *confidentialWorkflowsApp) OnConfigUpdate(config types.EnclaveConfig) {
 
 // NewConfidentialWorkflowsApp requires every production transport explicitly.
 func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config Config) (types.EnclaveApp, error) {
-	if (config.RunWasm == nil) == (config.Worker == nil) {
-		return nil, errors.New("exactly one WASM or worker runner is required")
+	if config.Worker == nil {
+		return nil, errors.New("worker runner is required")
 	}
 	if config.HTTPFetcher == nil {
 		return nil, errors.New("HTTP fetcher is required")
@@ -313,7 +303,6 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 	}
 
 	a := &confidentialWorkflowsApp{
-		runWasm:           config.RunWasm,
 		worker:            config.Worker,
 		gatewayTimeout:    config.GatewayTimeout,
 		logger:            lggr,
@@ -446,40 +435,28 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		executionLogger.Warnw("Workflow execution is missing org ID")
 	}
 	resolved := resolveWASMLimits(execCtx, executionLogger, a.limiterSettings.Snapshot())
-	var result *sdkpb.ExecutionResult
-	if a.worker != nil {
-		a.mu.Lock()
-		cfg, gw := a.lastConfig.Copy(), a.gatewayConfig
-		a.mu.Unlock()
-		reply, runErr := a.worker.Run(worker.Job{
-			Version: worker.Version, RequestID: requestID, Execution: inputData, Binary: binary,
-			Limits: resolved,
-			Config: cfg, Gateway: worker.GatewayConfig{URL: gw.URL, RequestTimeout: gw.RequestTimeout, RetryBackoff: gw.RetryBackoff, RetryTimeout: gw.RetryTimeout},
-			HTTPTimeout: a.httpFetcher.DefaultTimeout(), ExecutionTimeout: time.Duration(a.executionTimeout.Load()), SignedRequests: rawSignedRequests,
-		})
-		if runErr != nil {
-			a.logger.Errorw("workflow worker failed", "requestID", fmt.Sprintf("%x", requestID), "workflowID", execution.WorkflowId, "error", runErr)
-			return nil, &types.ExecuteError{Error: "workflow worker failed", Code: http.StatusInternalServerError}
-		}
-		for _, event := range reply.Events {
-			emitter.Emit(event.Event, event.Details)
-		}
-		if reply.Error != nil {
-			return nil, reply.Error
-		}
-		result = &sdkpb.ExecutionResult{}
-		if err := proto.Unmarshal(reply.Result, result); err != nil {
-			return nil, &types.ExecuteError{Error: "invalid worker result", Code: http.StatusInternalServerError}
-		}
-	} else {
-		a.mu.Lock()
-		dispatcher := a.dispatcher
-		a.mu.Unlock()
-		var execErr *types.ExecuteError
-		result, execErr = ExecuteWorkflow(a.runWasm, a.logger, resolved, requestID, &execution, binary, rawSignedRequests, emitter, dispatcher, a.httpFetcher, time.Duration(a.executionTimeout.Load()))
-		if execErr != nil {
-			return nil, execErr
-		}
+	a.mu.Lock()
+	cfg, gw := a.lastConfig.Copy(), a.gatewayConfig
+	a.mu.Unlock()
+	reply, runErr := a.worker.Run(worker.Job{
+		Limits:  resolved,
+		Version: worker.Version, RequestID: requestID, Execution: inputData, Binary: binary,
+		Config: cfg, Gateway: worker.GatewayConfig(gw),
+		HTTPTimeout: a.httpFetcher.DefaultTimeout(), ExecutionTimeout: time.Duration(a.executionTimeout.Load()), SignedRequests: rawSignedRequests,
+	})
+	if runErr != nil {
+		a.logger.Errorw("workflow worker failed", "requestID", fmt.Sprintf("%x", requestID), "workflowID", execution.WorkflowId, "error", runErr)
+		return nil, &types.ExecuteError{Error: "workflow worker failed", Code: http.StatusInternalServerError}
+	}
+	for _, event := range reply.Events {
+		emitter.Emit(event.Event, event.Details)
+	}
+	if reply.Error != nil {
+		return nil, reply.Error
+	}
+	result := &sdkpb.ExecutionResult{}
+	if err := proto.Unmarshal(reply.Result, result); err != nil {
+		return nil, &types.ExecuteError{Error: "invalid worker result", Code: http.StatusInternalServerError}
 	}
 
 	// The capability framework expects ConfidentialWorkflowResponse, not the raw SDK result.
@@ -510,9 +487,6 @@ func ExecuteWorkflow(run WasmRunner, lggr logger.Logger, resolved wasmlimits.Con
 		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(execCtx, execTimeout)
 		defer cancel()
-	}
-	if run == nil {
-		return nil, &types.ExecuteError{Error: "WASM runner is not configured", Code: http.StatusInternalServerError}
 	}
 	executionLogger := logger.With(lggr, append(contexts.CREValue(execCtx).LoggerKVs(), "execution_id", execution.GetExecutionId())...)
 	result, err := run(execCtx, executionLogger, resolved, binary, execution.SdkExecuteRequest, true, helper, execTimeout)

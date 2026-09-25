@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	clconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/worker"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/wasmruntime"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/server"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
@@ -16,6 +18,29 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 )
+
+type localWorker struct{ app *confidentialWorkflowsApp }
+
+func (w localWorker) Run(job worker.Job) (worker.Reply, error) {
+	var execution confworkflowtypes.WorkflowExecution
+	if err := proto.Unmarshal(job.Execution, &execution); err != nil {
+		return worker.Reply{}, err
+	}
+	w.app.mu.Lock()
+	dispatcher := w.app.dispatcher
+	w.app.mu.Unlock()
+	var events worker.Events
+	result, execErr := ExecuteWorkflow(wasmruntime.Execute, w.app.logger, job.Limits, job.RequestID, &execution, job.Binary,
+		job.SignedRequests, &events, dispatcher, w.app.httpFetcher, job.ExecutionTimeout)
+	reply := worker.Reply{Version: worker.Version, RequestID: job.RequestID, Outcome: worker.ExecutionError, Error: execErr}
+	var err error
+	reply.Events, err = events.Snapshot()
+	if err == nil && execErr == nil {
+		reply.Outcome = worker.Success
+		reply.Result, err = proto.Marshal(result)
+	}
+	return reply, err
+}
 
 type capturingWorker struct {
 	jobs []worker.Job
@@ -41,7 +66,7 @@ func TestWorkerSnapshotsEffectiveState(t *testing.T) {
 		s.ExecutionTimeout = Duration(time.Second)
 		s.GatewayRequestTimeout = Duration(3 * time.Second)
 		s.CRESettings = json.RawMessage(`{"workflow":{"workflow":{"PerWorkflow":{"WASMMemoryLimit":"256mb","ExecutionResponseLimit":"13kb","CapabilityConcurrencyLimit":"7","LogLineLimit":"2kb"}}}}`)
-	}, WithWorker(w), WithRemoteDispatcherFactory(func(GatewayConfig) (RemoteDispatcher, error) { return &testRemoteDispatcher{}, nil }))
+	}, func(a *confidentialWorkflowsApp) { a.worker = w }, WithRemoteDispatcherFactory(func(GatewayConfig) (RemoteDispatcher, error) { return &testRemoteDispatcher{}, nil }))
 	app := a.(*confidentialWorkflowsApp)
 	config := types.EnclaveConfig{Signers: [][]byte{{1}}, MasterPublicKey: []byte{2}, T: 1, F: 1}
 	app.OnConfigUpdate(config)
