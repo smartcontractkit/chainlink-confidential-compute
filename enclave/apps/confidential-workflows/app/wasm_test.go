@@ -25,7 +25,7 @@ func buildTestWasm(t *testing.T, name string) []byte {
 	require.NoError(t, err)
 
 	outFile := filepath.Join(t.TempDir(), name+".wasm")
-	cmd := exec.Command("go", "build", "-p", "1", "-o", outFile, ".")
+	cmd := exec.Command("go", "build", "-o", outFile, ".")
 	cmd.Dir = srcDir
 	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0")
 

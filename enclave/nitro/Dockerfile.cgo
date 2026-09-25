@@ -34,9 +34,9 @@ COPY util/ ./util/
 
 # Only the worker links Wasmtime. Both binaries are measured in the same EIF.
 RUN cd enclave/apps/${APP_NAME} && \
-    GOMAXPROCS=1 CGO_ENABLED=0 GOOS=linux go build -p 1 \
+    CGO_ENABLED=0 GOOS=linux go build \
         -o /enclave-app ./environments/nitro/ && \
-    GOMAXPROCS=1 CGO_ENABLED=1 GOOS=linux go build -p 1 \
+    CGO_ENABLED=1 GOOS=linux go build \
         -o /workflow-worker ./environments/nitro-worker/
 
 FROM amazonlinux:latest
