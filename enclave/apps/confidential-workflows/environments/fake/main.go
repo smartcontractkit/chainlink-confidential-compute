@@ -1,14 +1,10 @@
 package main
 
 import (
-	"context"
 	"crypto/ed25519"
 	"flag"
 	"log"
 	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
@@ -74,15 +70,10 @@ func main() {
 
 	kc := keychain.NewBoxKeychain(logger, rotationOverride, expirationOverride, nil)
 	comb := combiner.NewTDH2EasyCombiner()
-	processes, err := worker.NewProcesses(*workerPath, nil, []string{
-		types.EnvVSOCKBackend + "=" + os.Getenv(types.EnvVSOCKBackend),
-		types.EnvEnclaveCID + "=" + os.Getenv(types.EnvEnclaveCID),
-		"HOME=" + os.Getenv("HOME"),
-	}, kc, appLogger)
+	processes, err := worker.NewProcesses(*workerPath, nil, nil, kc, appLogger)
 	if err != nil {
 		logger.Fatalf("Failed to configure worker: %v", err)
 	}
-	defer processes.Close()
 
 	// Runtime config is injected by the host over vsock (see host
 	// injectSettings -> app.InjectSettings); the factory builds the remote
@@ -126,28 +117,18 @@ func main() {
 		logger.Fatalf("Failed to construct confidential workflows app: %v", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	done := make(chan error, 1)
-	go func() {
-		done <- runner.StartFakeEnclave(
-			confApp,
-			att,
-			kc,
-			comb,
-			logger,
-			emitter.NewNoOpEmitter(),
-			vsockPort,
-			*allowReconfig,
-		)
-	}()
-	select {
-	case err = <-done:
-	case <-ctx.Done():
-	}
+	err = runner.StartFakeEnclave(
+		confApp,
+		att,
+		kc,
+		comb,
+		logger,
+		emitter.NewNoOpEmitter(),
+		vsockPort,
+		*allowReconfig,
+	)
 	if err != nil {
-		_ = processes.Close()
-		logger.Fatalf("Fake enclave stopped: %v", err)
+		logger.Fatalf("Failed to start fake enclave: %v", err)
 	}
 }
 

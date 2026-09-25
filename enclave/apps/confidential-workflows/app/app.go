@@ -87,7 +87,7 @@ type Config struct {
 }
 
 type WorkerRunner interface {
-	Run(worker.Job) (worker.Reply, error)
+	Run(context.Context, worker.Job) (worker.Reply, error)
 }
 
 type WasmRunner func(context.Context, logger.Logger, wasmlimits.Config, []byte, *sdkpb.ExecuteRequest, bool, host.ExecutionHelper, time.Duration) (*sdkpb.ExecutionResult, error)
@@ -438,7 +438,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	a.mu.Lock()
 	cfg, gw := a.lastConfig.Copy(), a.gatewayConfig
 	a.mu.Unlock()
-	reply, runErr := a.worker.Run(worker.Job{
+	reply, runErr := a.worker.Run(context.Background(), worker.Job{
 		Limits:  resolved,
 		Version: worker.Version, RequestID: requestID, Execution: inputData, Binary: binary,
 		Config: cfg, Gateway: worker.GatewayConfig(gw),

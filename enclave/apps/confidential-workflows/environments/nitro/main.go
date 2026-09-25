@@ -1,14 +1,10 @@
 package main
 
 import (
-	"context"
 	"crypto/ed25519"
 	"flag"
 	"log"
 	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
@@ -62,7 +58,6 @@ func main() {
 	if err != nil {
 		logger.Fatalf("Failed to configure worker: %v", err)
 	}
-	defer processes.Close()
 
 	// A Nitro EIF is measured (PCR), so environment-specific endpoints cannot be
 	// baked in. The gateway URL, storage endpoint, and storage key are all
@@ -119,28 +114,18 @@ func main() {
 		logger.Fatalf("Failed to construct confidential workflows app: %v", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	done := make(chan error, 1)
-	go func() {
-		done <- nitro.StartNitroEnclave(
-			confApp,
-			att,
-			kc,
-			comb,
-			logger,
-			emitter.NewNoOpEmitter(),
-			vsockPort,
-			*allowReconfig,
-		)
-	}()
-	select {
-	case err = <-done:
-	case <-ctx.Done():
-	}
+	err = nitro.StartNitroEnclave(
+		confApp,
+		att,
+		kc,
+		comb,
+		logger,
+		emitter.NewNoOpEmitter(),
+		vsockPort,
+		*allowReconfig,
+	)
 	if err != nil {
-		_ = processes.Close()
-		logger.Fatalf("Nitro enclave stopped: %v", err)
+		logger.Fatalf("Failed to start Nitro enclave: %v", err)
 	}
 }
 

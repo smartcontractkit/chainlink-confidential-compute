@@ -7,6 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -80,10 +83,9 @@ func TestRealWorkerBinary(t *testing.T) {
 	workerPath := build(t, "../..", "./environments/nitro-worker", "worker", "CGO_ENABLED=1")
 	p, err := worker.NewProcesses(workerPath, nil, []string{"HOME=" + t.TempDir(), "GOMAXPROCS=1"}, nil, logger.Test(t))
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, p.Close()) })
 	hello := jobFor(t, "hello")
 	start := time.Now()
-	reply, err := p.Run(hello)
+	reply, err := p.Run(t.Context(), hello)
 	require.NoError(t, err)
 	require.Equal(t, worker.Success, reply.Outcome)
 	var result sdkpb.ExecutionResult
@@ -91,46 +93,51 @@ func TestRealWorkerBinary(t *testing.T) {
 	require.Equal(t, "hello from enclave wasm", result.GetValue().GetStringValue())
 	t.Logf("cold worker: %s", time.Since(start))
 	start = time.Now()
-	_, err = p.Run(hello)
+	_, err = p.Run(t.Context(), hello)
 	require.NoError(t, err)
 	t.Logf("warm worker: %s", time.Since(start))
 
 	spin := jobFor(t, "spin")
 	spin.ExecutionTimeout = 100 * time.Millisecond
-	reply, err = p.Run(spin)
+	reply, err = p.Run(t.Context(), spin)
 	require.NoError(t, err)
 	require.Equal(t, worker.ExecutionError, reply.Outcome)
 	require.Contains(t, reply.Error.Error, types.ErrWasmExecutionTimeout)
-	reply, err = p.Run(spin)
+	reply, err = p.Run(t.Context(), spin)
 	require.NoError(t, err)
 	require.Equal(t, worker.ExecutionError, reply.Outcome)
 	require.Contains(t, reply.Error.Error, types.ErrWasmExecutionTimeout, "warm pure-compute executions must also time out")
-	_, err = p.Run(hello)
+	_, err = p.Run(t.Context(), hello)
 	require.NoError(t, err, "a timeout must not affect later executions")
 
-	spin.ExecutionTimeout = 5 * time.Second
-	crashed := make(chan error, 1)
-	go func() { _, err := p.Run(spin); crashed <- err }()
-	require.Eventually(t, func() bool { return len(p.PIDs()) == 1 }, 5*time.Second, time.Millisecond)
-	pid := p.PIDs()[0]
-	completed := make(chan error, 1)
-	go func() {
-		r, err := p.Run(hello)
-		if err == nil {
-			err = r.Validate(hello.RequestID)
+	t.Run("native crash", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("procfs identifies workers for fault injection")
 		}
-		completed <- err
-	}()
-	require.Eventually(t, func() bool { return len(p.PIDs()) == 2 }, 5*time.Second, time.Millisecond)
-	require.NoError(t, syscall.Kill(pid, syscall.SIGABRT))
-	require.Error(t, <-crashed)
-	require.NoError(t, <-completed, "a native worker failure must not affect a concurrent workflow")
-	_, err = p.Run(hello)
-	require.NoError(t, err, "capacity must be released after a worker crash")
-	require.Empty(t, p.PIDs())
+		spin.ExecutionTimeout = 5 * time.Second
+		crashed := make(chan error, 1)
+		go func() { _, err := p.Run(t.Context(), spin); crashed <- err }()
+		require.Eventually(t, func() bool { return len(workerPIDs(t, workerPath)) == 1 }, 5*time.Second, time.Millisecond)
+		pid := workerPIDs(t, workerPath)[0]
+		completed := make(chan error, 1)
+		go func() {
+			r, err := p.Run(t.Context(), hello)
+			if err == nil {
+				err = r.Validate(hello.RequestID)
+			}
+			completed <- err
+		}()
+		require.Eventually(t, func() bool { return len(workerPIDs(t, workerPath)) == 2 }, 5*time.Second, time.Millisecond)
+		require.NoError(t, syscall.Kill(pid, syscall.SIGABRT))
+		require.Error(t, <-crashed)
+		require.NoError(t, <-completed, "a native worker failure must not affect a concurrent workflow")
+		_, err = p.Run(t.Context(), hello)
+		require.NoError(t, err, "capacity must be released after a worker crash")
+		require.Empty(t, workerPIDs(t, workerPath))
+	})
 
 	httpJob := jobFor(t, "http-call")
-	reply, err = p.Run(httpJob)
+	reply, err = p.Run(t.Context(), httpJob)
 	require.NoError(t, err)
 	require.Equal(t, worker.Success, reply.Outcome)
 	var sawHTTP bool
@@ -153,4 +160,23 @@ func TestRealWorkerBinary(t *testing.T) {
 	hello.Binary[0] ^= 1
 	reply = Execute(hello, logger.Test(t), nil, nil)
 	require.Equal(t, worker.SetupError, reply.Outcome)
+}
+
+func workerPIDs(t *testing.T, executable string) []int {
+	t.Helper()
+	files, err := filepath.Glob("/proc/self/task/*/children")
+	require.NoError(t, err)
+	var pids []int
+	for _, file := range files {
+		data, _ := os.ReadFile(file)
+		for _, id := range strings.Fields(string(data)) {
+			path, _ := os.Readlink("/proc/" + id + "/exe")
+			if path == executable {
+				pid, err := strconv.Atoi(id)
+				require.NoError(t, err)
+				pids = append(pids, pid)
+			}
+		}
+	}
+	return pids
 }
