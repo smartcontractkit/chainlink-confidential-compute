@@ -75,8 +75,8 @@ trap 'trap - EXIT INT TERM; kill -TERM "${PIDS[@]}" 2>/dev/null || true; wait "$
 APP_COMMAND=(go run ./environments/fake/)
 if [ "${APP}" = "confidential-workflows" ]; then
     WORKER_DIR=$(mktemp -d "${HOME}/workflow-worker.XXXXXX")
-    ( cd "${ENCLAVE_PATH}" && GOMAXPROCS=1 go build -p 1 -o "${WORKER_DIR}/workflow-worker" ./environments/fake-worker/ )
-    ( cd "${ENCLAVE_PATH}" && GOMAXPROCS=1 go build -p 1 -o "${WORKER_DIR}/enclave-app" ./environments/fake/ )
+    ( cd "${ENCLAVE_PATH}" && go build -o "${WORKER_DIR}/workflow-worker" ./environments/fake-worker/ )
+    ( cd "${ENCLAVE_PATH}" && go build -o "${WORKER_DIR}/enclave-app" ./environments/fake/ )
     APP_ARGS="${APP_ARGS} --worker-path=${WORKER_DIR}/workflow-worker"
     APP_COMMAND=("${WORKER_DIR}/enclave-app")
 fi
