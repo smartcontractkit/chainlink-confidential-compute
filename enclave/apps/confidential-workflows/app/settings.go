@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -54,8 +55,8 @@ import (
 //   - WorkflowGracePeriod: how long each validated execution waits before it
 //     starts running. Zero falls back to types.DefaultWorkflowGracePeriod; a
 //     negative value disables the wait.
-//   - CRESettings: standard CRE scoped settings used by the WASM module
-//     limiters. The object may contain global, org, owner and workflow
+//   - CRESettings: standard CRE scoped settings used by the WASM module and
+//     HTTP action limiters. The object may contain global, org, owner and workflow
 //     overrides and is replaced as a unit on every injection, including runtime
 //     reinjection via POST /settings. Each execution snapshots these settings;
 //     they are not automatically synchronized with the CRE backend. Raising
@@ -116,8 +117,22 @@ func (s *limiterSettingsSnapshot) logFallback(lggr logger.Logger, key string, er
 		return
 	}
 	if _, loaded := s.logged.LoadOrStore(key, struct{}{}); !loaded {
-		lggr.Warnw("Failed to resolve CRE WASM setting. Using default value", "key", key, "err", err)
+		lggr.Warnw("Failed to resolve CRE setting. Using default value", "key", key, "err", err)
 	}
+}
+
+func resolveSetting[T any](ctx context.Context, lggr logger.Logger, snapshot *limiterSettingsSnapshot, setting settings.Setting[T]) T {
+	var getter settings.Getter
+	if snapshot != nil {
+		getter = snapshot.getter
+	}
+	value, err := setting.GetOrDefault(ctx, getter)
+	if err != nil {
+		// GetOrDefault returns the default alongside the error. Settings
+		// failures remain non-fatal for the execution.
+		snapshot.logFallback(lggr, setting.Key, err)
+	}
+	return value
 }
 
 // validate reports the required settings the payload left empty. The enclave

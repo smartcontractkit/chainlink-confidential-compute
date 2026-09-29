@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	httpcap "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http"
@@ -47,6 +48,9 @@ type enclaveExecutionHelper struct {
 	emitter          types.Emitter
 	remoteDispatcher RemoteDispatcher
 	httpFetcher      *httpfetch.Fetcher
+	httpLimits       httpActionLimits
+	httpCallsMu      sync.Mutex
+	httpCalls        int
 }
 
 var _ host.ExecutionHelper = (*enclaveExecutionHelper)(nil)
@@ -142,6 +146,14 @@ func (h *enclaveExecutionHelper) callCapability(ctx context.Context, req *sdkpb.
 }
 
 func (h *enclaveExecutionHelper) handleHTTPAction(ctx context.Context, req *sdkpb.CapabilityRequest) (*sdkpb.CapabilityResponse, error) {
+	h.httpCallsMu.Lock()
+	if h.httpCalls >= h.httpLimits.callLimit {
+		h.httpCallsMu.Unlock()
+		return errResponse(fmt.Sprintf("http-actions: capability call limit exceeded (PerWorkflow.HTTPAction.CallLimit: %d)", h.httpLimits.callLimit)), nil
+	}
+	h.httpCalls++
+	h.httpCallsMu.Unlock()
+
 	if h.httpFetcher == nil {
 		return errResponse("http-actions: no HTTP fetcher configured"), nil
 	}
@@ -149,7 +161,7 @@ func (h *enclaveExecutionHelper) handleHTTPAction(ctx context.Context, req *sdkp
 	if err := req.GetPayload().UnmarshalTo(input); err != nil {
 		return errResponse(fmt.Sprintf("http-actions: unmarshalling request: %v", err)), nil
 	}
-	resp, err := h.httpFetcher.Fetch(ctx, input)
+	resp, err := h.httpFetcher.Fetch(ctx, input, h.httpLimits.fetch)
 	if err != nil {
 		return errResponse(fmt.Sprintf("http-actions: %v", err)), nil
 	}

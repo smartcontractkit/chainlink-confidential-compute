@@ -166,7 +166,7 @@ func TestExecute_LimiterDiagnostics(t *testing.T) {
 			assert.Equal(t, "256mb", fields[cresettings.Default.PerWorkflow.WASMMemoryLimit.Key])
 			assert.Equal(t, cresettings.Default.PerWorkflow.LogLineLimit.DefaultValue.String(), fields[cresettings.Default.PerWorkflow.LogLineLimit.Key])
 
-			fallback := logs.FilterMessage("Failed to resolve CRE WASM setting. Using default value").All()
+			fallback := logs.FilterMessage("Failed to resolve CRE setting. Using default value").All()
 			require.Len(t, fallback, 1)
 			missingOrg := logs.FilterMessage("Workflow execution is missing org ID").All()
 			if org == "" {
