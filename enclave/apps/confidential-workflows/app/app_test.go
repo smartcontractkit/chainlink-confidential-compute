@@ -51,6 +51,7 @@ func makeExecution(t *testing.T, workflowID, binaryURL string, binaryHash []byte
 
 func TestNewConfidentialWorkflowsAppRequiresProductionTransports(t *testing.T) {
 	valid := Config{
+		Worker:      &capturingWorker{},
 		HTTPFetcher: httpfetch.NewFetcherWithClient(httpfetch.DefaultPolicy(), util.NewUnrestrictedClient()),
 		StorageFetcherFactory: storageFetcherFactory(func() types.HTTPClient {
 			return util.NewUnrestrictedClient()
@@ -61,6 +62,7 @@ func TestNewConfidentialWorkflowsAppRequiresProductionTransports(t *testing.T) {
 	}
 
 	tests := map[string]func(*Config){
+		"worker runner":             func(c *Config) { c.Worker = nil },
 		"HTTP fetcher":              func(c *Config) { c.HTTPFetcher = nil },
 		"storage fetcher factory":   func(c *Config) { c.StorageFetcherFactory = nil },
 		"remote dispatcher factory": func(c *Config) { c.RemoteDispatcherFactory = nil },

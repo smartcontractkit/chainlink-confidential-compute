@@ -28,8 +28,7 @@ type memInfo struct {
 // together for the same reason as memInfo.
 type procStatus struct {
 	// rssBytes is the process's resident set size (VmRSS). Unlike the Go
-	// runtime's own accounting it includes native allocations such as the
-	// wasmtime WASM linear memory that dominate the footprint under load.
+	// runtime's own accounting it includes native allocations outside Go.
 	rssBytes uint64
 	// peakRSSBytes is the high-water mark of that resident set (VmHWM). Being
 	// monotonic, it still shows a spike shorter than the host's poll interval,

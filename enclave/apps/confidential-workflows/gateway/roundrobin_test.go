@@ -204,6 +204,34 @@ func TestSendRequest_RoundRobinsStart(t *testing.T) {
 	}
 }
 
+func TestSendRequest_WorkerStartOffset(t *testing.T) {
+	var aHits, bHits atomic.Int32
+	a := httptest.NewServer(resultHandler(&aHits, json.RawMessage(`{"ok":true}`)))
+	defer a.Close()
+	b := httptest.NewServer(resultHandler(&bHits, json.RawMessage(`{"ok":true}`)))
+	defer b.Close()
+	for _, offset := range []uint64{0, 1, 1 << 63, ^uint64(0)} {
+		client := NewGatewayClient(urls(a, b), nil, WithStartOffset(offset))
+		beforeA, beforeB := aHits.Load(), bHits.Load()
+		if _, err := client.SendRequest(context.Background(), "m", json.RawMessage(`{}`)); err != nil {
+			t.Fatal(err)
+		}
+		if aHits.Load()-beforeA != int32(1-offset%2) || bHits.Load()-beforeB != int32(offset%2) {
+			t.Fatalf("wrong starting endpoint for offset %d", offset)
+		}
+		if _, err := client.SendRequest(context.Background(), "m", json.RawMessage(`{}`)); err != nil {
+			t.Fatal(err)
+		}
+		if aHits.Load()-beforeA != 1 || bHits.Load()-beforeB != 1 {
+			t.Fatal("offset must not change subsequent round-robin routing")
+		}
+	}
+	client := NewGatewayClient("", nil, WithStartOffset(1))
+	if _, err := client.SendRequest(context.Background(), "m", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("empty endpoints must still fail without a modulo-by-zero panic")
+	}
+}
+
 func TestSendRequest_NoGatewaysConfigured(t *testing.T) {
 	client := NewGatewayClient("", nil)
 	_, err := client.SendRequest(context.Background(), "m", json.RawMessage(`{}`))
