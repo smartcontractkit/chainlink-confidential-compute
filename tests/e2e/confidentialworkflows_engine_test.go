@@ -195,9 +195,9 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
 		`{"storageKey":%q,"storageServiceUrl":%q,"storageServiceTls":false,"gatewayUrl":%q,"gatewayRetryBackoff":"5s","gatewayRetryTimeout":"3m"}`,
 		engineTestStorageKeyHex, storageAddr, fmt.Sprintf("http://%s:9998,http://%s:9999", host, host)))
 	if !tests.UseFakeEnclave() {
-		// confidential-workflows EIF is larger than confidential-http (wasmtime/CGO),
-		// so it needs more memory per enclave (~1148 MiB minimum).
-		t.Setenv("ENCLAVE_MEMORY_MIB", "1536")
+		// Cold-worker admission must allow overlapping 30s triggers during the
+		// 60s gateway outage, with headroom for Nitro kernel memory.
+		t.Setenv("ENCLAVE_MEMORY_MIB", "3072")
 		t.Setenv("TOTAL_MEMORY_MIB", "4096")
 	}
 	enclaves, configURLs, enclaveCleanup := startNitroEnclaves(t, App{Name: "confidential-workflows"}, logger)
