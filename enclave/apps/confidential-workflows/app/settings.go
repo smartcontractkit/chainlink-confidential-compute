@@ -122,11 +122,10 @@ func (s *limiterSettingsSnapshot) logFallback(lggr logger.Logger, key string, er
 }
 
 func resolveSetting[T any](ctx context.Context, lggr logger.Logger, snapshot *limiterSettingsSnapshot, setting settings.Setting[T]) T {
-	var getter settings.Getter
-	if snapshot != nil {
-		getter = snapshot.getter
+	if snapshot == nil {
+		return setting.DefaultValue
 	}
-	value, err := setting.GetOrDefault(ctx, getter)
+	value, err := setting.GetOrDefault(ctx, snapshot.getter)
 	if err != nil {
 		// GetOrDefault returns the default alongside the error. Settings
 		// failures remain non-fatal for the execution.

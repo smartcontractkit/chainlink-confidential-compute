@@ -122,15 +122,19 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request, limits Limits)
 		return nil, errors.New("url is empty")
 	}
 
-	if in.GetTimeout() != nil {
-		if err := in.GetTimeout().CheckValid(); err != nil {
+	var timeout time.Duration
+	if requestedTimeout := in.GetTimeout(); requestedTimeout != nil {
+		if err := requestedTimeout.CheckValid(); err != nil {
 			return nil, fmt.Errorf("invalid timeout: %w", err)
 		}
-		if in.GetTimeout().AsDuration() < 0 {
+		timeout = requestedTimeout.AsDuration()
+		if timeout < 0 {
 			return nil, errors.New("timeout cannot be negative")
 		}
 	}
-	timeout := resolveTimeout(in.GetTimeout(), min(time.Duration(f.defaultTimeout.Load()), limits.ConnectionTimeout))
+	if timeout == 0 {
+		timeout = min(time.Duration(f.defaultTimeout.Load()), limits.ConnectionTimeout)
+	}
 	if timeout > limits.ConnectionTimeout {
 		return nil, fmt.Errorf("timeout exceeds PerWorkflow.HTTPAction.ConnectionTimeout limit %s", limits.ConnectionTimeout)
 	}
@@ -186,16 +190,6 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request, limits Limits)
 		MultiHeaders: multiHeaders(resp.Header),
 		Body:         body,
 	}, nil
-}
-
-// resolveTimeout honours a positive caller-supplied timeout, falling back to
-// the bounded policy default otherwise. Fetch checks the caller-supplied value
-// against the CRE ceiling before dispatch.
-func resolveTimeout(in *durationpb.Duration, def time.Duration) time.Duration {
-	if in == nil || in.AsDuration() <= 0 {
-		return def
-	}
-	return in.AsDuration()
 }
 
 func applyHeaders(req *http.Request, in *httpcap.Request) {
