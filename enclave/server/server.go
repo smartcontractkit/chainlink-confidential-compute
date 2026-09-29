@@ -624,6 +624,15 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	sharesCombineStart := time.Now()
 	var secretsMap map[string][]byte
 	var lastErr error
+	// Prefer the vault public key carried in the (signed, Hash()-covered) request: it
+	// matches the DKG instance that produced these shares, so a vault reshare needs no
+	// enclave config/infra update. Fall back to the enclave's configured MasterPublicKey
+	// when the request does not carry one (older hosts or the plugin gate is off).
+	masterPublicKey := config.MasterPublicKey
+	if len(req.MasterPublicKey) > 0 {
+		masterPublicKey = req.MasterPublicKey
+		s.logger.Printf("[debug] using vault public key from request for TDH2 aggregation")
+	}
 	for nodeIdx, nodeReq := range reqs {
 		nodeSecrets := make(map[string][]byte, len(req.Ciphertexts))
 		success := true
@@ -647,7 +656,7 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 				decryptedShares = append(decryptedShares, decryptedShare)
 			}
 
-			secret, err := s.combiner.AggregateShares(ciphertext, decryptedShares, config.MasterPublicKey, int(config.T))
+			secret, err := s.combiner.AggregateShares(ciphertext, decryptedShares, masterPublicKey, int(config.T))
 			if err != nil {
 				lastErr = err
 				s.logger.Printf("shares from node %d failed aggregation for ciphertext %d: %v", nodeIdx, i, err)

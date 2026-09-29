@@ -86,6 +86,18 @@ type EnclaveExecution struct {
 	Threshold      int
 	FaultTolerance int
 	NumParties     int
+
+	// ConfigMasterPublicKeyOverride, when non-nil, is written to the enclave's
+	// EnclaveConfig.MasterPublicKey in place of the freshly generated TDH2 key.
+	// Secrets, decryption shares, and (unless OmitRequestMasterPublicKey is set)
+	// the signed request still use the generated key, so this simulates a
+	// stale/rotated configured key such as a reshare leaves behind in each
+	// enclave's static config.
+	ConfigMasterPublicKeyOverride []byte
+	// OmitRequestMasterPublicKey, when true, leaves ComputeRequest.MasterPublicKey
+	// empty so the enclave falls back to its configured key. Used to prove that
+	// the request-supplied key is what enables decryption under a stale config.
+	OmitRequestMasterPublicKey bool
 }
 
 // ExecuteEnclaveAppE2E runs an automated end-to-end test against an enclave app:
@@ -171,9 +183,17 @@ func ExecuteEnclaveAppE2E(
 	signingKeyStorage := mustGenerateEd25519Keys(t, 2*faultTolerance+1)
 	tdh2KeyStorage := mustGenerateTDH2Keys(t, threshold, numParties)
 
+	// The enclave's configured key is normally the generated DKG key. Tests can
+	// override it to simulate a stale key left in static config after a reshare;
+	// the request-supplied key (below) is then what makes decryption succeed.
+	configMasterPublicKey := tdh2KeyStorage.MasterPublicKey
+	if spec.ConfigMasterPublicKeyOverride != nil {
+		configMasterPublicKey = spec.ConfigMasterPublicKeyOverride
+	}
+
 	config := types.EnclaveConfig{
 		Signers:         signingKeyStorage.PublicKeys,
-		MasterPublicKey: tdh2KeyStorage.MasterPublicKey,
+		MasterPublicKey: configMasterPublicKey,
 		T:               uint32(threshold),
 		F:               uint32(faultTolerance),
 	}
@@ -206,14 +226,28 @@ func ExecuteEnclaveAppE2E(
 	require.NoError(t, masterPubKey.Unmarshal(tdh2KeyStorage.MasterPublicKey))
 	ciphertexts, err := encryptUserSecrets(secrets, &masterPubKey)
 	require.NoError(t, err)
+
+	// The signed request normally carries the generated key; tests can omit it to
+	// force the enclave onto its configured key (the fallback path).
+	requestMasterPublicKey := tdh2KeyStorage.MasterPublicKey
+	if spec.OmitRequestMasterPublicKey {
+		requestMasterPublicKey = nil
+	}
+
 	allResponses, err := prepareAndExecuteSignedRequests(
 		context.Background(), nodes, enclaveIDs, reqID, publicData, ciphertexts, secretNames,
-		&tdh2KeyStorage, &signingKeyStorage, enclaveKeys, httpClient, appID, version,
+		&tdh2KeyStorage, &signingKeyStorage, enclaveKeys, httpClient, appID, version, requestMasterPublicKey,
 	)
-	require.NoError(t, err)
+	// Return the error rather than asserting here so callers can exercise
+	// negative paths (e.g. decryption failure under a stale configured key).
+	if err != nil {
+		return nil, err
+	}
 
 	execResp, err := validateAndCoalesceResponses(allResponses, len(signingKeyStorage.PublicKeys), len(nodes))
-	require.NoError(t, err)
+	if err != nil {
+		return nil, err
+	}
 
 	return execResp, nil
 }
@@ -669,4 +703,93 @@ func TestConfidentialHttpEnclave(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestConfidentialHttpEnclave_ResharePublicKeyFromRequest exercises the vault
+// reshare zero-downtime path on the enclave side: the enclave decrypts secrets
+// with the MasterPublicKey carried in the signed ComputeRequest and only falls
+// back to its configured key when the request omits one. That lets a reshare
+// rotate the live key (delivered to callers in the Vault DON GetSecrets
+// response) without updating each enclave's static config.
+//
+// The positive case configures the enclave with a stale key and supplies the
+// live key in the request; decryption must still succeed. The negative case
+// keeps the stale configured key but omits the request key, forcing the
+// fallback onto the stale key so decryption cannot succeed. Together they show
+// the request key — not the configured key — is what decrypts.
+func TestConfidentialHttpEnclave_ResharePublicKeyFromRequest(t *testing.T) {
+	enclaveAppName := "confidential-http"
+	cleanup := SetupEnclaveApp(t, enclaveAppName)
+	defer cleanup()
+
+	// If postman-echo is down, fall back to a local server.
+	echoServerURL := types.PostmanEchoURL
+	client := &http.Client{Timeout: 10 * time.Second}
+	if _, err := client.Get(echoServerURL); err != nil {
+		echoServerURL = strings.ReplaceAll(util.StartEchoServer(8082), "localhost", "10.0.0.3")
+	}
+
+	const threshold, numParties, faultTolerance = 2, 3, 1
+
+	// A different, valid DKG output standing in for the key a prior reshare left
+	// in the enclave's static config.
+	staleKey := mustGenerateTDH2Keys(t, threshold, numParties)
+
+	request := enclavetypes.Request{
+		Url:    echoServerURL + "post",
+		Method: http.MethodPost,
+		Body:   &enclavetypes.Request_BodyString{BodyString: `{"cc": "{{.cc}}"}`},
+		MultiHeaders: map[string]*enclavetypes.HeaderValues{
+			"Authorization": {Values: []string{"Bearer {{.apiKey}}"}},
+		},
+	}
+	publicDataBytes, err := proto.Marshal(&request)
+	require.NoError(t, err)
+	secrets := [][]byte{[]byte("1111-2222-3333-4444"), []byte("API-KEY-123")}
+	secretNames := []string{"cc", "apiKey"}
+
+	t.Run("request key overrides stale configured key", func(t *testing.T) {
+		resp, err := ExecuteEnclaveAppE2E(t, EnclaveExecution{
+			AppName:                       enclaveAppName,
+			AppID:                         types.AppIDConfidentialHTTP,
+			PublicData:                    publicDataBytes,
+			Secrets:                       secrets,
+			SecretNames:                   secretNames,
+			Threshold:                     threshold,
+			FaultTolerance:                faultTolerance,
+			NumParties:                    numParties,
+			ConfigMasterPublicKeyOverride: staleKey.MasterPublicKey,
+		})
+		require.NoError(t, err, "decryption should succeed using the request-supplied key despite the stale configured key")
+		var response enclavetypes.Response
+		require.NoError(t, proto.Unmarshal(resp.Output, &response))
+		assert.Contains(t, string(response.Body), `"cc":"1111-2222-3333-4444"`)
+		assert.Contains(t, string(response.Body), `"authorization":"Bearer API-KEY-123"`)
+	})
+
+	t.Run("stale configured key without request key cannot decrypt", func(t *testing.T) {
+		resp, err := ExecuteEnclaveAppE2E(t, EnclaveExecution{
+			AppName:                       enclaveAppName,
+			AppID:                         types.AppIDConfidentialHTTP,
+			PublicData:                    publicDataBytes,
+			Secrets:                       secrets,
+			SecretNames:                   secretNames,
+			Threshold:                     threshold,
+			FaultTolerance:                faultTolerance,
+			NumParties:                    numParties,
+			ConfigMasterPublicKeyOverride: staleKey.MasterPublicKey,
+			OmitRequestMasterPublicKey:    true,
+		})
+		// The enclave may surface the mismatch as an execution error or as a
+		// response that never carries the plaintext secret; either proves it did
+		// not decrypt with the stale configured key.
+		if err != nil {
+			t.Logf("decryption with stale configured key failed as expected: %v", err)
+			return
+		}
+		var response enclavetypes.Response
+		require.NoError(t, proto.Unmarshal(resp.Output, &response))
+		assert.NotContains(t, string(response.Body), "1111-2222-3333-4444")
+		assert.NotContains(t, string(response.Body), "API-KEY-123")
+	})
 }
