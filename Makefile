@@ -68,6 +68,7 @@ help:
 	echo "Local E2E targets (default: fake enclaves; add ENCLAVE_TYPE=NITRO for real):"
 	echo "  make e2e-local-conf-http        Run TestConfidentialHTTPE2E"
 	echo "  make e2e-local-conf-workflows   Run TestConfidentialWorkflowsEngineE2E"
+	echo "  make e2e-local-workflow-capacity  Run the Nitro workflow overload test (dedicated host)"
 	echo "  make e2e-images                 Build/cache all required Docker images (no tests)"
 	echo "  make clean-e2e                  Remove scratch clones, plugin binaries, and the core symlink"
 	echo "  make clean-e2e-nitro            Clear stale Nitro state (enclaves, wg-vsock orphans, EIF/PCR)"
@@ -235,6 +236,14 @@ e2e-local-conf-workflows: chainlink-image jd-image chip-router-image plugin-bina
 	  CTF_CHAINLINK_IMAGE=$(CHAINLINK_IMAGE) \
 	  CTF_JD_IMAGE=$(JD_IMAGE) \
 	  go test -tags e2e -v -timeout 60m -run '^TestConfidentialWorkflowsEngineE2E$$' .
+
+.PHONY: e2e-local-workflow-capacity
+e2e-local-workflow-capacity:
+	command -v nitro-cli >/dev/null && test -c /dev/nitro_enclaves || \
+	  { echo "Requires a dedicated Nitro-capable host; fake enclaves do not enforce this limit."; exit 1; }
+	cd "$(REPO_ROOT)/tests" && \
+	  ENCLAVE_TYPE=NITRO GOMAXPROCS=1 GOFLAGS=-p=1 \
+	  go test -p 1 -v -count=1 -timeout 60m -run '^TestConfidentialWorkflowsCapacityE2E$$' .
 
 .PHONY: clean-e2e
 clean-e2e:
