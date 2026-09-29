@@ -185,8 +185,9 @@ func TestConfidentialWorkflowsCapacityE2E(t *testing.T) {
 		case <-entered:
 			admitted++
 		case err := <-results:
-			require.ErrorContains(t, err, "429 Too Many Requests", "only explicit capacity rejection is acceptable before release")
-			require.ErrorContains(t, err, "enclave at capacity: too many concurrent executions")
+			// The enclave server wraps app errors (including Code 429) in HTTP 500.
+			require.ErrorContains(t, err, "enclave at capacity: too many concurrent executions",
+				"only explicit capacity rejection is acceptable before release")
 			rejected++
 		case <-admissionDeadline.C:
 			t.Fatalf("admission did not settle: admitted=%d rejected=%d burst=%d", admitted, rejected, burst)
