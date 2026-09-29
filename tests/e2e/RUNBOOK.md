@@ -1,3 +1,35 @@
+### Real-Enclave Workflow Capacity Test
+
+Run `make e2e-local-workflow-capacity` from the repository root on a dedicated
+Nitro-capable test host with Docker, `nitro-cli`, sudo access, and the normal
+enclave build prerequisites. The existing launcher reconfigures/restarts the
+Nitro allocator; do not run this against a shared or production host.
+
+`TestConfidentialWorkflowsCapacityE2E` in `tests/workflow_capacity_test.go` starts
+one 2048 MiB confidential-workflows enclave (4096 MiB allocator pool). No
+Chainlink node images or DON deployment are needed. It reads guest RAM over
+VSOCK and uses the production `memlimit` constants:
+`max(1, (guest RAM MiB - 1024) / 128)`. The 1024 MiB value is the reserve, not
+the divisor. Guest RAM is smaller than the Nitro allocation; the test permits
+the one-slot boundary ambiguity introduced by `/memory` rounding to MiB.
+
+The test submits twice the capacity upper bound as distinct, signed workflow
+executions to the same host. Artifact downloads wait at a test-controlled
+barrier, so admitted slots cannot drain before overload is observed. Excess
+requests must report the enclave's explicit `429 Too Many Requests` capacity
+error (the host currently wraps this in HTTP 500). Timeouts, EOFs and unrelated
+errors fail the test. Releasing the barrier starts concurrent compilation and
+execution of the existing Go `hello` WASM fixture. Every admitted execution must
+return its expected, attestation-validated result, and a fresh execution must
+succeed after the burst drains.
+
+This is an admission/recovery regression test, not a maximum-memory soak or a
+reproduction of customer binaries. It uses one signer with F=0 and no secrets;
+the normal request signature, binary hash and Nitro attestation checks remain
+enabled. Only artifact storage is a fixture. The test skips fake, legacy and
+remote enclaves and is included automatically in the existing real-enclave CI
+`go test ./...` run (nightly, release pushes, or the `e2e-real-enclaves` PR label).
+
 ### Runbook for Bumping Chainlink/v2 in our E2E Tests
 1. At the top of our `go.mod`, we have a block of chainlink imports that are all fixed at the same version. Bump the following imports to all have the same updated version:
     - github.com/smartcontractkit/chainlink/core/scripts
