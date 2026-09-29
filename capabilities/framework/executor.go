@@ -675,6 +675,10 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 				})
 				return fmt.Errorf("enclave quorum timeout: %w", err)
 			}
+			if strings.Contains(err.Error(), types.ErrHTTPRedirectNotAllowed) {
+				// The wrapped HTTP error may contain a URL with interpolated secrets.
+				return caperrors.NewPublicUserError(errors.New(types.ErrHTTPRedirectNotAllowed), caperrors.InvalidArgument)
+			}
 			if strings.Contains(err.Error(), types.ErrEncryptionRequestedNoKey) ||
 				strings.Contains(err.Error(), types.ErrKeyPresentNoEncryption) ||
 				strings.Contains(err.Error(), types.ErrResponseBodyTooLarge) {
