@@ -147,7 +147,7 @@ func (h *enclaveExecutionHelper) handleHTTPAction(ctx context.Context, req *sdkp
 	}
 	input := &httpcap.Request{}
 	if err := req.GetPayload().UnmarshalTo(input); err != nil {
-		return errResponse(fmt.Sprintf("http-actions: unmarshalling request: %v", err)), nil
+		return errResponse("http-actions: unmarshalling request failed"), nil
 	}
 	resp, err := h.httpFetcher.Fetch(ctx, input)
 	if err != nil {
@@ -155,7 +155,7 @@ func (h *enclaveExecutionHelper) handleHTTPAction(ctx context.Context, req *sdkp
 	}
 	payload, err := anypb.New(resp)
 	if err != nil {
-		return errResponse(fmt.Sprintf("http-actions: marshalling response: %v", err)), nil
+		return errResponse("http-actions: marshalling response failed"), nil
 	}
 	return &sdkpb.CapabilityResponse{
 		Response: &sdkpb.CapabilityResponse_Payload{Payload: payload},
