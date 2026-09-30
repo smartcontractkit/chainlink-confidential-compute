@@ -63,6 +63,10 @@ type enclaveMemorySnapshot struct {
 	peakRSSBytes    int64
 }
 
+type guestCPUUtilizationSample struct {
+	value float64
+}
+
 type hostMetrics struct {
 	// Post-quorum enclave execution time for one batch.
 	executionDuration metric.Float64Histogram
@@ -84,14 +88,29 @@ type hostMetrics struct {
 	processRSSMemory              metric.Int64ObservableGauge
 	availableMemory               metric.Int64ObservableGauge
 	peakRSSMemory                 metric.Int64ObservableGauge
+	processCPUTime                metric.Int64Counter
+	guestCPUUtilization           metric.Float64ObservableGauge
 
-	now              func() time.Time
+	now func() time.Time
+
+	// Execution load, guarded by mu.
 	mu               sync.Mutex
 	inflight         int64
 	inflightMax      int64
 	workflowCountMax int64
 	workflowRefs     map[string]int64
-	memory           atomic.Pointer[enclaveMemorySnapshot]
+
+	// Latest enclave samples, published for lock-free reads in OTel callbacks.
+	// Nil means that no series is currently available.
+	memory         atomic.Pointer[enclaveMemorySnapshot]
+	guestCPUSample atomic.Pointer[guestCPUUtilizationSample]
+
+	// Cumulative CPU baselines, written only by the memory-poll goroutine.
+	lastProcessCPUSeconds    uint64
+	hasProcessCPUBaseline    bool
+	lastGuestCPUBusySeconds  uint64
+	lastGuestCPUTotalSeconds uint64
+	hasGuestCPUBaseline      bool
 }
 
 func newHostMetrics(meter metric.Meter) (*hostMetrics, error) {
@@ -231,6 +250,23 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	if err != nil {
 		return nil, fmt.Errorf("create enclave process RSS memory gauge: %w", err)
 	}
+	processCPUTime, err := meter.Int64Counter(
+		"confidential_compute.enclave.process.cpu.time",
+		metric.WithDescription("Cumulative user and system CPU time consumed by enclave server processes observed by this host, quantized to the nearest second inside the enclave"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave process CPU time counter: %w", err)
+	}
+	guestCPUUtilization, err := meter.Float64ObservableGauge(
+		"confidential_compute.enclave.guest.cpu.utilization",
+		metric.WithDescription("Fraction of enclave guest vCPU capacity busy with user, nice, system, IRQ, or softirq work during the latest poll interval; iowait and steal are non-busy and cumulative inputs are quantized to whole seconds inside the enclave"),
+		metric.WithUnit("1"),
+		metric.WithFloat64Callback(metrics.observeGuestCPUUtilization),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave guest CPU utilization gauge: %w", err)
+	}
 
 	availableMemory, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.memory.available",
@@ -258,6 +294,8 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	metrics.processRSSMemory = processRSSMemory
 	metrics.availableMemory = availableMemory
 	metrics.peakRSSMemory = peakRSSMemory
+	metrics.processCPUTime = processCPUTime
+	metrics.guestCPUUtilization = guestCPUUtilization
 	_, err = meter.RegisterCallback(
 		metrics.observeExecutionLoad,
 		metrics.executionsInflight,
@@ -369,6 +407,15 @@ func (m *hostMetrics) observePeakRSSMemory(_ context.Context, observer metric.In
 	return nil
 }
 
+func (m *hostMetrics) observeGuestCPUUtilization(_ context.Context, observer metric.Float64Observer) error {
+	sample := m.guestCPUSample.Load()
+	if sample != nil {
+		observer.Observe(sample.value)
+	}
+	return nil
+}
+
+// recordEnclaveMemory updates resource metrics carried by the enclave's /memory response.
 func (m *hostMetrics) recordEnclaveMemory(estimate types.MemoryEstimateResponse) {
 	m.memory.Store(&enclaveMemorySnapshot{
 		totalBytes:      mibToBytes(estimate.TotalMB),
@@ -377,10 +424,87 @@ func (m *hostMetrics) recordEnclaveMemory(estimate types.MemoryEstimateResponse)
 		availableBytes:  mibToBytes(estimate.AvailableMB),
 		peakRSSBytes:    mibToBytes(estimate.PeakRSSMB),
 	})
+	m.recordProcessCPUTime(estimate.ProcessCPUSeconds)
+	m.recordGuestCPUUtilization(estimate.GuestCPUBusySeconds, estimate.GuestCPUTotalSeconds)
 }
 
+// recordProcessCPUTime expects ordered samples from the single memory-poll
+// goroutine and is not safe for concurrent use.
+func (m *hostMetrics) recordProcessCPUTime(current uint64) {
+	// Zero also means unavailable, so it cannot establish or reset a baseline.
+	if current == 0 {
+		return
+	}
+	if !m.hasProcessCPUBaseline {
+		m.lastProcessCPUSeconds = current
+		m.hasProcessCPUBaseline = true
+		// Publishes the starting point without replaying pre-observation CPU time.
+		m.processCPUTime.Add(context.Background(), 0)
+		return
+	}
+
+	var delta uint64
+	if current < m.lastProcessCPUSeconds {
+		// The enclave restarted, so its entire current value is new work.
+		delta = current
+	} else {
+		delta = current - m.lastProcessCPUSeconds
+	}
+	m.lastProcessCPUSeconds = current
+
+	// Records idle intervals as zero rather than gaps under delta temporality.
+	m.processCPUTime.Add(context.Background(), saturatingInt64(delta))
+}
+
+// recordGuestCPUUtilization expects ordered samples from the single memory-poll
+// goroutine and is not safe for concurrent use.
+// Total is the availability sentinel because zero busy time is valid.
+func (m *hostMetrics) recordGuestCPUUtilization(busy, total uint64) {
+	if total == 0 || busy > total {
+		m.hasGuestCPUBaseline = false
+		m.guestCPUSample.Store(nil)
+		return
+	}
+
+	previousBusy := m.lastGuestCPUBusySeconds
+	previousTotal := m.lastGuestCPUTotalSeconds
+	hadBaseline := m.hasGuestCPUBaseline
+	// Every valid cumulative sample becomes the next baseline, even when its
+	// interval is rejected below.
+	m.lastGuestCPUBusySeconds = busy
+	m.lastGuestCPUTotalSeconds = total
+	m.hasGuestCPUBaseline = true
+
+	if !hadBaseline || busy < previousBusy || total < previousTotal {
+		m.guestCPUSample.Store(nil)
+		return
+	}
+
+	totalDelta := total - previousTotal
+	if totalDelta == 0 {
+		// No new guest time means the last utilization value is still current.
+		return
+	}
+	busyDelta := busy - previousBusy
+	// Independent whole-second rounding can put busy one second ahead of total.
+	if busyDelta > totalDelta && busyDelta-totalDelta == 1 {
+		busyDelta = totalDelta
+	}
+	if busyDelta > totalDelta {
+		m.guestCPUSample.Store(nil)
+		return
+	}
+
+	m.guestCPUSample.Store(&guestCPUUtilizationSample{
+		value: float64(busyDelta) / float64(totalDelta),
+	})
+}
+
+// clearEnclaveMemory drops stale gauges after a failed poll but keeps the CPU
+// baselines so recovery cannot replay cumulative process time.
 func (m *hostMetrics) clearEnclaveMemory() {
 	m.memory.Store(nil)
+	m.guestCPUSample.Store(nil)
 }
 
 // monitorEnclaveMemory keeps network I/O outside OTel callbacks and clears a
@@ -456,6 +580,13 @@ func mibToBytes(value uint64) int64 {
 		return math.MaxInt64
 	}
 	return int64(value * bytesPerMiB)
+}
+
+func saturatingInt64(value uint64) int64 {
+	if value > uint64(math.MaxInt64) {
+		return math.MaxInt64
+	}
+	return int64(value)
 }
 
 func (m *hostMetrics) startExecution(metadata executionMetadata, quorumWait time.Duration) func(string, string) {

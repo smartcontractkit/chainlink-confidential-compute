@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -40,6 +41,8 @@ const (
 	subCapabilityFailureTimestampMetric = "confidential_compute.enclave.sub_capability.failure.timestamp"
 	availableMemoryMetric               = "confidential_compute.enclave.memory.available"
 	peakRSSMemoryMetric                 = "confidential_compute.enclave.memory.rss_peak"
+	processCPUTimeMetric                = "confidential_compute.enclave.process.cpu.time"
+	guestCPUUtilizationMetric           = "confidential_compute.enclave.guest.cpu.utilization"
 )
 
 func newTestHostMetrics(t *testing.T) (*hostMetrics, *sdkmetric.ManualReader) {
@@ -87,6 +90,19 @@ func gaugeValue(t *testing.T, data metricdata.ResourceMetrics, name string, attr
 	t.Helper()
 	gauge, ok := requireMetric(t, data, name).Data.(metricdata.Gauge[int64])
 	require.True(t, ok, "metric %s was not an int64 gauge", name)
+	for _, point := range gauge.DataPoints {
+		if dataPointHasAttributes(point.Attributes, attrs) {
+			return point.Value
+		}
+	}
+	t.Fatalf("metric %s had no data point with attributes %v", name, attrs)
+	return 0
+}
+
+func float64GaugeValue(t *testing.T, data metricdata.ResourceMetrics, name string, attrs map[string]string) float64 {
+	t.Helper()
+	gauge, ok := requireMetric(t, data, name).Data.(metricdata.Gauge[float64])
+	require.True(t, ok, "metric %s was not a float64 gauge", name)
 	for _, point := range gauge.DataPoints {
 		if dataPointHasAttributes(point.Attributes, attrs) {
 			return point.Value
@@ -479,20 +495,30 @@ func TestHostMetricsDoesNotRetainCompletedWorkflows(t *testing.T) {
 func TestHostMetricsEnclaveMemory(t *testing.T) {
 	metrics, reader := newTestHostMetrics(t)
 
-	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{TotalMB: 11264, UsedMB: 32, RSSMB: 96})
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{ProcessCPUSeconds: 40})
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{
+		TotalMB:           11264,
+		UsedMB:            32,
+		RSSMB:             96,
+		ProcessCPUSeconds: 42,
+	})
 	data := collectHostMetrics(t, reader)
 	totalMetric := requireMetric(t, data, totalMemoryMetric)
 	goRuntimeMetric := requireMetric(t, data, goRuntimeMemoryMetric)
 	processRSSMetric := requireMetric(t, data, processRSSMemoryMetric)
+	processCPUMetric := requireMetric(t, data, processCPUTimeMetric)
 	assert.Equal(t, int64(11264*1024*1024), gaugeValue(t, data, totalMemoryMetric, nil))
 	assert.Equal(t, int64(32*1024*1024), gaugeValue(t, data, goRuntimeMemoryMetric, nil))
 	assert.Equal(t, int64(96*1024*1024), gaugeValue(t, data, processRSSMemoryMetric, nil))
+	assert.Equal(t, int64(2), int64SumValue(t, data, processCPUTimeMetric, nil))
 	assert.Equal(t, "By", totalMetric.Unit)
 	assert.Equal(t, "By", goRuntimeMetric.Unit)
 	assert.Equal(t, "By", processRSSMetric.Unit)
+	assert.Equal(t, "s", processCPUMetric.Unit)
 	assert.Contains(t, totalMetric.Description, "quantized to the nearest MiB inside the enclave")
 	assert.Contains(t, goRuntimeMetric.Description, "quantized to the nearest MiB inside the enclave")
 	assert.Contains(t, processRSSMetric.Description, "quantized to the nearest MiB inside the enclave")
+	assert.Contains(t, processCPUMetric.Description, "quantized to the nearest second inside the enclave")
 
 	metrics.clearEnclaveMemory()
 	data = collectHostMetrics(t, reader)
@@ -502,6 +528,7 @@ func TestHostMetricsEnclaveMemory(t *testing.T) {
 	assert.False(t, found)
 	_, found = findMetric(data, processRSSMemoryMetric)
 	assert.False(t, found)
+	assert.Equal(t, int64(2), int64SumValue(t, data, processCPUTimeMetric, nil))
 }
 
 func TestHostMetricsEnclaveMemoryHeadroomFields(t *testing.T) {
@@ -541,6 +568,10 @@ func TestHostMetricsOmitsUnavailableMemoryValues(t *testing.T) {
 	assert.False(t, found)
 	_, found = findMetric(data, peakRSSMemoryMetric)
 	assert.False(t, found)
+	_, found = findMetric(data, processCPUTimeMetric)
+	assert.False(t, found)
+	_, found = findMetric(data, guestCPUUtilizationMetric)
+	assert.False(t, found)
 }
 
 type memoryRoundTripResult struct {
@@ -572,10 +603,10 @@ func (t *memorySequenceTransport) RoundTrip(req *http.Request) (*http.Response, 
 func TestCollectEnclaveMemory(t *testing.T) {
 	transport := &mockRoundTripper{response: &http.Response{
 		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(`{"usedMB":32,"rssMB":96,"totalMB":11264}`)),
+		Body:       io.NopCloser(strings.NewReader(`{"usedMB":32,"rssMB":96,"totalMB":11264,"processCPUSeconds":42,"guestCPUBusySeconds":100,"guestCPUTotalSeconds":1000}`)),
 		Header:     make(http.Header),
 	}}
-	metrics := &hostMetrics{}
+	metrics, _ := newTestHostMetrics(t)
 
 	require.NoError(t, metrics.collectEnclaveMemory(context.Background(), &http.Client{Transport: transport}))
 
@@ -587,6 +618,163 @@ func TestCollectEnclaveMemory(t *testing.T) {
 	assert.Equal(t, int64(32*1024*1024), snapshot.goRuntimeBytes)
 	assert.Equal(t, int64(96*1024*1024), snapshot.processRSSBytes)
 	assert.Equal(t, int64(11264*1024*1024), snapshot.totalBytes)
+	assert.True(t, metrics.hasProcessCPUBaseline)
+	assert.Equal(t, uint64(42), metrics.lastProcessCPUSeconds)
+	assert.True(t, metrics.hasGuestCPUBaseline)
+	assert.Equal(t, uint64(100), metrics.lastGuestCPUBusySeconds)
+	assert.Equal(t, uint64(1_000), metrics.lastGuestCPUTotalSeconds)
+}
+
+func TestSaturatingInt64(t *testing.T) {
+	assert.Equal(t, int64(math.MaxInt64), saturatingInt64(math.MaxUint64))
+}
+
+func TestHostMetricsProcessCPUTimeSurvivesPollFailuresAndEnclaveRestarts(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+
+	metrics.recordProcessCPUTime(1_000)
+	assert.Zero(t, int64SumValue(t, collectHostMetrics(t, reader), processCPUTimeMetric, nil))
+
+	metrics.clearEnclaveMemory()
+	metrics.recordProcessCPUTime(1_010)
+	assert.Equal(t, int64(10), int64SumValue(t, collectHostMetrics(t, reader), processCPUTimeMetric, nil))
+
+	metrics.recordProcessCPUTime(0)
+	metrics.recordProcessCPUTime(1_020)
+	assert.Equal(t, int64(20), int64SumValue(t, collectHostMetrics(t, reader), processCPUTimeMetric, nil))
+
+	metrics.recordProcessCPUTime(7)
+	assert.Equal(t, int64(27), int64SumValue(t, collectHostMetrics(t, reader), processCPUTimeMetric, nil))
+}
+
+func TestHostMetricsProcessCPUTimeIgnoresUnavailableInitialSamples(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{UsedMB: 32})
+	metrics.recordProcessCPUTime(0)
+	assert.False(t, metrics.hasProcessCPUBaseline)
+	_, found := findMetric(collectHostMetrics(t, reader), processCPUTimeMetric)
+	assert.False(t, found)
+
+	metrics.recordProcessCPUTime(1_000)
+	assert.Zero(t, int64SumValue(t, collectHostMetrics(t, reader), processCPUTimeMetric, nil))
+	metrics.recordProcessCPUTime(1_010)
+	assert.Equal(t, int64(10), int64SumValue(t, collectHostMetrics(t, reader), processCPUTimeMetric, nil))
+}
+
+func TestHostMetricsProcessCPUTimeRecordsIdleIntervals(t *testing.T) {
+	for _, temporality := range []metricdata.Temporality{metricdata.CumulativeTemporality, metricdata.DeltaTemporality} {
+		t.Run(temporality.String(), func(t *testing.T) {
+			reader := sdkmetric.NewManualReader(sdkmetric.WithTemporalitySelector(func(sdkmetric.InstrumentKind) metricdata.Temporality {
+				return temporality
+			}))
+			provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+			metrics, err := newHostMetrics(provider.Meter(hostInstrumentationScope))
+			require.NoError(t, err)
+
+			metrics.recordProcessCPUTime(1_000)
+			data := collectHostMetrics(t, reader)
+			assert.Zero(t, int64SumValue(t, data, processCPUTimeMetric, nil))
+			sum := requireMetric(t, data, processCPUTimeMetric).Data.(metricdata.Sum[int64])
+			assert.True(t, sum.IsMonotonic)
+			assert.Equal(t, temporality, sum.Temporality)
+
+			metrics.recordProcessCPUTime(1_010)
+			assert.Equal(t, int64(10), int64SumValue(t, collectHostMetrics(t, reader), processCPUTimeMetric, nil))
+
+			metrics.recordProcessCPUTime(1_010)
+			want := int64(10)
+			if temporality == metricdata.DeltaTemporality {
+				want = 0
+			}
+			assert.Equal(t, want, int64SumValue(t, collectHostMetrics(t, reader), processCPUTimeMetric, nil))
+		})
+	}
+}
+
+func TestHostMetricsGuestCPUUtilization(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+
+	metrics.recordGuestCPUUtilization(100, 1_000)
+	_, found := findMetric(collectHostMetrics(t, reader), guestCPUUtilizationMetric)
+	assert.False(t, found)
+
+	metrics.recordGuestCPUUtilization(125, 1_100)
+	data := collectHostMetrics(t, reader)
+	guestCPUMetric := requireMetric(t, data, guestCPUUtilizationMetric)
+	assert.InDelta(t, 0.25, float64GaugeValue(t, data, guestCPUUtilizationMetric, nil), 0.0001)
+	assert.Equal(t, "1", guestCPUMetric.Unit)
+	assert.Contains(t, guestCPUMetric.Description, "quantized to whole seconds inside the enclave")
+
+	metrics.clearEnclaveMemory()
+	_, found = findMetric(collectHostMetrics(t, reader), guestCPUUtilizationMetric)
+	assert.False(t, found)
+
+	metrics.recordGuestCPUUtilization(150, 1_200)
+	assert.InDelta(t, 0.25, float64GaugeValue(t, collectHostMetrics(t, reader), guestCPUUtilizationMetric, nil), 0.0001)
+}
+
+func TestHostMetricsGuestCPUUtilizationReportsIdle(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+
+	metrics.recordGuestCPUUtilization(100, 1_000)
+	metrics.recordGuestCPUUtilization(100, 1_100)
+
+	assert.Zero(t, float64GaugeValue(t, collectHostMetrics(t, reader), guestCPUUtilizationMetric, nil))
+}
+
+func TestHostMetricsGuestCPUUtilizationClampsOneSecondRoundingArtifact(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+
+	metrics.recordGuestCPUUtilization(100, 1_000)
+	metrics.recordGuestCPUUtilization(201, 1_100)
+
+	assert.Equal(t, 1.0, float64GaugeValue(t, collectHostMetrics(t, reader), guestCPUUtilizationMetric, nil))
+}
+
+func TestHostMetricsGuestCPUUtilizationRejectsTwoSecondExcess(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+
+	metrics.recordGuestCPUUtilization(100, 1_000)
+	metrics.recordGuestCPUUtilization(202, 1_100)
+
+	_, found := findMetric(collectHostMetrics(t, reader), guestCPUUtilizationMetric)
+	assert.False(t, found)
+}
+
+func TestHostMetricsGuestCPUUtilizationRejectsInvalidSamplesAndRecovers(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+
+	metrics.recordGuestCPUUtilization(0, 0)
+	metrics.recordGuestCPUUtilization(2, 1)
+	metrics.recordGuestCPUUtilization(100, 1_000)
+	_, found := findMetric(collectHostMetrics(t, reader), guestCPUUtilizationMetric)
+	assert.False(t, found)
+
+	metrics.recordGuestCPUUtilization(120, 1_010)
+	_, found = findMetric(collectHostMetrics(t, reader), guestCPUUtilizationMetric)
+	assert.False(t, found)
+
+	metrics.recordGuestCPUUtilization(130, 1_110)
+	assert.InDelta(t, 0.1, float64GaugeValue(t, collectHostMetrics(t, reader), guestCPUUtilizationMetric, nil), 0.0001)
+
+	metrics.recordGuestCPUUtilization(5, 50)
+	_, found = findMetric(collectHostMetrics(t, reader), guestCPUUtilizationMetric)
+	assert.False(t, found)
+
+	metrics.recordGuestCPUUtilization(10, 100)
+	assert.InDelta(t, 0.1, float64GaugeValue(t, collectHostMetrics(t, reader), guestCPUUtilizationMetric, nil), 0.0001)
+}
+
+func TestHostMetricsGuestCPUUtilizationRetainsValueWithoutElapsedTicks(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+
+	metrics.recordGuestCPUUtilization(100, 1_000)
+	metrics.recordGuestCPUUtilization(110, 1_100)
+	metrics.recordGuestCPUUtilization(110, 1_100)
+
+	assert.InDelta(t, 0.1, float64GaugeValue(t, collectHostMetrics(t, reader), guestCPUUtilizationMetric, nil), 0.0001)
 }
 
 func TestCollectEnclaveMemoryRejectsInvalidResponse(t *testing.T) {
@@ -623,7 +811,7 @@ func TestCollectEnclaveMemoryRejectsInvalidResponse(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			metrics := &hostMetrics{}
+			metrics, _ := newTestHostMetrics(t)
 			client := &http.Client{Transport: &mockRoundTripper{response: test.response}}
 
 			err := metrics.collectEnclaveMemory(context.Background(), client)
@@ -640,7 +828,7 @@ func TestMonitorEnclaveMemoryClearsFailedSampleAndStops(t *testing.T) {
 		body:   `{"usedMB":32,"rssMB":96}`,
 	}
 
-	metrics := &hostMetrics{}
+	metrics, _ := newTestHostMetrics(t)
 	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
