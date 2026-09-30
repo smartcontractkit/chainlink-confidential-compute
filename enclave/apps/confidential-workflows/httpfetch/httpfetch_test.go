@@ -40,7 +40,7 @@ func TestFetch_MethodNotAllowed(t *testing.T) {
 	f := NewFetcher(DefaultPolicy())
 	_, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://example.com/", Method: "TRACE"}, defaultLimits())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `method "TRACE" not allowed`)
+	assert.EqualError(t, err, "method not allowed")
 }
 
 func TestFetch_RequestSizeLimit(t *testing.T) {
