@@ -973,7 +973,7 @@ func TestHTTPEnclaveApp_Execute_RedirectRejected(t *testing.T) {
 			var requests atomic.Int32
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
-				http.Redirect(w, r, "/next", status)
+				http.Redirect(w, r, "/redirect-secret?token=redirect-secret", status)
 			}))
 			t.Cleanup(server.Close)
 			dialer := &net.Dialer{}
@@ -991,7 +991,8 @@ func TestHTTPEnclaveApp_Execute_RedirectRejected(t *testing.T) {
 			require.NotNil(t, execErr)
 			assert.Nil(t, output)
 			assert.Equal(t, http.StatusBadRequest, execErr.Code)
-			assert.Contains(t, execErr.Error, "redirects are not allowed")
+			assert.Equal(t, "error in request 0: error making http request: redirects are not allowed", execErr.Error)
+			assert.NotContains(t, execErr.Error, "redirect-secret")
 			assert.Equal(t, int32(1), requests.Load(), "the redirect target must not be requested")
 		})
 	}
