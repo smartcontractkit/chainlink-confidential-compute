@@ -17,6 +17,7 @@ import (
 
 	"github.com/doyensec/safeurl"
 	proxyclient "github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,6 +33,40 @@ func wrap(err error) error {
 // to tls.AlertError of the same code, which is what the classifier matches on.
 func peerAlert(code uint8) error {
 	return &net.OpError{Op: "remote error", Err: tls.AlertError(code)}
+}
+
+func TestSanitizeOutboundHTTPError(t *testing.T) {
+	const secret = "confidential-canary"
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"redirect", disableRedirects(nil, nil), types.ErrHTTPRedirectNotAllowed},
+		{"certificate verification", &tls.CertificateVerificationError{Err: errors.New(secret)}, "TLS certificate verification failed"},
+		{"certificate hostname", x509.HostnameError{Host: secret, Certificate: &x509.Certificate{}}, "TLS certificate verification failed"},
+		{"certificate authority", x509.UnknownAuthorityError{Cert: &x509.Certificate{}}, "TLS certificate verification failed"},
+		{"certificate invalid", x509.CertificateInvalidError{Cert: &x509.Certificate{}, Detail: secret}, "TLS certificate verification failed"},
+		{"TLS integrity alert", peerAlert(20), "transport failure"},
+		{"TLS internal alert", peerAlert(80), "transport failure"},
+		{"DNS failure", &net.DNSError{Name: secret, Err: secret}, "transport failure"},
+		{"unknown error", errors.New(secret), "transport failure"},
+		{"redirect text is not a sentinel", errors.New(types.ErrHTTPRedirectNotAllowed + secret), "transport failure"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := fmt.Errorf("%s: %w", secret, &url.Error{
+				Op: "Get", URL: "https://" + secret + ".example/" + secret + "?token=" + secret, Err: tt.err,
+			})
+			require.Nil(t, ClassifyOutboundHTTPError(raw), "hard failures must remain hard failures")
+			safe := SanitizeOutboundHTTPError(raw)
+			require.EqualError(t, safe, tt.want)
+			assert.NotContains(t, fmt.Sprintf("%+v", safe), secret)
+			assert.Nil(t, errors.Unwrap(safe), "the original error must not survive in the chain")
+			assert.NotErrorIs(t, safe, raw)
+		})
+	}
+	assert.NoError(t, SanitizeOutboundHTTPError(nil))
 }
 
 func TestClassifyOutboundHTTPError(t *testing.T) {

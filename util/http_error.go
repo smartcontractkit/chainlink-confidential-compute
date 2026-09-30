@@ -3,13 +3,41 @@ package util
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"syscall"
+
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
+
+// SanitizeOutboundHTTPError returns a fixed diagnostic for a hard HTTP failure.
+// Neither the message nor the error chain retains the original error: URLs,
+// certificate names, headers and response data may contain confidential values.
+// ClassifyOutboundHTTPError is applied first by callers; sanitizing a hard
+// failure does not turn it into a synthetic HTTP response.
+func SanitizeOutboundHTTPError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errHTTPRedirectNotAllowed) {
+		return errors.New(types.ErrHTTPRedirectNotAllowed)
+	}
+	var (
+		verificationErr *tls.CertificateVerificationError
+		authorityErr    x509.UnknownAuthorityError
+		hostnameErr     x509.HostnameError
+		certificateErr  x509.CertificateInvalidError
+	)
+	if errors.As(err, &verificationErr) || errors.As(err, &authorityErr) ||
+		errors.As(err, &hostnameErr) || errors.As(err, &certificateErr) {
+		return errors.New("TLS certificate verification failed")
+	}
+	return errors.New("transport failure")
+}
 
 // OutboundHTTPError is a synthetic HTTP response returned for an outbound
 // request failure that should surface to the caller as an HTTP status rather
