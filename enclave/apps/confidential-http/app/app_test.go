@@ -980,6 +980,7 @@ func TestHTTPEnclaveApp_Execute_RedactsHTTPFailures(t *testing.T) {
 		want string
 	}{
 		{name: "transport", err: errors.New(secret), want: "error making http request: transport failure"},
+		{name: "certificate", err: &tls.CertificateVerificationError{Err: x509.HostnameError{Host: secret, Certificate: &x509.Certificate{}}}, want: "error making http request: TLS certificate hostname mismatch"},
 		{name: "read response", body: io.NopCloser(iotest.ErrReader(errors.New(secret))), want: "error reading http response"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
