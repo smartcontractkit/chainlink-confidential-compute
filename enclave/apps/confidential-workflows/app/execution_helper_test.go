@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	consensusserver "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/consensus/server"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/server"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
@@ -335,6 +337,45 @@ func permissiveFetcher() *httpfetch.Fetcher {
 	}, util.NewUnrestrictedClient())
 }
 
+type httpRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f httpRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestCallCapability_HTTPEncodingErrorsAreRedacted(t *testing.T) {
+	const secret = "confidential-canary"
+	valid, err := anypb.New(&httpcap.Request{Url: "https://example.com", Method: "GET"})
+	require.NoError(t, err)
+	for _, tt := range []struct {
+		name    string
+		payload *anypb.Any
+		want    string
+	}{
+		{"invalid payload type", &anypb.Any{TypeUrl: secret}, "http-actions: unmarshalling request failed"},
+		{"invalid payload bytes", &anypb.Any{TypeUrl: valid.TypeUrl, Value: []byte{0xff}}, "http-actions: unmarshalling request failed"},
+		{"invalid response encoding", valid, "http-actions: marshalling response failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &http.Client{Transport: httpRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				require.Same(t, valid, tt.payload, "invalid inputs must not reach transport")
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"X-Value": {secret + "\xff"}}, Body: http.NoBody}, nil
+			})}
+			em := server.NewResponseEmitter()
+			h := &enclaveExecutionHelper{emitter: em, httpFetcher: httpfetch.NewFetcherWithClient(httpfetch.DefaultPolicy(), client)}
+			resp, err := h.CallCapability(context.Background(), &sdkpb.CapabilityRequest{Id: httpserver.ClientID, Method: "SendRequest", Payload: tt.payload})
+			require.NoError(t, err)
+			require.Equal(t, tt.want, resp.GetError())
+			metrics, events := em.Snapshot()
+			require.Len(t, events, 3)
+			assert.Equal(t, "capability_finished", events[2].Event)
+			assert.Equal(t, tt.want, events[2].Details["error"])
+			assert.Equal(t, false, events[2].Details["success"])
+			wire, err := json.Marshal(types.ExecuteResponse{Metrics: metrics, MetricEvents: events})
+			require.NoError(t, err)
+			assert.NotContains(t, string(wire), secret)
+		})
+	}
+}
+
 func TestCallCapability_InterceptsHTTPAction(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -345,9 +386,11 @@ func TestCallCapability_InterceptsHTTPAction(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
+	em := &recordingEmitter{}
 	helper := &enclaveExecutionHelper{
 		logger:      logger.Test(t),
 		httpFetcher: permissiveFetcher(),
+		emitter:     em,
 	}
 
 	input := &httpcap.Request{
@@ -371,6 +414,10 @@ func TestCallCapability_InterceptsHTTPAction(t *testing.T) {
 	require.NoError(t, resp.GetPayload().UnmarshalTo(out))
 	assert.Equal(t, uint32(http.StatusAccepted), out.StatusCode)
 	assert.Equal(t, "thanks", string(out.Body))
+	wire, err := json.Marshal(em.events)
+	require.NoError(t, err)
+	assert.NotContains(t, string(wire), "hello", "request body must not appear in telemetry")
+	assert.NotContains(t, string(wire), "thanks", "response body must not appear in telemetry")
 }
 
 func TestCallCapability_InterceptsHTTPAction_SSRFBlockReturns400(t *testing.T) {
