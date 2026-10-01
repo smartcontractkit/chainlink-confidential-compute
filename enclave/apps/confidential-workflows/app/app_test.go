@@ -19,6 +19,7 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/server"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
@@ -326,6 +327,57 @@ func TestExecute_HttpCallWasm_EmitsCapabilityMetric(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "expected a capability_execution event for %s", httpserver.ClientID)
+}
+
+func TestExecute_HTTPFailureDoesNotDiscloseRequestData(t *testing.T) {
+	const secret = "confidential-wasm-canary"
+	raw := buildTestWasm(t, "http-call")
+	var compressed bytes.Buffer
+	w := brotli.NewWriter(&compressed)
+	_, err := w.Write(raw)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	binary := compressed.Bytes()
+	hash := sha256.Sum256(binary)
+
+	client := util.NewRestrictedHTTPClient()
+	calls := 0
+	client.Client.Transport = httpRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		require.Equal(t, 1, calls, "redirect target must not be requested")
+		assert.Contains(t, req.URL.String(), secret)
+		return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {"/" + secret + "?token=" + secret}}, Body: http.NoBody}, nil
+	})
+	app, locator := newStorageBackedApp(t, binary, WithHTTPFetcher(httpfetch.NewFetcherWithClient(httpfetch.DefaultPolicy(), client)))
+	lggr, logs := logger.TestObserved(t, zapcore.DebugLevel)
+	app.(*confidentialWorkflowsApp).logger = lggr
+	execution := makeExecution(t, "wf-http-error-privacy", locator, hash[:])
+	execution.SdkExecuteRequest.Config = []byte("https://example.com/" + secret + "?token=" + secret)
+	data, err := proto.Marshal(execution)
+	require.NoError(t, err)
+	em := server.NewResponseEmitter()
+	output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialWorkflows, data, nil, em)
+	require.Nil(t, execErr)
+	require.Equal(t, 1, calls)
+	var result confworkflowtypes.ConfidentialWorkflowResponse
+	require.NoError(t, proto.Unmarshal(output, &result))
+	require.Contains(t, result.GetSdkExecutionResult().GetError(), "redirects are not allowed")
+	assert.NotContains(t, result.String(), secret)
+	metrics, events := em.Snapshot()
+	finished := metrics["capability_finished"].(map[string]any)
+	assert.Equal(t, false, finished["success"])
+	assert.Equal(t, "http-actions: http request failed: redirects are not allowed", finished["error"])
+	wire, err := json.Marshal(types.ExecuteResponse{Output: output, Metrics: metrics, MetricEvents: events})
+	require.NoError(t, err)
+	assert.NotContains(t, string(wire), secret)
+	recorder := httptest.NewRecorder()
+	em.WriteErrorResponse(recorder, result.GetSdkExecutionResult().GetError(), http.StatusInternalServerError)
+	assert.NotContains(t, recorder.Body.String(), secret)
+	for _, entry := range logs.All() {
+		fields, err := json.Marshal(entry.ContextMap())
+		require.NoError(t, err)
+		assert.NotContains(t, entry.Message+string(fields), secret)
+	}
 }
 
 func TestExecute_InvalidAppID(t *testing.T) {
