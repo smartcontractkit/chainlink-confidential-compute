@@ -138,11 +138,11 @@ func TestFetch_RedactsErrors(t *testing.T) {
 		{name: "URL parsing", method: "GET", url: "https://example.com/%zz?token=" + secret, want: "building request failed"},
 		{name: "certificate", method: "GET", url: rawURL,
 			err:  &tls.CertificateVerificationError{Err: x509.HostnameError{Host: secret, Certificate: &x509.Certificate{}}},
-			want: "http request failed: TLS certificate verification failed"},
+			want: "http request failed: TLS certificate hostname mismatch"},
 		{name: "TLS integrity alert", method: "GET", url: rawURL,
-			err: &net.OpError{Op: "remote error", Err: tls.AlertError(20)}, want: "http request failed: transport failure"},
+			err: &net.OpError{Op: "remote error", Err: tls.AlertError(20)}, want: "http request failed: TLS peer reported bad record MAC"},
 		{name: "TLS internal alert", method: "GET", url: rawURL,
-			err: &net.OpError{Op: "remote error", Err: tls.AlertError(80)}, want: "http request failed: transport failure"},
+			err: &net.OpError{Op: "remote error", Err: tls.AlertError(80)}, want: "http request failed: TLS peer reported internal error"},
 		{name: "unknown transport", method: "GET", url: rawURL, err: errors.New(secret), want: "http request failed: transport failure"},
 		{name: "body read", method: "GET", url: rawURL, body: &privateErrorBody{secret: secret}, want: "reading response failed"},
 	}
@@ -223,7 +223,7 @@ func TestFetch_RealHTTPFailuresAreRedacted(t *testing.T) {
 			want := "http request failed: redirects are not allowed"
 			if status == 200 {
 				tlsConfig.RootCAs = x509.NewCertPool()
-				want = "http request failed: TLS certificate verification failed"
+				want = "http request failed: TLS certificate authority not trusted"
 			}
 			client := util.NewRestrictedHTTPClientWithTLSAndDialer(tlsConfig, func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return dialer.DialContext(ctx, "tcp", server.Listener.Addr().String())

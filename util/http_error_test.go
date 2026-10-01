@@ -14,6 +14,7 @@ import (
 	"os"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/doyensec/safeurl"
 	proxyclient "github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
@@ -37,21 +38,68 @@ func peerAlert(code uint8) error {
 
 func TestSanitizeOutboundHTTPError(t *testing.T) {
 	const secret = "confidential-canary"
-	tests := []struct {
+	cert := &x509.Certificate{DNSNames: []string{secret}}
+	type testCase struct {
 		name string
 		err  error
 		want string
-	}{
+	}
+	certificateTests := []testCase{
+		{"certificate hostname", x509.HostnameError{Host: secret, Certificate: cert}, "TLS certificate hostname mismatch"},
+		{"certificate authority", x509.UnknownAuthorityError{Cert: cert}, "TLS certificate authority not trusted"},
+		{"certificate validity period", x509.CertificateInvalidError{Cert: cert, Reason: x509.Expired, Detail: secret}, "TLS certificate expired or not yet valid"},
+		{"certificate invalid", x509.CertificateInvalidError{Cert: cert, Reason: x509.IncompatibleUsage, Detail: secret}, "TLS certificate verification failed"},
+		{"certificate issuer name mismatch", x509.CertificateInvalidError{Cert: cert, Reason: x509.NameMismatch, Detail: secret}, "TLS certificate verification failed"},
+		{"certificate unknown reason", x509.CertificateInvalidError{Cert: cert, Reason: x509.InvalidReason(-1), Detail: secret}, "TLS certificate verification failed"},
+	}
+	tests := []testCase{
 		{"redirect", disableRedirects(nil, nil), types.ErrHTTPRedirectNotAllowed},
 		{"certificate verification", &tls.CertificateVerificationError{Err: errors.New(secret)}, "TLS certificate verification failed"},
-		{"certificate hostname", x509.HostnameError{Host: secret, Certificate: &x509.Certificate{}}, "TLS certificate verification failed"},
-		{"certificate authority", x509.UnknownAuthorityError{Cert: &x509.Certificate{}}, "TLS certificate verification failed"},
-		{"certificate invalid", x509.CertificateInvalidError{Cert: &x509.Certificate{}, Detail: secret}, "TLS certificate verification failed"},
-		{"TLS integrity alert", peerAlert(20), "transport failure"},
-		{"TLS internal alert", peerAlert(80), "transport failure"},
+		{"unknown TLS alert", peerAlert(255), "transport failure"},
+		{"unknown local TLS alert", &net.OpError{Op: "local error", Err: tls.AlertError(255)}, "transport failure"},
+		{"TLS alert without direction", tls.AlertError(20), "transport failure"},
+		{"TLS alert at dial stage", &net.OpError{Op: "dial", Err: tls.AlertError(20)}, "transport failure"},
+		{"missing TLS alert", &net.OpError{Op: "remote error"}, "transport failure"},
+		{"TLS alert with secret suffix", &net.OpError{Op: "remote error", Err: errors.New(tls.AlertError(20).Error() + secret)}, "transport failure"},
+		{"TLS alert with secret prefix", &net.OpError{Op: "local error", Err: errors.New(secret + tls.AlertError(20).Error())}, "transport failure"},
 		{"DNS failure", &net.DNSError{Name: secret, Err: secret}, "transport failure"},
 		{"unknown error", errors.New(secret), "transport failure"},
 		{"redirect text is not a sentinel", errors.New(types.ErrHTTPRedirectNotAllowed + secret), "transport failure"},
+	}
+	// Specific x509 causes must survive the generic TLS verification wrapper.
+	for _, tt := range certificateTests {
+		tests = append(tests, tt, testCase{
+			name: "wrapped " + tt.name,
+			err: &tls.CertificateVerificationError{
+				UnverifiedCertificates: []*x509.Certificate{cert},
+				Err:                    fmt.Errorf("%s: %w", secret, tt.err),
+			},
+			want: tt.want,
+		})
+	}
+	for _, alert := range []struct {
+		code   uint8
+		detail string
+	}{
+		{10, "unexpected message"},
+		{20, "bad record MAC"},
+		{22, "record overflow"},
+		{42, "bad certificate"},
+		{43, "unsupported certificate"},
+		{44, "revoked certificate"},
+		{45, "expired certificate"},
+		{46, "unknown certificate"},
+		{47, "illegal parameter"},
+		{48, "unknown certificate authority"},
+		{49, "access denied"},
+		{50, "decode error"},
+		{51, "decrypt error"},
+		{80, "internal error"},
+	} {
+		tests = append(tests,
+			testCase{fmt.Sprintf("TLS peer alert %d", alert.code), peerAlert(alert.code), "TLS peer reported " + alert.detail},
+			testCase{fmt.Sprintf("TLS local alert %d", alert.code), &net.OpError{Op: "local error", Err: tls.AlertError(alert.code)}, "TLS local error: " + alert.detail},
+		)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -280,13 +328,39 @@ func TestClassifyOutboundHTTPErrorRealTLSFailures(t *testing.T) {
 // chain the enclave will not trust remains a transport failure for the caller
 // to report, not a synthetic gateway response.
 func TestClassifyOutboundHTTPErrorRealCertificateFailure(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	const secret = "confidential-canary"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("certificate verification failure must prevent sending the HTTP request")
+	}))
 	defer server.Close()
 
-	// The default roots do not include httptest's ad-hoc CA.
-	_, err := NewUnrestrictedClient().Get(server.URL)
-	require.Error(t, err)
-	assert.Nil(t, ClassifyOutboundHTTPError(err))
+	for _, tt := range []struct {
+		name      string
+		configure func(*tls.Config)
+		want      string
+	}{
+		{"untrusted authority", func(c *tls.Config) { c.RootCAs = x509.NewCertPool() }, "TLS certificate authority not trusted"},
+		{"hostname mismatch", func(c *tls.Config) { c.ServerName = secret + ".example" }, "TLS certificate hostname mismatch"},
+		{"expired", func(c *tls.Config) {
+			c.Time = func() time.Time { return server.Certificate().NotAfter.Add(time.Second) }
+		}, "TLS certificate expired or not yet valid"},
+		{"not yet valid", func(c *tls.Config) {
+			c.Time = func() time.Time { return server.Certificate().NotBefore.Add(-time.Second) }
+		}, "TLS certificate expired or not yet valid"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := server.Client().Transport.(*http.Transport).Clone()
+			t.Cleanup(transport.CloseIdleConnections)
+			tt.configure(transport.TLSClientConfig)
+			client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+			_, err := client.Get(server.URL + "/" + secret + "?token=" + secret)
+			require.Error(t, err)
+			assert.Nil(t, ClassifyOutboundHTTPError(err))
+			safe := SanitizeOutboundHTTPError(err)
+			assert.EqualError(t, safe, tt.want)
+			assert.Nil(t, errors.Unwrap(safe))
+		})
+	}
 }
 
 // serveRaw starts a TCP listener that hands each connection to serve after
@@ -323,20 +397,25 @@ func writeThenClose(payload []byte) func(net.Conn) {
 // integrity alert can signal tampering, and crypto/tls surfaces it the same way
 // whether it arrives during or after the handshake, so it must not become a 502.
 func TestClassifyOutboundHTTPErrorRealNonRejectionAlerts(t *testing.T) {
-	alerts := map[string]byte{
-		"bad_record_mac":    20,
-		"record_overflow":   22,
-		"illegal_parameter": 47,
-		"unknown_ca":        48,
-		"decrypt_error":     51,
-		"internal_error":    80,
+	alerts := map[string]struct {
+		code byte
+		want string
+	}{
+		"bad_record_mac":    {20, "TLS peer reported bad record MAC"},
+		"record_overflow":   {22, "TLS peer reported record overflow"},
+		"illegal_parameter": {47, "TLS peer reported illegal parameter"},
+		"unknown_ca":        {48, "TLS peer reported unknown certificate authority"},
+		"decrypt_error":     {51, "TLS peer reported decrypt error"},
+		"internal_error":    {80, "TLS peer reported internal error"},
+		"unknown_alert":     {255, "transport failure"},
 	}
-	for name, code := range alerts {
+	for name, tt := range alerts {
 		t.Run(name, func(t *testing.T) {
-			addr := serveRaw(t, writeThenClose([]byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, code}))
+			addr := serveRaw(t, writeThenClose([]byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, tt.code}))
 			_, err := NewUnrestrictedClient().Get("https://" + addr)
 			require.Error(t, err)
-			assert.Nil(t, ClassifyOutboundHTTPError(err), "alert %d must stay a hard failure", code)
+			assert.Nil(t, ClassifyOutboundHTTPError(err), "alert %d must stay a hard failure", tt.code)
+			assert.EqualError(t, SanitizeOutboundHTTPError(err), tt.want)
 		})
 	}
 }
@@ -354,6 +433,7 @@ func TestClassifyOutboundHTTPErrorRealLocalRecordFault(t *testing.T) {
 	require.True(t, errors.As(err, &opErr), "expected a *net.OpError, got %v", err)
 	require.Equal(t, "local error", opErr.Op)
 	assert.Nil(t, ClassifyOutboundHTTPError(err))
+	assert.EqualError(t, SanitizeOutboundHTTPError(err), "TLS local error: decode error")
 }
 
 func TestClassifyOutboundProxyPolicyError(t *testing.T) {
