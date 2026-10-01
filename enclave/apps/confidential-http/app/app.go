@@ -311,8 +311,7 @@ func (a *httpEnclaveApp) executeHTTPRequest(request *enclavetypes.Request, templ
 		}
 		return enclavetypes.Response{}, fmt.Errorf("error making http request: %w", util.SanitizeOutboundHTTPError(err))
 	}
-	// Close errors may contain response data and must not be logged.
-	defer func() { _ = httpResp.Body.Close() }()
+	defer util.SafeClose(httpResp)
 	limitedReader := io.LimitReader(httpResp.Body, maxResponseBytes+1)
 	respBody, err := io.ReadAll(limitedReader)
 	if err != nil {
