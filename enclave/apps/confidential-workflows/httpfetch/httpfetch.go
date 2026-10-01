@@ -136,8 +136,7 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request) (*httpcap.Resp
 		}
 		return nil, fmt.Errorf("http request failed: %w", util.SanitizeOutboundHTTPError(err))
 	}
-	// Close errors may contain response data and must not be logged.
-	defer func() { _ = resp.Body.Close() }()
+	defer util.SafeClose(resp)
 
 	limited := io.LimitReader(resp.Body, f.policy.MaxResponseBodyBytes+1)
 	body, err := io.ReadAll(limited)
