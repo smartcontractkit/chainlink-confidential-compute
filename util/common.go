@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -27,13 +26,12 @@ func MustMarshal(t *testing.T, v interface{}) []byte {
 	return bytes
 }
 
+// SafeClose closes the body without logging errors, which may contain confidential response data.
 func SafeClose(resp *http.Response) {
 	if resp == nil {
 		return
 	}
-	if err := resp.Body.Close(); err != nil {
-		log.Printf("Failed to close response body: %v", err)
-	}
+	_ = resp.Body.Close()
 }
 
 func SetNodeConfig(ctx context.Context, node types.Enclave, reqBody types.ConfigRequest, httpClient *http.Client) (*types.SetConfigResponse, error) {
