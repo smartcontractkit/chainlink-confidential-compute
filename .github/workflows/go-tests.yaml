@@ -10,6 +10,7 @@ on:
   pull_request:
     branches:
       - main
+      - 'release/**'
     # `labeled` is included so applying the "e2e-real-enclaves" label to a PR
     # triggers a run that adds the real-enclave suite (see the setup job).
     types: [opened, synchronize, reopened, labeled]
@@ -30,8 +31,8 @@ env:
   CTF_SHA: dd420c0d953334e3fef9a109b6816de706f6be90 # chip-router
 jobs:
   # Emit the test matrix based on the triggering event. Release-branch pushes
-  # run the real-enclave e2e + integration suite plus the backwards-compat and
-  # legacy-enclaves variants; the nightly schedule runs only the real-enclave
+  # run the unit tests and the real-enclave e2e + integration suite plus the
+  # backwards-compat and legacy-enclaves variants; the nightly schedule runs only the real-enclave
   # e2e + integration suite. Pull requests exercise fake enclaves for the
   # standard and backwards-compat variants, plus the legacy-enclaves variant,
   # which checks out the prior release and runs its enclave app locally as a
@@ -86,12 +87,14 @@ jobs:
               fi
               ;;
             push)
-              # Release-branch pushes: the real e2e + integration suite plus the
-              # backwards-compat and legacy-enclaves variants (dropping the
-              # plain fake-enclave unit/e2e suites a PR runs for fast feedback).
-              # Pushes to main are gated out by run-suite, so this only runs on
-              # release/** pushes.
-              VARIANTS=("$REAL_E2E" "$BACKWARDS_COMPAT" "$LEGACY_ENCLAVES")
+              # Release-branch pushes: the unit tests and the real e2e +
+              # integration suite plus the backwards-compat and legacy-enclaves
+              # variants (dropping the fake-enclave e2e suites a PR runs for fast
+              # feedback). The unit tests run here because the release commit
+              # pins module versions in place of the replace directives main
+              # tests with. Pushes to main are gated out by run-suite, so this
+              # only runs on release/** pushes.
+              VARIANTS=("$UNIT" "$REAL_E2E" "$BACKWARDS_COMPAT" "$LEGACY_ENCLAVES")
               ;;
             *)
               # Nightly schedule: real Nitro enclaves only.
