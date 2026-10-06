@@ -936,7 +936,6 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 	e.proposeConfigUpdateIfMembershipChanged(ctx, peerIDsToSortedBytes(localNode.WorkflowDON.Members), uint32(localNode.WorkflowDON.F))
 
 	e.initialized = true
-	e.startEnclaveRefreshLoop()
 	e.lggr.Infow("executor initialized",
 		"capabilityID", e.capabilityID,
 		"nodeID", e.nodeID,
@@ -947,6 +946,8 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 		"insecureSkipTLS", parsedConfig.InsecureSkipTLSVerify,
 		"publicKeyRetriesMax", parsedConfig.PublicKeyRetriesMax,
 		"publicKeyRetriesBackoff", parsedConfig.PublicKeyRetriesBackoff)
+	// Started after the log line, which reads fields the refresh loop rewrites.
+	e.startEnclaveRefreshLoop()
 	return nil
 }
 
