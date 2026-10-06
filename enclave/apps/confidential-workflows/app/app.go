@@ -123,10 +123,9 @@ func storageFetcherFactory(newHTTPClient func() types.HTTPClient) StorageFetcher
 	}
 }
 
-// WithRemoteDispatcher enables remote dynamic secrets and remote capability
-// dispatch with a dispatcher built up-front. Used by tests that already know the
-// gateway endpoint; the nitro/fake mains use WithRemoteDispatcherFactory since
-// the gateway URL is injected at runtime.
+// WithRemoteDispatcher supplies a dispatcher to in-process test workers only.
+// Process-backed workers construct their own from the gateway configuration
+// captured by the dispatcher factory during settings injection.
 func WithRemoteDispatcher(d RemoteDispatcher) Option {
 	return func(a *confidentialWorkflowsApp) {
 		a.dispatcher = d
