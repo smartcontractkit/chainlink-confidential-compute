@@ -486,6 +486,14 @@ jobs:
           sudo docker image prune -af 2>/dev/null || true
           df -h /
 
+      # The e2e suites send real requests to postman-echo.com, since the
+      # enclave egress policy blocks private-network fixtures. Fail fast with a
+      # clear cause, after riding out short blips, instead of failing deep
+      # inside a suite.
+      - name: Check postman-echo availability
+        if: ${{ matrix.portion != 'unit' }}
+        run: curl -fsS --retry 5 --retry-all-errors --retry-delay 10 --max-time 10 -o /dev/null https://postman-echo.com/get
+
       - uses: actions/checkout@v4
         with:
           path: confidential-compute
