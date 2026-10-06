@@ -945,6 +945,14 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				}
 				require.GreaterOrEqual(t, restartReceived, restartRequired, "more than one round of results was lost across the enclave restart")
 				require.NoError(t, app.Validate(framework.L, recipient.getRequests()), "validation failed across enclave restart")
+
+				// Failover alone would satisfy the counts above, so also require that
+				// the restarted enclave serves again with the restored config.
+				restarted := enclaves[0]
+				restarted.EnclaveAuthHeader = "x-api-key: foobar"
+				restartedConfig, err := fetchEnclaveConfig(restarted)
+				require.NoError(t, err, "restarted enclave 0 should serve its public keys")
+				require.Equal(t, savedConfig, restartedConfig, "restarted enclave 0 should hold the restored config")
 				testLogger.Info().Msg("Enclave restart under load passed")
 			}
 
