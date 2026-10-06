@@ -916,10 +916,12 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 
 	vaultDONCapability, err := e.capabilityRegistry.GetExecutable(ctx, vault.CapabilityID)
 	if err != nil {
+		_ = pool.Close()
 		return fmt.Errorf("failed to get VaultDON capability with ID '%s' from registry: %w", vault.CapabilityID, err)
 	}
 	vaultDONPossibleFaultyNodes, err := getVaultDONPossibleFaultyNodes(ctx, vaultDONCapability, int(localNode.WorkflowDON.F))
 	if err != nil {
+		_ = pool.Close()
 		return fmt.Errorf("failed to get VaultDON possible faulty nodes: %w", err)
 	}
 
