@@ -504,6 +504,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			var enclaves []types.Enclave
 			var configURLs []string
 			var enclaveCleanups []func()
+			var enclaveRestarts []func(*testing.T) func()
 			// Legacy-enclave runs provision a local fake enclave sourced from a
 			// prior release checkout (LEGACY_ENCLAVE_REPO_ROOT) instead of the
 			// current tree, exercising protocol compatibility against the older
@@ -535,6 +536,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 
 				result := testhelpers.SetupLocalEnclaves(t, cfg)
 				enclaveCleanups = result.Cleanups
+				enclaveRestarts = result.Restarts
 				// Defer cleanup of all enclaves that haven't been stopped yet
 				defer func() {
 					for _, cleanup := range enclaveCleanups {
@@ -909,6 +911,49 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				err := app.Validate(framework.L, recipient.getRequests())
 				require.NoError(t, err, "recipient validation failed after registry trusted value update")
 			})
+
+			// Restart enclave 0 while earlier triggers are still executing, and keep
+			// sending without waiting for the node pools to converge. Until they
+			// do, nodes can disagree about enclave 0's liveness and still hold its
+			// pre-restart keys, which is how enclave restarts fail in production.
+			if len(enclaveCleanups) > 1 && !useLegacyEnclaves {
+				peer := enclaves[1]
+				peer.EnclaveAuthHeader = "x-api-key: foobar"
+				savedConfig, err := fetchEnclaveConfig(peer)
+				require.NoError(t, err, "failed to read peer enclave config")
+
+				recipient.mu.Lock()
+				recipient.requests = nil
+				recipient.mu.Unlock()
+
+				restartTriggers := 0
+				for i := range requestCount {
+					if i > 0 {
+						time.Sleep(interRequestDelay)
+					}
+					for _, input := range triggerInputs {
+						sendHTTPTrigger(t, testLogger, gatewayURL, uniqueWorkflowName, workflowID, workflowOwnerAddr, signingKey, input)
+						restartTriggers++
+					}
+					if i == 0 {
+						testLogger.Info().Msg("Restarting enclave 0 with requests in flight...")
+						enclaveCleanups[0]()
+						enclaveCleanups[0] = enclaveRestarts[0](t)
+						// Stands in for the config tracker, which restores an
+						// enclave's config after it restarts in production.
+						postEnclaveConfig(t, configURLs[0], savedConfig)
+					}
+				}
+
+				restartExpected := restartTriggers * numNodes
+				require.Eventually(t, func() bool {
+					count := recipient.requestCount()
+					testLogger.Info().Msgf("Enclave restart recipient progress: %d/%d", count, restartExpected)
+					return count >= restartExpected
+				}, 5*time.Minute, 5*time.Second, "requests should complete across an enclave restart")
+				require.NoError(t, app.Validate(framework.L, recipient.getRequests()), "validation failed across enclave restart")
+				testLogger.Info().Msg("Enclave restart under load passed")
+			}
 
 			// Test enclave failover: take down the first enclave and verify requests still succeed.
 			// Skipped for legacy enclaves — the reconfig sub-tests that precede it are skipped,
