@@ -907,7 +907,7 @@ jobs:
         run: |
           git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
 
-          # The legacy-enclave leg runs the v1.3.0 enclave app (from the
+          # The legacy-enclave leg runs the LEGACY_ENCLAVE_RELEASE enclave app (from the
           # cc-legacy checkout, driven by the fake build-and-run script) against
           # the CURRENT capability binary, which the test builds from the
           # current checkout. This verifies the current client/capability can
