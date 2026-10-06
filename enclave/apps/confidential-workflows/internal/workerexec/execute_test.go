@@ -103,6 +103,17 @@ func TestNilSDKResult(t *testing.T) {
 
 func TestRealWorkerBinary(t *testing.T) {
 	workerPath := build(t, "../..", "./environments/nitro-worker", "worker", "CGO_ENABLED=1")
+	t.Run("protocol error diagnostics", func(t *testing.T) {
+		cmd := exec.Command(workerPath)
+		cmd.Stdin = strings.NewReader("{")
+		var diagnostics bytes.Buffer
+		cmd.Stderr = &diagnostics
+		output, err := cmd.Output()
+		require.Error(t, err)
+		require.Empty(t, output, "diagnostics must not enter the reply stream")
+		require.Contains(t, diagnostics.String(), "worker protocol failed")
+		require.Contains(t, diagnostics.String(), "unexpected end of JSON input")
+	})
 	p, err := worker.NewProcesses(workerPath, nil, []string{"HOME=" + t.TempDir(), "GOMAXPROCS=1"}, nil, logger.Test(t))
 	require.NoError(t, err)
 	hello := jobFor(t, "hello")

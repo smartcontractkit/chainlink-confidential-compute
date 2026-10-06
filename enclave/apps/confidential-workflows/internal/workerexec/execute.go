@@ -29,13 +29,14 @@ func (k failedKey) GetKeyPairForRequest([32]byte) (keychain.Keypair, error) { re
 
 func Execute(job worker.Job, lggr logger.Logger, att attestor.Attestor, fetcher *httpfetch.Fetcher) worker.Reply {
 	var reply worker.Reply
-	fail := func(message string) worker.Reply {
+	fail := func(message string, err error) worker.Reply {
+		lggr.Errorw(message, "error", err)
 		reply.Error = &types.ExecuteError{Error: message, Code: 500}
 		return reply
 	}
 	var execution confworkflowtypes.WorkflowExecution
 	if err := proto.Unmarshal(job.Execution, &execution); err != nil {
-		return fail("invalid worker execution job")
+		return fail("invalid worker execution job", err)
 	}
 	var dispatcher app.RemoteDispatcher
 	if job.Gateway.URL != "" {
@@ -45,16 +46,16 @@ func Execute(job worker.Job, lggr logger.Logger, att attestor.Attestor, fetcher 
 		} else if job.Key != nil {
 			kc, err := keychain.NewRequestKeychain(job.RequestID, *job.Key)
 			if err != nil {
-				return fail("invalid worker key provisioning")
+				return fail("invalid worker key provisioning", err)
 			}
 			keys = kc
 		} else {
-			return fail("missing worker key provisioning")
+			return fail("missing worker key provisioning", nil)
 		}
 		var err error
 		dispatcher, err = nitrotransport.Dispatcher(app.GatewayConfig(job.Gateway), job.Config, att, keys, lggr, binary.BigEndian.Uint64(job.RequestID[:8]))
 		if err != nil {
-			return fail("cannot construct worker dispatcher")
+			return fail("cannot construct worker dispatcher", err)
 		}
 	}
 	events := server.NewResponseEmitter()
@@ -67,8 +68,11 @@ func Execute(job worker.Job, lggr logger.Logger, att attestor.Attestor, fetcher 
 func Serve(in io.Reader, out io.Writer, lggr logger.Logger, openAttestor func() (attestor.Attestor, func(), error)) error {
 	var job worker.Job
 	data, err := io.ReadAll(in)
-	if err != nil || json.Unmarshal(data, &job) != nil {
-		return errors.New("invalid worker input")
+	if err != nil {
+		return fmt.Errorf("reading worker input: %w", err)
+	}
+	if err := json.Unmarshal(data, &job); err != nil {
+		return fmt.Errorf("invalid worker input: %w", err)
 	}
 	var att attestor.Attestor
 	if job.Gateway.URL != "" {
@@ -76,6 +80,7 @@ func Serve(in io.Reader, out io.Writer, lggr logger.Logger, openAttestor func() 
 		var err error
 		att, cleanup, err = openAttestor()
 		if err != nil {
+			lggr.Errorw("cannot open worker attestor", "error", err)
 			return json.NewEncoder(out).Encode(worker.Reply{Error: &types.ExecuteError{Error: "cannot open worker attestor", Code: 500}})
 		}
 		defer cleanup()
@@ -87,12 +92,12 @@ func Serve(in io.Reader, out io.Writer, lggr logger.Logger, openAttestor func() 
 func Main(openAttestor func() (attestor.Attestor, func(), error)) int {
 	lggr, err := logger.New()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "cannot construct worker logger")
+		fmt.Fprintf(os.Stderr, "cannot construct worker logger: %v\n", err)
 		return 1
 	}
 	defer func() { _ = lggr.Sync() }()
 	if err := Serve(os.Stdin, os.Stdout, lggr, openAttestor); err != nil {
-		fmt.Fprintln(os.Stderr, "worker protocol failed")
+		lggr.Errorw("worker protocol failed", "error", err)
 		return 1
 	}
 	return 0
