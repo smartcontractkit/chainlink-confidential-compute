@@ -660,12 +660,6 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			// block (which tears down an enclave) and restores the full node set so
 			// later sub-tests still see the original topology.
 			t.Run("DON node rotation reconfigures enclaves", func(t *testing.T) {
-				if useLegacyEnclaves {
-					t.Skip("skipping: legacy/remote enclaves are not reconfigured by the executor")
-				}
-				if _, usePrior := priorVersionPaths[app.Name]; usePrior {
-					t.Skip("skipping: prior-version capability binary lacks the config-update proposal path")
-				}
 
 				originalNodes := getWorkflowDONNodes(t, testEnv)
 				require.GreaterOrEqual(t, len(originalNodes), 4, "need >=4 nodes so dropping one keeps OCR fault tolerance (2F+1)")
@@ -717,9 +711,6 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			})
 
 			t.Run("DNS NXDOMAIN returns 502", func(t *testing.T) {
-				if useLegacyEnclaves {
-					t.Skip("skipping: legacy/remote enclaves return 400 for DNS failures")
-				}
 
 				// Reset recipient to isolate this sub-test's results
 				recipient.mu.Lock()
@@ -767,9 +758,6 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			})
 
 			t.Run("SSRF private address returns 400", func(t *testing.T) {
-				if useLegacyEnclaves {
-					t.Skip("skipping: legacy/remote enclaves lack the SSRF-blocked-to-400 handling")
-				}
 
 				// Reset recipient to isolate this sub-test's results
 				recipient.mu.Lock()
@@ -793,9 +781,6 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			})
 
 			t.Run("upstream TLS handshake rejection returns 502", func(t *testing.T) {
-				if useLegacyEnclaves {
-					t.Skip("skipping: legacy/remote enclaves lack the TLS-handshake-to-502 handling")
-				}
 
 				// Reset recipient to isolate this sub-test's results
 				recipient.mu.Lock()
@@ -819,9 +804,6 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			})
 
 			t.Run("zeroed enclave config is routed around and recovers", func(t *testing.T) {
-				if useLegacyEnclaves {
-					t.Skip("skipping: remote/legacy enclaves cannot be reconfigured by the test")
-				}
 				if len(configURLs) < 2 {
 					t.Skip("skipping: need >=2 enclaves so one can be zeroed while another serves")
 				}
