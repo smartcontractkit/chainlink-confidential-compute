@@ -929,8 +929,9 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 
 				// A request executing on enclave 0 when it is killed can be lost if the
 				// executor's retries run out before every node marks the enclave dead,
-				// so the first round may come up short. Every later round is sent
-				// before the pools converge and must complete.
+				// so up to one round of results may be missing. The check is on the
+				// total, so it cannot tell which round lost them; losing more than one
+				// round fails.
 				restartExpected := restartTriggers * numNodes
 				restartRequired := restartExpected - len(triggerInputs)*numNodes
 				deadline := time.Now().Add(3 * time.Minute)
@@ -942,7 +943,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				if restartReceived < restartExpected {
 					testLogger.Warn().Msgf("%d results lost from requests in flight on the restarted enclave", restartExpected-restartReceived)
 				}
-				require.GreaterOrEqual(t, restartReceived, restartRequired, "requests sent after the restart should all complete")
+				require.GreaterOrEqual(t, restartReceived, restartRequired, "more than one round of results was lost across the enclave restart")
 				require.NoError(t, app.Validate(framework.L, recipient.getRequests()), "validation failed across enclave restart")
 				testLogger.Info().Msg("Enclave restart under load passed")
 			}
