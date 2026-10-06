@@ -41,6 +41,7 @@ import (
 //     Zero falls back to the enclave's built-in default.
 //   - RequestTimeout: global request timeout inside the enclave, used as the
 //     default deadline for outbound HTTP a workflow makes while being served.
+//     HTTP actions cap this default at PerWorkflow.HTTPAction.ConnectionTimeout.
 //     Should track the caller's enclave request timeout, since work outliving
 //     that deadline is work nobody is waiting for. Zero falls back to the
 //     enclave's built-in default.

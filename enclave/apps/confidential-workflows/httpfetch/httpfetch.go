@@ -10,6 +10,7 @@ package httpfetch
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -95,9 +96,9 @@ func NewFetcherWithClient(policy Policy, client httpDoer) *Fetcher {
 	return f
 }
 
-// SetDefaultTimeout updates the deadline applied to requests that carry no
-// caller-supplied timeout. A non-positive value is ignored, leaving the policy
-// default in place.
+// SetDefaultTimeout updates the default for requests without a caller-supplied
+// timeout, capped by the CRE HTTPAction.ConnectionTimeout. A non-positive value
+// is ignored, leaving the current default in place.
 func (f *Fetcher) SetDefaultTimeout(d time.Duration) {
 	if d <= 0 {
 		return
@@ -135,8 +136,11 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request, limits Limits)
 	if timeout == 0 {
 		timeout = min(time.Duration(f.defaultTimeout.Load()), limits.ConnectionTimeout)
 	}
-	if timeout > limits.ConnectionTimeout {
+	if limits.ConnectionTimeout <= 0 || timeout > limits.ConnectionTimeout {
 		return nil, fmt.Errorf("timeout exceeds PerWorkflow.HTTPAction.ConnectionTimeout limit %s", limits.ConnectionTimeout)
+	}
+	if requestSizeLowerBound(in) > limits.RequestSizeLimit {
+		return nil, fmt.Errorf("request exceeds PerWorkflow.HTTPAction.RequestSizeLimit limit %d bytes", limits.RequestSizeLimit)
 	}
 	// The HTTP action validator measures encoding/json after defaulting timeout,
 	// including headers, URL, and the base64-encoded body, not just body bytes.
@@ -190,6 +194,24 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request, limits Limits)
 		MultiHeaders: multiHeaders(resp.Header),
 		Body:         body,
 	}, nil
+}
+
+// requestSizeLowerBound excludes JSON syntax and escaping, which only add bytes.
+func requestSizeLowerBound(in *httpcap.Request) config.Size {
+	size := config.Size(len(in.GetUrl()) + len(in.GetMethod()))
+	size += config.Size(base64.StdEncoding.EncodedLen(len(in.GetBody())))
+	size += config.Size(base64.StdEncoding.EncodedLen(len(in.GetMtls().GetPrivateKey())))
+	size += config.Size(base64.StdEncoding.EncodedLen(len(in.GetMtls().GetCertificate())))
+	for key, value := range in.GetHeaders() { //nolint:staticcheck // deprecated headers remain size-limited
+		size += config.Size(len(key) + len(value))
+	}
+	for key, values := range in.GetMultiHeaders() {
+		size += config.Size(len(key))
+		for _, value := range values.GetValues() {
+			size += config.Size(len(value))
+		}
+	}
+	return size
 }
 
 func applyHeaders(req *http.Request, in *httpcap.Request) {

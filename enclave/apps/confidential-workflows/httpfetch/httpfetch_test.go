@@ -44,22 +44,28 @@ func TestFetch_MethodNotAllowed(t *testing.T) {
 }
 
 func TestFetch_RequestSizeLimit(t *testing.T) {
-	for _, field := range []string{"body", "headers", "multi headers", "url"} {
+	for _, field := range []string{"body", "headers", "multi headers", "url", "mtls key", "mtls certificate"} {
 		t.Run(field, func(t *testing.T) {
 			in := &httpcap.Request{Url: "https://example.com/", Method: "POST"}
 			large := strings.Repeat("x", 10_000)
 			switch field {
 			case "body":
-				in.Body = []byte(large)
+				// Base64 alone exceeds 10 KB while the raw body fits.
+				in.Body = []byte(large[:7_503])
 			case "headers":
 				in.Headers = map[string]string{"X-Test": large} //nolint:staticcheck // deprecated headers remain size-limited
 			case "multi headers":
 				in.MultiHeaders = map[string]*httpcap.HeaderValues{"X-Test": {Values: []string{large}}}
 			case "url":
 				in.Url += large
+			case "mtls key":
+				in.Mtls = &httpcap.MtlsAuth{PrivateKey: []byte(large)}
+			case "mtls certificate":
+				in.Mtls = &httpcap.MtlsAuth{Certificate: []byte(large)}
 			}
 			original := proto.Clone(in)
 			limits := defaultLimits()
+			assert.Greater(t, requestSizeLowerBound(in), limits.RequestSizeLimit)
 			calls := 0
 			f := NewFetcherWithClient(DefaultPolicy(), doerFunc(func(*http.Request) (*http.Response, error) {
 				calls++
@@ -83,6 +89,31 @@ func TestFetch_RequestSizeLimit(t *testing.T) {
 			assert.Equal(t, 1, calls)
 			assert.True(t, proto.Equal(original, in), "the caller's request is not mutated")
 		})
+	}
+}
+
+func BenchmarkFetch_OversizedRequest(b *testing.B) {
+	in := &httpcap.Request{Url: "https://example.com/", Method: "POST", Body: make([]byte, 32<<20)}
+	f := NewFetcher(DefaultPolicy())
+	limits := defaultLimits()
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := f.Fetch(b.Context(), in, limits); err == nil {
+			b.Fatal("expected request size rejection")
+		}
+	}
+}
+
+func TestFetch_ZeroConnectionTimeout(t *testing.T) {
+	f := NewFetcherWithClient(DefaultPolicy(), doerFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("zero timeout limit must reject before dispatch")
+		return nil, nil
+	}))
+	limits := defaultLimits()
+	limits.ConnectionTimeout = 0
+	for _, timeout := range []*durationpb.Duration{nil, durationpb.New(0), durationpb.New(time.Second)} {
+		_, err := f.Fetch(t.Context(), &httpcap.Request{Url: "https://example.com/", Method: "GET", Timeout: timeout}, limits)
+		require.ErrorContains(t, err, "ConnectionTimeout")
 	}
 }
 
