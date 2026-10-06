@@ -492,7 +492,7 @@ jobs:
       # inside a suite.
       - name: Check postman-echo availability
         if: ${{ matrix.portion != 'unit' }}
-        run: curl -fsS --retry 5 --retry-all-errors --retry-delay 10 --max-time 10 -o /dev/null https://postman-echo.com/get
+        run: curl -fsS --retry 5 --retry-connrefused --retry-delay 10 --max-time 10 -o /dev/null https://postman-echo.com/get
 
       - uses: actions/checkout@v4
         with:
