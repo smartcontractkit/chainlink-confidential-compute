@@ -23,9 +23,27 @@ func TestSetupFailuresLogCause(t *testing.T) {
 		job     worker.Job
 		message string
 	}{
-		{"execution", worker.Job{Execution: []byte("bad protobuf")}, "invalid worker execution job"},
-		{"key", worker.Job{Gateway: worker.GatewayConfig{URL: "https://gateway.example"}, Key: &keychain.BoxKeySnapshot{}}, "invalid worker key provisioning"},
-		{"dispatcher", worker.Job{Gateway: worker.GatewayConfig{URL: "://"}, KeyError: "key unavailable"}, "cannot construct worker dispatcher"},
+		{
+			name:    "execution",
+			job:     worker.Job{Execution: []byte("bad protobuf")},
+			message: "invalid worker execution job",
+		},
+		{
+			name: "key",
+			job: worker.Job{
+				Gateway: worker.GatewayConfig{URL: "https://gateway.example"},
+				Key:     &keychain.BoxKeySnapshot{},
+			},
+			message: "invalid worker key provisioning",
+		},
+		{
+			name: "dispatcher",
+			job: worker.Job{
+				Gateway:  worker.GatewayConfig{URL: "://"},
+				KeyError: "key unavailable",
+			},
+			message: "cannot construct worker dispatcher",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			lggr, logs := logger.TestObserved(t, zapcore.ErrorLevel)
