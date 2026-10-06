@@ -372,6 +372,106 @@ func TestGetConfigs(t *testing.T) {
 	})
 }
 
+// configUpdateServer serves public keys for pool construction and answers
+// config-update votes with handle.
+func configUpdateServer(t *testing.T, fixture *testFixture, handle http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == types.PublicKeyPath {
+			resp := fixture.createPublicKeyResponse()
+			assert.NoError(t, json.NewEncoder(w).Encode(&resp))
+			return
+		}
+		assert.Equal(t, http.MethodPatch, r.Method)
+		assert.Equal(t, types.SetConfigPath, r.URL.Path)
+		handle(w, r)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestUpdateConfig(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+	update := types.UpdateConfigRequest{Config: []byte(`{"f":1}`), Signature: []byte("signature")}
+
+	respond := func(status int, resp types.UpdateConfigResponse) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			var got types.UpdateConfigRequest
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+			assert.Equal(t, update, got)
+			w.WriteHeader(status)
+			assert.NoError(t, json.NewEncoder(w).Encode(&resp))
+		}
+	}
+	applied := func(attestation string) types.UpdateConfigResponse {
+		return types.UpdateConfigResponse{Applied: true, Config: testEnclaveConfig(), Attestation: []byte(attestation)}
+	}
+
+	tests := []struct {
+		name    string
+		handle  http.HandlerFunc
+		wantErr string
+	}{
+		{"vote accepted, quorum pending", respond(http.StatusAccepted, types.UpdateConfigResponse{}), ""},
+		{"vote recorded below quorum", respond(http.StatusOK, types.UpdateConfigResponse{SignersCollected: 1, SignersRequired: 2}), ""},
+		{"applied with valid attestation", respond(http.StatusOK, applied(types.FakeAttestationDocument)), ""},
+		{"applied with invalid attestation", respond(http.StatusOK, applied("not-an-attestation")), "attestation validation failed"},
+		{"vote rejected", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "invalid signature", http.StatusBadRequest)
+		}, "invalid signature"},
+		{"oversized response body", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(make([]byte, types.MaxEnclaveResponseBodyBytes+1))
+		}, "exceeds limit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			server := configUpdateServer(t, fixture, tt.handle)
+			pool, err := newTestPool([]types.Enclave{fixture.createNode(server.URL, fixture.EnclaveID1)}, nil, nil)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, pool.Close()) }()
+
+			err = pool.UpdateConfig(context.Background(), update)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// A failing enclave must not stop the vote reaching the others, and the
+// returned error must name only the failing enclave.
+func TestUpdateConfig_PartialFanOutFailure(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+
+	var okVotes, failedVotes atomic.Int32
+	okServer := configUpdateServer(t, fixture, func(w http.ResponseWriter, _ *http.Request) {
+		okVotes.Add(1)
+		w.WriteHeader(http.StatusAccepted)
+	})
+	failServer := configUpdateServer(t, fixture, func(w http.ResponseWriter, _ *http.Request) {
+		failedVotes.Add(1)
+		http.Error(w, "enclave unavailable", http.StatusInternalServerError)
+	})
+
+	pool, err := newTestPool([]types.Enclave{
+		fixture.createNode(okServer.URL, fixture.EnclaveID1),
+		fixture.createNode(failServer.URL, fixture.EnclaveID2),
+	}, nil, nil)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, pool.Close()) }()
+
+	err = pool.UpdateConfig(context.Background(), types.UpdateConfigRequest{Config: []byte("{}")})
+	require.ErrorContains(t, err, hex.EncodeToString(fixture.EnclaveID2[:]))
+	assert.NotContains(t, err.Error(), hex.EncodeToString(fixture.EnclaveID1[:]))
+	assert.Equal(t, int32(1), okVotes.Load())
+	assert.Equal(t, int32(1), failedVotes.Load())
+}
+
 func TestRequestTimeoutResolver(t *testing.T) {
 	t.Parallel()
 
