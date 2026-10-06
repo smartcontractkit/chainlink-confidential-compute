@@ -594,7 +594,7 @@ func TestExecuteBatchConcurrent(t *testing.T) {
 		err := json.NewDecoder(r.Body).Decode(&reqBody)
 		require.NoError(t, err)
 
-		resp := testExecuteResponse
+		resp := *testExecuteResponse
 		resp.RequestHash = reqBody.Hash()
 		err = json.NewEncoder(w).Encode(&resp)
 		require.NoError(t, err)
@@ -1287,12 +1287,13 @@ func TestGetPublicKeys_DeadEnclaveBecomesSelectableAfterSuccessfulRefresh(t *tes
 	require.NoError(t, err)
 	require.Len(t, selected, 1)
 
-	var recoveringCount int32
+	var recovered atomic.Bool
 	var stableCount int32
 
+	// The enclave fails until the test allows it to recover, so a periodic
+	// refresh cannot revive it before the initial selection is asserted.
 	recoveringServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		call := atomic.AddInt32(&recoveringCount, 1)
-		if call == 1 {
+		if !recovered.Load() {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -1342,14 +1343,11 @@ func TestGetPublicKeys_DeadEnclaveBecomesSelectableAfterSuccessfulRefresh(t *tes
 	require.Len(t, initialResp, 1)
 	assert.Equal(t, stableEnclaveID, initialResp[0].EnclaveID)
 
+	recovered.Store(true)
 	require.Eventually(t, func() bool {
-		return atomic.LoadInt32(&recoveringCount) >= 2
+		recoveredResp, err := pool.GetPublicKeys(context.Background(), fixture.RequestID, nil)
+		return err == nil && len(recoveredResp) == 1 && recoveredResp[0].EnclaveID == recoveredEnclaveID
 	}, 2*time.Second, 25*time.Millisecond)
-
-	recoveredResp, err := pool.GetPublicKeys(context.Background(), fixture.RequestID, nil)
-	require.NoError(t, err)
-	require.Len(t, recoveredResp, 1)
-	assert.Equal(t, recoveredEnclaveID, recoveredResp[0].EnclaveID)
 }
 
 func TestProactiveCachePeriodicRefresh(t *testing.T) {
