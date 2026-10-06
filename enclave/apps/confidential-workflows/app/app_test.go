@@ -578,6 +578,7 @@ func TestExecute_ExecutionTimeout(t *testing.T) {
 	require.NotNil(t, execErr)
 	assert.Equal(t, http.StatusGatewayTimeout, execErr.Code)
 	assert.Contains(t, execErr.Error, context.DeadlineExceeded.Error())
+	assert.Contains(t, execErr.Error, types.ErrWasmExecutionTimeout)
 }
 
 // startTimer records when workflow_execute_started is emitted.
