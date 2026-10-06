@@ -32,8 +32,12 @@ func cpuSecondsFromRusage(user, system unix.Timeval) uint64 {
 	return (microseconds + microsecondsPerSecond/2) / microsecondsPerSecond
 }
 
-// /proc/stat uses USER_HZ. The enclave kernels use 100 ticks per second;
-// utilization is a ratio of equally scaled counters either way.
+// /proc/stat uses USER_HZ, not the kernel's CONFIG_HZ:
+// https://github.com/torvalds/linux/blob/93f51579e7df248780214094418f205253383cc5/Documentation/filesystems/proc.rst#L1594-L1598
+// The amd64 and arm64 Linux UAPI uses the generic definition of 100:
+// https://github.com/torvalds/linux/blob/93f51579e7df248780214094418f205253383cc5/include/uapi/asm-generic/param.h#L5-L10
+// https://github.com/torvalds/linux/blob/93f51579e7df248780214094418f205253383cc5/arch/arm64/include/uapi/asm/param.h#L17-L24
+// The scale cancels for utilization, but the wire fields are seconds.
 const procStatClockTicksPerSecond = 100
 
 const (

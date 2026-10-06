@@ -71,7 +71,8 @@ type hostMetrics struct {
 	// Post-quorum enclave execution time for one batch.
 	executionDuration metric.Float64Histogram
 	// End-to-end host HTTP handler time for one request.
-	endpointDuration metric.Float64Histogram
+	endpointDuration     metric.Float64Histogram
+	resourcePollDuration metric.Float64Histogram
 	// Time from the first matching request until quorum dispatch for one batch.
 	quorumWaitDuration metric.Float64Histogram
 	// Quorum wait plus post-quorum enclave execution time for one batch.
@@ -136,6 +137,15 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	if err != nil {
 		return nil, fmt.Errorf("create enclave host endpoint duration histogram: %w", err)
 	}
+	resourcePollDuration, err := meter.Float64Histogram(
+		"confidential_compute.enclave.resource.poll.duration",
+		metric.WithDescription("Host-observed wall-clock duration of a complete enclave resource poll, including vsock I/O, response decoding, and failed attempts"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create enclave resource poll duration histogram: %w", err)
+	}
 	quorumWait, err := meter.Float64Histogram(
 		"confidential_compute.enclave.execution.quorum_wait.duration",
 		metric.WithDescription("Wall-clock duration from the first matching host request until quorum dispatch"),
@@ -197,6 +207,7 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	metrics := &hostMetrics{
 		executionDuration:             duration,
 		endpointDuration:              endpointDuration,
+		resourcePollDuration:          resourcePollDuration,
 		quorumWaitDuration:            quorumWait,
 		totalDuration:                 total,
 		executionsStarted:             started,
@@ -541,7 +552,17 @@ func (m *hostMetrics) monitorEnclaveMemory(
 	}
 }
 
-func (m *hostMetrics) collectEnclaveMemory(ctx context.Context, client *http.Client) error {
+func (m *hostMetrics) collectEnclaveMemory(ctx context.Context, client *http.Client) (err error) {
+	startedAt := m.now()
+	defer func() {
+		outcome := "success"
+		if err != nil {
+			outcome = "error"
+		}
+		m.resourcePollDuration.Record(ctx, m.now().Sub(startedAt).Seconds(),
+			metric.WithAttributes(attribute.String("outcome", outcome)))
+	}()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, vsockPrefix+types.MemoryPath, nil)
 	if err != nil {
 		return fmt.Errorf("create enclave memory request: %w", err)

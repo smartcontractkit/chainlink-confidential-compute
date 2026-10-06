@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
@@ -27,6 +28,7 @@ import (
 const (
 	executionDurationMetric             = "confidential_compute.enclave.execution.duration"
 	endpointDurationMetric              = "confidential_compute.enclave.host.endpoint.duration"
+	resourcePollDurationMetric          = "confidential_compute.enclave.resource.poll.duration"
 	quorumWaitDurationMetric            = "confidential_compute.enclave.execution.quorum_wait.duration"
 	totalDurationMetric                 = "confidential_compute.enclave.execution.total.duration"
 	executionsStartedMetric             = "confidential_compute.enclave.executions.started"
@@ -625,6 +627,34 @@ func TestCollectEnclaveMemory(t *testing.T) {
 	assert.Equal(t, uint64(1_000), metrics.lastGuestCPUTotalSeconds)
 }
 
+type memoryPollReader func([]byte) (int, error)
+
+func (f memoryPollReader) Read(p []byte) (int, error) { return f(p) }
+
+func TestCollectEnclaveMemoryRecordsFullPollDuration(t *testing.T) {
+	clock := &testClock{now: time.Unix(1_000, 0)}
+	metrics, reader := newTestHostMetricsWithClock(t, clock.Now)
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		clock.Advance(13 * time.Millisecond)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(memoryPollReader(func(p []byte) (int, error) {
+				clock.Advance(37 * time.Millisecond)
+				return copy(p, `{"usedMB":32}`), io.EOF
+			})),
+		}, nil
+	})}
+
+	require.NoError(t, metrics.collectEnclaveMemory(context.Background(), client))
+	data := collectHostMetrics(t, reader)
+	assert.Equal(t, "s", requireMetric(t, data, resourcePollDurationMetric).Unit)
+	point := histogramPoint(t, data, resourcePollDurationMetric, map[string]string{"outcome": "success"})
+	assert.Equal(t, uint64(1), point.Count)
+	assert.InDelta(t, 0.05, point.Sum, 1e-9)
+	assert.Equal(t, []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}, point.Bounds)
+	assert.Equal(t, int64(32*1024*1024), metrics.memory.Load().goRuntimeBytes)
+}
+
 func TestSaturatingInt64(t *testing.T) {
 	assert.Equal(t, int64(math.MaxInt64), saturatingInt64(math.MaxUint64))
 }
@@ -777,11 +807,12 @@ func TestHostMetricsGuestCPUUtilizationRetainsValueWithoutElapsedTicks(t *testin
 	assert.InDelta(t, 0.1, float64GaugeValue(t, collectHostMetrics(t, reader), guestCPUUtilizationMetric, nil), 0.0001)
 }
 
-func TestCollectEnclaveMemoryRejectsInvalidResponse(t *testing.T) {
+func TestCollectEnclaveMemoryRecordsFailedPolls(t *testing.T) {
 	tests := []struct {
-		name     string
-		response *http.Response
-		want     string
+		name         string
+		response     *http.Response
+		transportErr error
+		want         string
 	}{
 		{
 			name: "non-OK status",
@@ -807,18 +838,50 @@ func TestCollectEnclaveMemoryRejectsInvalidResponse(t *testing.T) {
 			},
 			want: "response exceeds",
 		},
+		{
+			name: "read error",
+			response: &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(iotest.ErrReader(errors.New("read failed"))),
+			},
+			want: "read enclave memory response",
+		},
+		{name: "transport error", transportErr: errors.New("vsock unavailable"), want: "vsock unavailable"},
+		{name: "timeout", transportErr: context.DeadlineExceeded, want: "context deadline exceeded"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			metrics, _ := newTestHostMetrics(t)
-			client := &http.Client{Transport: &mockRoundTripper{response: test.response}}
+			clock := &testClock{now: time.Unix(1_000, 0)}
+			metrics, reader := newTestHostMetricsWithClock(t, clock.Now)
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				clock.Advance(17 * time.Millisecond)
+				return test.response, test.transportErr
+			})}
 
 			err := metrics.collectEnclaveMemory(context.Background(), client)
 			require.ErrorContains(t, err, test.want)
+			if test.transportErr != nil {
+				assert.ErrorIs(t, err, test.transportErr)
+			}
 			assert.Nil(t, metrics.memory.Load())
+			point := histogramPoint(t, collectHostMetrics(t, reader), resourcePollDurationMetric, map[string]string{"outcome": "error"})
+			assert.Equal(t, uint64(1), point.Count)
+			assert.InDelta(t, 0.017, point.Sum, 1e-9)
 		})
 	}
+}
+
+func TestCollectEnclaveMemoryRecordsCanceledPoll(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client := &http.Client{Transport: &memorySequenceTransport{results: make(chan memoryRoundTripResult)}}
+
+	require.ErrorIs(t, metrics.collectEnclaveMemory(ctx, client), context.Canceled)
+	point := histogramPoint(t, collectHostMetrics(t, reader), resourcePollDurationMetric, map[string]string{"outcome": "error"})
+	assert.Equal(t, uint64(1), point.Count)
+	assert.GreaterOrEqual(t, point.Sum, 0.0)
 }
 
 func TestMonitorEnclaveMemoryClearsFailedSampleAndStops(t *testing.T) {
