@@ -221,7 +221,10 @@ jobs:
             # interrupt semantics). GOTOOLCHAIN fetches the exact version when
             # it differs from the installed one.
             modgo=$(awk '/^go [0-9]/{print $2; exit}' go.mod)
-            export GOTOOLCHAIN="go${modgo}"
+            # GOTOOLCHAIN needs a full goX.Y.Z; only pin when the go directive has a
+            # patch version. A directive like "go 1.24" (no patch) yields an invalid
+            # toolchain name, so fall back to the job's installed toolchain there.
+            case "$modgo" in *.*.*) export GOTOOLCHAIN="go${modgo}" ;; *) unset GOTOOLCHAIN ;; esac
             if [[ "$dir" =~ ^./capabilities/workflows/.+ ]]; then
               echo "Building workflow module as WASM..."
               GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 go build -o workflow.wasm .
@@ -847,7 +850,8 @@ jobs:
                 # timeout test depends on go 1.26 wasip1 interrupt semantics,
                 # which is what the golang:1.26 enclave image ships.
                 modgo=$(awk '/^go [0-9]/{print $2; exit}' go.mod)
-                export GOTOOLCHAIN="go${modgo}"
+                # Only pin GOTOOLCHAIN for a full goX.Y.Z (see build job).
+                case "$modgo" in *.*.*) export GOTOOLCHAIN="go${modgo}" ;; *) unset GOTOOLCHAIN ;; esac
                 GOMAXPROCS=2 go test -v ./... -timeout 30m -p 1
                 cd - > /dev/null
               done
@@ -858,7 +862,8 @@ jobs:
               echo "Testing tests/ root integration suite (fake enclaves, excluding tests/e2e)"
               cd tests
               modgo=$(awk '/^go [0-9]/{print $2; exit}' go.mod)
-              export GOTOOLCHAIN="go${modgo}"
+              # Only pin GOTOOLCHAIN for a full goX.Y.Z (see build job).
+              case "$modgo" in *.*.*) export GOTOOLCHAIN="go${modgo}" ;; *) unset GOTOOLCHAIN ;; esac
               GOMAXPROCS=2 go test -v . -skip '^TestConfidentialEchoEnclave$' -timeout 30m -p 1
               cd - > /dev/null
               ;;
