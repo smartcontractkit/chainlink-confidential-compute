@@ -903,6 +903,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				peer.EnclaveAuthHeader = "x-api-key: foobar"
 				savedConfig, err := fetchEnclaveConfig(peer)
 				require.NoError(t, err, "failed to read peer enclave config")
+				require.False(t, savedConfig.IsZero(), "peer enclave should have a valid config to restore from")
 
 				recipient.mu.Lock()
 				recipient.requests = nil
