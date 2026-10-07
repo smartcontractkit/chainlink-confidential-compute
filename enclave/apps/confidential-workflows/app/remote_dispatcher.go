@@ -366,9 +366,20 @@ func (d *remoteDispatcher) GetSecrets(ctx context.Context, workflowID string, re
 		return nil, err
 	}
 
-	// Use the enclave's own master public key from config, not the relay response.
-	// The enclave already knows this from the on-chain DON config (populated after DKG).
+	// Prefer the DKG public key forwarded in the relay response (bound into the
+	// signed result hash and verified above), falling back to the enclave's
+	// configured key when absent. This keeps runtime secret reads correct across
+	// reshares, where the configured key can be stale relative to the shares the
+	// Vault DON just produced.
 	masterPK := cfg.MasterPublicKey
+	if result.RawVaultPublicKey != "" {
+		if pk, derr := hex.DecodeString(result.RawVaultPublicKey); derr != nil {
+			d.logger.Warnw("[remoteDispatcher] failed to decode RawVaultPublicKey from relay response; using configured master public key", "err", derr)
+		} else {
+			masterPK = pk
+			d.logger.Debugw("[remoteDispatcher] using vault public key from relay response")
+		}
+	}
 
 	// Validate the relay's secrets against the request and rebuild the slice
 	// in request order: reject unexpected or duplicated IDs, and emit one

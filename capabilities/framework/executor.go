@@ -1337,6 +1337,19 @@ func (e *RealExecutor) getEnclaveParams(ctx context.Context, lggr logger.Logger,
 	}, nil
 }
 
+// cachedPublicKeysMatch reports whether every cached entry carries the same
+// rawVaultPublicKey (byte-equal, treating empty as a distinct value). A batch that
+// mixes keys must not be served from cache because all ciphertexts in a request
+// are decrypted under one MasterPublicKey.
+func cachedPublicKeysMatch(cached []*cachedEDKS) bool {
+	for _, entry := range cached {
+		if !bytes.Equal(entry.rawVaultPublicKey, cached[0].rawVaultPublicKey) {
+			return false
+		}
+	}
+	return true
+}
+
 func generateSecretCacheKey(enclaveEphemeralPublicKey []byte, secret *framework.SecretIdentifier, workflowOwner string) [32]byte {
 	owner := workflowOwner
 	keyData := fmt.Sprintf("%x-%s-%s-%s", enclaveEphemeralPublicKey, secret.Key, secret.Namespace, owner)
@@ -1372,29 +1385,40 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 	// It's technically suboptimal to require all secrets be cached to not send a request,
 	// but this is simpler logic and practically just as effective for real users.
 	if enableSecretsCache {
-		var allSecretsAreCached = true
+		cached := make([]*cachedEDKS, 0, len(vaultDONSecrets))
+		allSecretsAreCached := true
 		for i := range vaultDONSecrets {
-			if _, ok := e.secretsCache.Get(generateSecretCacheKey(enclaveEphemeralPublicKey, vaultDONSecrets[i], metadata.WorkflowOwner)); !ok {
+			entry, ok := e.secretsCache.Get(generateSecretCacheKey(enclaveEphemeralPublicKey, vaultDONSecrets[i], metadata.WorkflowOwner))
+			if !ok {
 				allSecretsAreCached = false
 				break
 			}
+			cached = append(cached, entry)
+		}
+		// The cache key does not include the DKG generation, so a batch can mix
+		// secrets cached before and after a reshare under the same enclave ephemeral
+		// key. Every ciphertext in a request is decrypted under a single
+		// MasterPublicKey, so serving such a batch would apply one key to shares from
+		// a different DKG and fail aggregation on every retry. Only serve from cache
+		// when all entries agree on the response public key (including empty vs
+		// present); otherwise treat it as a miss and refetch the whole batch.
+		if allSecretsAreCached && !cachedPublicKeysMatch(cached) {
+			lggr.Debugw("cached secrets disagree on vault public key; refetching batch from VaultDON", "num_secrets", len(vaultDONSecrets))
+			allSecretsAreCached = false
 		}
 		if allSecretsAreCached {
 			encryptedSecrets := make([][]byte, 0, len(vaultDONSecrets))
 			encryptedDecryptionShares := make([][][]byte, 0, len(vaultDONSecrets))
-			var rawVaultPublicKey []byte
-			for i := range vaultDONSecrets {
-				cachedEDKS, _ := e.secretsCache.Get(generateSecretCacheKey(enclaveEphemeralPublicKey, vaultDONSecrets[i], metadata.WorkflowOwner))
-				encryptedSecrets = append(encryptedSecrets, cachedEDKS.encryptedSecret)
-				encryptedDecryptionShares = append(encryptedDecryptionShares, cachedEDKS.encryptedDecryptionShares)
-				if len(cachedEDKS.rawVaultPublicKey) > 0 {
-					rawVaultPublicKey = cachedEDKS.rawVaultPublicKey
-				}
+			for _, entry := range cached {
+				encryptedSecrets = append(encryptedSecrets, entry.encryptedSecret)
+				encryptedDecryptionShares = append(encryptedDecryptionShares, entry.encryptedDecryptionShares)
 			}
+			// All cached entries agree on the key (checked above), so any of them is
+			// representative; empty means the responses carried no key and the enclave
+			// falls back to its configured MasterPublicKey.
+			rawVaultPublicKey := cached[0].rawVaultPublicKey
 			lggr.Debugw("All secrets retrieved from cache", "num_secrets", len(vaultDONSecrets))
 			metrics.Emit("vault_don_cache_hit", nil)
-			// Reuse the cached response public key if the original responses carried one;
-			// otherwise empty so the enclave falls back to its configured MasterPublicKey.
 			if len(rawVaultPublicKey) > 0 {
 				lggr.Debug("using vault public key from cached GetSecrets response")
 			}

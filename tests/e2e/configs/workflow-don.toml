@@ -50,7 +50,10 @@
   http_port_range_start = 10100
   p2p_port_range_start = 10110
 
-  env_vars = { CL_EVM_CMD = "", OTEL_SERVICE_NAME = "chainlink-node", OTEL_TRACES_EXPORTER = "none", OTEL_LOGS_EXPORTER = "none", OTEL_METRICS_EXPORTER = "none" }
+  # VaultGetSecretsIncludePublicKeyEnabled: Vault GetSecrets responses carry the
+  # DKG RawVaultPublicKey so confidential-http decrypt-side clients use the live
+  # key from the response. Exercises the response-key path end-to-end.
+  env_vars = { CL_EVM_CMD = "", OTEL_SERVICE_NAME = "chainlink-node", OTEL_TRACES_EXPORTER = "none", OTEL_LOGS_EXPORTER = "none", OTEL_METRICS_EXPORTER = "none", CL_CRE_SETTINGS = "{\"global\":{\"VaultGetSecretsIncludePublicKeyEnabled\":true}}" }
   supported_evm_chains = [1337, 2337]
   capabilities = ["vault", "confidential-http", "cron", "http-action", "http-trigger", "consensus", "don-time"]
   registry_based_launch_allowlist = ["cron-trigger@1.0.0"]
