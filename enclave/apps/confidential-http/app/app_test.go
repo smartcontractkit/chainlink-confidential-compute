@@ -967,6 +967,36 @@ func TestExecuteHTTPRequest_WithRealHTTPSOutbound_UntrustedCA(t *testing.T) {
 	assert.Equal(t, uint32(0), resp.StatusCode)
 }
 
+func TestHTTPEnclaveApp_Execute_RedirectRejected(t *testing.T) {
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				http.Redirect(w, r, "/next", status)
+			}))
+			t.Cleanup(server.Close)
+			dialer := &net.Dialer{}
+			client := util.NewRestrictedHTTPClientWithTLSAndDialer(
+				server.Client().Transport.(*http.Transport).TLSClientConfig.Clone(),
+				func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return dialer.DialContext(ctx, "tcp", server.Listener.Addr().String())
+				},
+			)
+			app := NewHTTPEnclaveApp(client)
+			input, err := proto.Marshal(&enclavetypes.Request{Method: http.MethodGet, Url: server.URL})
+			require.NoError(t, err)
+
+			output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialHTTP, input, nil, &testEmitter{})
+			require.NotNil(t, execErr)
+			assert.Nil(t, output)
+			assert.Equal(t, http.StatusBadRequest, execErr.Code)
+			assert.Contains(t, execErr.Error, "redirects are not allowed")
+			assert.Equal(t, int32(1), requests.Load(), "the redirect target must not be requested")
+		})
+	}
+}
+
 func TestHTTPEnclaveApp_Execute_Timeout(t *testing.T) {
 	// Create a mock HTTP client that delays longer than the timeout and respects context cancellation
 	slowClient := httpsmocks.NewMockHTTPClientWithCustomResponse(func(req *http.Request) (*http.Response, error) {

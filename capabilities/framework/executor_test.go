@@ -1266,6 +1266,65 @@ func TestExecutor_QuorumTimeout(t *testing.T) {
 	})
 }
 
+func TestExecutor_HTTPRedirectIsUserError(t *testing.T) {
+	const redirectError = `error in request 0: error making http request: Get "https://example.com/redirect?token=secret": redirects are not allowed`
+	errorBody, err := json.Marshal(enclavetypes.EnclaveErrorResponse{
+		Error: fmt.Sprintf("error executing enclave app request: %v", &enclavetypes.ExecuteError{Error: redirectError, Code: 400}),
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name      string
+		message   string
+		userError bool
+	}{
+		{"direct enclave error", "execute failed: " + redirectError, true},
+		{"host wrapped enclave error", "execute failed: error for request ID 010203: enclave returned error: 500 Internal Server Error - " + string(errorBody), true},
+		{"certificate failure", `execute failed: error executing enclave app request: &{error making http request: tls: failed to verify certificate: x509: certificate signed by unknown authority 400}`, false},
+		{"signature failure", "execute failed: 400 Bad Request - invalid signature", false},
+		{"internal failure", "execute failed: 500 Internal Server Error", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockVaultDONCapability := &MockVaultDONCapability{}
+			mockVaultDONCapability.ExecuteFunc = func(ctx context.Context, req capabilities.CapabilityRequest) (capabilities.CapabilityResponse, error) {
+				respAny, err := anypb.New(getValidGetSecretsResponse())
+				require.NoError(t, err)
+				return capabilities.CapabilityResponse{Payload: respAny}, nil
+			}
+			mockVaultDON := framework.VaultDON{CryptographyThreshold: 1, Capability: mockVaultDONCapability}
+
+			enclaveErr := errors.New(tt.message)
+			executeBatchCalls := 0
+			mockEnclaveClient := &MockEnclaveClient{}
+			mockEnclaveClient.ExecuteBatchFunc = func(ctx context.Context, reqs []enclavetypes.SignedComputeRequest, enclaveIDs [][32]byte) ([]enclavetypes.ExecuteResponse, error) {
+				executeBatchCalls++
+				return nil, enclaveErr
+			}
+			mockMetrics := NewMockMetrics()
+			_, err := setupAndExecuteExecutor(t, mockEnclaveClient, mockVaultDON, mockMetrics, getDefaultRateLimiter(), 3, 0)
+			require.Error(t, err)
+
+			var capErr caperrors.Error
+			if !tt.userError {
+				assert.False(t, errors.As(err, &capErr))
+				assert.ErrorIs(t, err, enclaveErr)
+				assert.Equal(t, 3, executeBatchCalls)
+				AssertCalledNTimes(t, mockMetrics, "execute_error", 3)
+				return
+			}
+			require.True(t, errors.As(err, &capErr))
+			assert.Equal(t, caperrors.OriginUser, capErr.Origin())
+			assert.Equal(t, caperrors.InvalidArgument, capErr.Code())
+			assert.Equal(t, caperrors.VisibilityPublic, capErr.Visibility())
+			assert.Contains(t, capErr.Error(), "redirects are not allowed")
+			assert.NotContains(t, capErr.Error(), "token=secret")
+			assert.Equal(t, 1, executeBatchCalls)
+			AssertCalledNTimes(t, mockMetrics, "execute_error", 0)
+		})
+	}
+}
+
 func TestExecutor_WasmExecutionTimeoutIsUserError(t *testing.T) {
 	t.Run("wasm execution timeout short-circuits retries as a user DeadlineExceeded error", func(t *testing.T) {
 		mockVaultDONCapability := &MockVaultDONCapability{}
