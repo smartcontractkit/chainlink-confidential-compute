@@ -447,13 +447,13 @@ type EnclaveApp interface {
 }
 
 type MemoryEstimateResponse struct {
-	// UsedMB is all memory mapped by the Go runtime, rounded to the nearest
-	// megabyte.
+	// UsedMB is memory mapped by the enclave server's Go runtime, excluding
+	// worker runtimes, rounded to the nearest megabyte.
 	UsedMB uint64 `json:"usedMB"`
-	// RSSMB is the enclave process's resident set size (VmRSS), rounded to the
+	// RSSMB is the enclave server's resident set size (VmRSS), rounded to the
 	// nearest megabyte. Unlike UsedMB it includes native allocations outside the
-	// Go runtime, notably the wasmtime WASM linear memory, so it reflects the
-	// enclave's true footprint under load. 0 if unavailable (e.g. non-Linux).
+	// Go runtime, but excludes execution workers.
+	// 0 if unavailable (e.g. non-Linux).
 	RSSMB uint64 `json:"rssMB"`
 	// TotalMB is the enclave guest's total RAM (/proc/meminfo MemTotal),
 	// rounded to the nearest megabyte. It is the denominator for
@@ -469,8 +469,8 @@ type MemoryEstimateResponse struct {
 	// cache and slab also draw on the enclave's fixed budget. Omitted from the
 	// JSON when zero, so an enclave predating this field stays compatible.
 	AvailableMB uint64 `json:"availableMB,omitempty"`
-	// PeakRSSMB is the high-water mark of the enclave process's resident set
-	// (/proc/self/status VmHWM), rounded to the nearest megabyte. Unlike RSSMB
+	// PeakRSSMB is the high-water mark of the enclave server's resident set
+	// (/proc/self/status VmHWM), excluding workers, rounded to the nearest megabyte. Unlike RSSMB
 	// it is monotonic, so a spike shorter than the host's poll interval is
 	// still visible afterwards instead of being missed between samples. Omitted
 	// from the JSON when zero.
