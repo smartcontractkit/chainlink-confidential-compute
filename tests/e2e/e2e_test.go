@@ -1113,7 +1113,7 @@ func updateCapabilityRegistryEnclaveMeasurements(
 	capReg, err := capabilities_registry_wrapper_v2.NewCapabilitiesRegistry(common.HexToAddress(capabilityRegistryAddress), sethClient.Client)
 	require.NoError(t, err, "failed to construct capabilities registry client")
 
-	donName := "workflow-don"
+	donName := "workflow"
 	donInfo, err := capReg.GetDONByName(&bind.CallOpts{}, donName)
 	require.NoError(t, err, "failed to fetch workflow DON info")
 
@@ -1178,7 +1178,7 @@ func mustWorkflowCapReg(t *testing.T, testEnv *ttypes.TestEnvironment) *capabili
 // getWorkflowDONNodes returns the current on-chain node P2P IDs for the workflow DON.
 func getWorkflowDONNodes(t *testing.T, testEnv *ttypes.TestEnvironment) [][32]byte {
 	t.Helper()
-	donInfo, err := mustWorkflowCapReg(t, testEnv).GetDONByName(&bind.CallOpts{}, "workflow-don")
+	donInfo, err := mustWorkflowCapReg(t, testEnv).GetDONByName(&bind.CallOpts{}, "workflow")
 	require.NoError(t, err, "failed to fetch workflow DON info")
 	return donInfo.NodeP2PIds
 }
@@ -1191,7 +1191,7 @@ func setWorkflowDONNodes(t *testing.T, testEnv *ttypes.TestEnvironment, nodes []
 	sethClient := testEnv.CreEnvironment.Blockchains[0].(*evm.Blockchain).SethClient
 	capReg := mustWorkflowCapReg(t, testEnv)
 
-	donName := "workflow-don"
+	donName := "workflow"
 	donInfo, err := capReg.GetDONByName(&bind.CallOpts{}, donName)
 	require.NoError(t, err, "failed to fetch workflow DON info")
 

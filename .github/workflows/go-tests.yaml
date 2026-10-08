@@ -21,7 +21,7 @@ on:
     # Nightly real-enclave run at 07:00 UTC.
     - cron: '0 7 * * *'
 env:
-  CHAINLINK_COMMIT_SHA: 04414ac86e1d07b3f220dd46ed44500047abcf71
+  CHAINLINK_COMMIT_SHA: bfbfcc3438256dbff184e708cb69f6625f69f1d5
   LEGACY_COMMIT_SHA: 7d70fcf65d8b5af102d8267b54d31ea163dea203 # initial commit, the commit pointing to whatever is capability gitref is deployed in Chainlink's plugins.private.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.private.yaml#L50.
   LEGACY_ENCLAVE_RELEASE: v1.3.0 # The release tag whose enclave app the legacy-enclaves leg checks out and runs locally as a fake enclave. Update this when the deployed production enclave release changes.
   # Pinned refs for the supporting CRE Docker images, used as GHCR cache keys.
@@ -165,7 +165,7 @@ jobs:
           echo "GOSUMDB=sum.golang.org" >> $GITHUB_ENV
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.7'
+          go-version: '1.27.1'
           cache: false
 
       # Explicit cache (not setup-go's built-in) so restore-keys gives a partial
@@ -212,6 +212,19 @@ jobs:
               continue
             fi
             cd "$dir"
+            # Build each module under its own declared go directive. setup-go
+            # installs the newest toolchain we need (1.27.1, for the
+            # framework/capability modules on chainlink-common 390b2a), but the
+            # nitro-built enclave/app modules are pinned to go 1.26.x and ship
+            # in golang:1.26 images; building them with a newer toolchain than
+            # production diverges from what actually runs (e.g. go 1.27 wasip1
+            # interrupt semantics). GOTOOLCHAIN fetches the exact version when
+            # it differs from the installed one.
+            modgo=$(awk '/^go [0-9]/{print $2; exit}' go.mod)
+            # GOTOOLCHAIN needs a full goX.Y.Z; only pin when the go directive has a
+            # patch version. A directive like "go 1.24" (no patch) yields an invalid
+            # toolchain name, so fall back to the job's installed toolchain there.
+            case "$modgo" in *.*.*) export GOTOOLCHAIN="go${modgo}" ;; *) unset GOTOOLCHAIN ;; esac
             if [[ "$dir" =~ ^./capabilities/workflows/.+ ]]; then
               echo "Building workflow module as WASM..."
               GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 go build -o workflow.wasm .
@@ -330,7 +343,7 @@ jobs:
       - uses: actions/setup-go@v6
         if: steps.cache.outputs.chip_ingress_hit != 'true' || steps.cache.outputs.chip_config_hit != 'true'
         with:
-          go-version: '1.26.7'
+          go-version: '1.27.1'
           cache: false
 
       # ---- chainlink ----
@@ -559,7 +572,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.7'
+          go-version: '1.27.1'
           cache: false
 
       # Only cache on the ephemeral hosted (fake-enclave) runners. The self-hosted
@@ -832,6 +845,13 @@ jobs:
               for dir in $MODULES; do
                 echo "Testing module in $dir"
                 cd "$dir"
+                # Test each module under its own go directive (see the build job
+                # for why). In particular the confidential-workflows/app wasm
+                # timeout test depends on go 1.26 wasip1 interrupt semantics,
+                # which is what the golang:1.26 enclave image ships.
+                modgo=$(awk '/^go [0-9]/{print $2; exit}' go.mod)
+                # Only pin GOTOOLCHAIN for a full goX.Y.Z (see build job).
+                case "$modgo" in *.*.*) export GOTOOLCHAIN="go${modgo}" ;; *) unset GOTOOLCHAIN ;; esac
                 GOMAXPROCS=2 go test -v ./... -timeout 30m -p 1
                 cd - > /dev/null
               done
@@ -841,6 +861,9 @@ jobs:
               # left to their dedicated portions.
               echo "Testing tests/ root integration suite (fake enclaves, excluding tests/e2e)"
               cd tests
+              modgo=$(awk '/^go [0-9]/{print $2; exit}' go.mod)
+              # Only pin GOTOOLCHAIN for a full goX.Y.Z (see build job).
+              case "$modgo" in *.*.*) export GOTOOLCHAIN="go${modgo}" ;; *) unset GOTOOLCHAIN ;; esac
               GOMAXPROCS=2 go test -v . -skip '^TestConfidentialEchoEnclave$' -timeout 30m -p 1
               cd - > /dev/null
               ;;
