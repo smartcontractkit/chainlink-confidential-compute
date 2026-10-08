@@ -1280,7 +1280,10 @@ func TestExecutor_HTTPRedirectIsUserError(t *testing.T) {
 	}{
 		{"direct enclave error", "execute failed: " + redirectError, true},
 		{"host wrapped enclave error", "execute failed: error for request ID 010203: enclave returned error: 500 Internal Server Error - " + string(errorBody), true},
+		{"sanitized redirect", "execute failed: error in request 0: error making http request: redirects are not allowed", true},
 		{"certificate failure", `execute failed: error executing enclave app request: &{error making http request: tls: failed to verify certificate: x509: certificate signed by unknown authority 400}`, false},
+		{"sanitized certificate failure", "execute failed: error in request 0: error making http request: TLS certificate hostname mismatch", false},
+		{"sanitized TLS alert", "execute failed: error in request 0: error making http request: TLS peer reported bad record MAC", false},
 		{"signature failure", "execute failed: 400 Bad Request - invalid signature", false},
 		{"internal failure", "execute failed: 500 Internal Server Error", false},
 	}

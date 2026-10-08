@@ -11,20 +11,24 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 	"unicode/utf8"
 
 	enclavetypes "github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/server"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
 	httpsmocks "github.com/smartcontractkit/chainlink-confidential-compute/enclave/testutil"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -967,13 +971,58 @@ func TestExecuteHTTPRequest_WithRealHTTPSOutbound_UntrustedCA(t *testing.T) {
 	assert.Equal(t, uint32(0), resp.StatusCode)
 }
 
+func TestHTTPEnclaveApp_Execute_RedactsHTTPFailures(t *testing.T) {
+	const secret = "confidential-canary"
+	for _, tt := range []struct {
+		name string
+		err  error
+		body io.ReadCloser
+		want string
+	}{
+		{name: "transport", err: errors.New(secret), want: "error making http request: transport failure"},
+		{name: "certificate", err: &tls.CertificateVerificationError{Err: x509.HostnameError{Host: secret, Certificate: &x509.Certificate{}}}, want: "error making http request: TLS certificate hostname mismatch"},
+		{name: "read response", body: io.NopCloser(iotest.ErrReader(errors.New(secret))), want: "error reading http response"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := httpsmocks.NewMockHTTPClientWithCustomResponse(func(req *http.Request) (*http.Response, error) {
+				assert.Equal(t, secret, req.Header.Get("Authorization"))
+				body, err := io.ReadAll(req.Body)
+				require.NoError(t, err)
+				assert.Equal(t, secret, string(body))
+				if tt.err != nil {
+					return nil, &url.Error{Op: req.Method, URL: req.URL.String(), Err: tt.err}
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: tt.body}, nil
+			})
+			app := NewHTTPEnclaveApp(client)
+			input, err := proto.Marshal(&enclavetypes.Request{
+				Method: http.MethodPost, Url: "https://example.com/" + secret + "?token=" + secret,
+				MultiHeaders: map[string]*enclavetypes.HeaderValues{"Authorization": {Values: []string{"{{.token}}"}}},
+				Body:         &enclavetypes.Request_BodyString{BodyString: "{{.token}}"},
+			})
+			require.NoError(t, err)
+			em := server.NewResponseEmitter()
+			output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialHTTP, input, map[string][]byte{"token": []byte(secret)}, em)
+			require.NotNil(t, execErr)
+			assert.Nil(t, output)
+			assert.Equal(t, http.StatusBadRequest, execErr.Code)
+			assert.Equal(t, "error in request 0: "+tt.want, execErr.Error)
+			em.Emit("app_execution_failed", map[string]any{"error": execErr})
+			metrics, events := em.Snapshot()
+			wire, err := json.Marshal(types.EnclaveErrorResponse{Error: execErr.Error, Metrics: metrics, MetricEvents: events})
+			require.NoError(t, err)
+			assert.NotContains(t, string(wire), secret)
+		})
+	}
+}
+
 func TestHTTPEnclaveApp_Execute_RedirectRejected(t *testing.T) {
 	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			var requests atomic.Int32
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
-				http.Redirect(w, r, "/next", status)
+				http.Redirect(w, r, "/redirect-secret?token=redirect-secret", status)
 			}))
 			t.Cleanup(server.Close)
 			dialer := &net.Dialer{}
@@ -991,7 +1040,8 @@ func TestHTTPEnclaveApp_Execute_RedirectRejected(t *testing.T) {
 			require.NotNil(t, execErr)
 			assert.Nil(t, output)
 			assert.Equal(t, http.StatusBadRequest, execErr.Code)
-			assert.Contains(t, execErr.Error, "redirects are not allowed")
+			assert.Equal(t, "error in request 0: error making http request: redirects are not allowed", execErr.Error)
+			assert.NotContains(t, execErr.Error, "redirect-secret")
 			assert.Equal(t, int32(1), requests.Load(), "the redirect target must not be requested")
 		})
 	}

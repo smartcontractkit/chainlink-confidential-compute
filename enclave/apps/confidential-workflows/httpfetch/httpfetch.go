@@ -105,7 +105,7 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request) (*httpcap.Resp
 
 	method := strings.ToUpper(strings.TrimSpace(in.GetMethod()))
 	if !slices.Contains(f.policy.AllowedMethods, method) {
-		return nil, fmt.Errorf("method %q not allowed", method)
+		return nil, errors.New("method not allowed")
 	}
 
 	if strings.TrimSpace(in.GetUrl()) == "" {
@@ -118,7 +118,7 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request) (*httpcap.Resp
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, method, strings.TrimSpace(in.GetUrl()), bytesReaderOrNil(in.GetBody()))
 	if err != nil {
-		return nil, fmt.Errorf("building request: %w", err)
+		return nil, errors.New("building request failed")
 	}
 	applyHeaders(httpReq, in)
 
@@ -134,14 +134,14 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request) (*httpcap.Resp
 				Body:       []byte(he.Body),
 			}, nil
 		}
-		return nil, fmt.Errorf("http request failed: %w", err)
+		return nil, fmt.Errorf("http request failed: %w", util.SanitizeOutboundHTTPError(err))
 	}
 	defer util.SafeClose(resp)
 
 	limited := io.LimitReader(resp.Body, f.policy.MaxResponseBodyBytes+1)
 	body, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
+		return nil, errors.New("reading response failed")
 	}
 	if int64(len(body)) > f.policy.MaxResponseBodyBytes {
 		return nil, fmt.Errorf("response body exceeds limit %d bytes", f.policy.MaxResponseBodyBytes)
