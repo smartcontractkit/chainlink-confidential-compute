@@ -19,6 +19,7 @@ require (
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260914191328-10cc2b41997e
 	github.com/smartcontractkit/chainlink-confidential-compute v1.3.0
 	github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-00010101000000-000000000000
+	github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows v0.0.0-00010101000000-000000000000
 	github.com/smartcontractkit/chainlink-confidential-compute/tests/testhelpers v0.0.0-20260812145307-d77342c53d7d
 	github.com/smartcontractkit/chainlink-evm/gethwrappers v0.0.0-20260713161920-de075095648b
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260804191526-b7a850ae7648
