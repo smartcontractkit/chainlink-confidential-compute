@@ -400,7 +400,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		}
 	}
 
-	var helper host.ExecutionHelper = &enclaveExecutionHelper{
+	helper := &enclaveExecutionHelper{
 		requestID:        requestID,
 		workflowID:       execution.WorkflowId,
 		owner:            execution.GetOwner(),
@@ -421,7 +421,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		}
 	}
 
-	helper = host.NewRestrictedExecutionHelper(helper, execution.Restrictions)
+	restrictedHelper := host.NewRestrictedExecutionHelper(helper, execution.Restrictions)
 
 	// Execute the WASM binary with the deserialized ExecuteRequest.
 	// The fetched binary is brotli-compressed.
@@ -445,7 +445,9 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	if execution.GetOrgId() == "" {
 		executionLogger.Warnw("Workflow execution is missing org ID")
 	}
-	result, err := executeWasm(execCtx, executionLogger, a.limiterSettings.Snapshot(), binary, execution.SdkExecuteRequest, true, helper, execTimeout)
+	snapshot := a.limiterSettings.Snapshot()
+	helper.httpLimits = newHTTPActionLimits(execCtx, executionLogger, snapshot)
+	result, err := executeWasm(execCtx, executionLogger, snapshot, binary, execution.SdkExecuteRequest, true, restrictedHelper, execTimeout)
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to
