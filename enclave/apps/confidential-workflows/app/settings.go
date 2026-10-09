@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -40,6 +41,7 @@ import (
 //     Zero falls back to the enclave's built-in default.
 //   - RequestTimeout: global request timeout inside the enclave, used as the
 //     default deadline for outbound HTTP a workflow makes while being served.
+//     HTTP actions cap this default at PerWorkflow.HTTPAction.ConnectionTimeout.
 //     Should track the caller's enclave request timeout, since work outliving
 //     that deadline is work nobody is waiting for. Zero falls back to the
 //     enclave's built-in default.
@@ -54,8 +56,8 @@ import (
 //   - WorkflowGracePeriod: how long each validated execution waits before it
 //     starts running. Zero falls back to types.DefaultWorkflowGracePeriod; a
 //     negative value disables the wait.
-//   - CRESettings: standard CRE scoped settings used by the WASM module
-//     limiters. The object may contain global, org, owner and workflow
+//   - CRESettings: standard CRE scoped settings used by the WASM module and
+//     HTTP action limiters. The object may contain global, org, owner and workflow
 //     overrides and is replaced as a unit on every injection, including runtime
 //     reinjection via POST /settings. Each execution snapshots these settings;
 //     they are not automatically synchronized with the CRE backend. Raising
@@ -116,8 +118,21 @@ func (s *limiterSettingsSnapshot) logFallback(lggr logger.Logger, key string, er
 		return
 	}
 	if _, loaded := s.logged.LoadOrStore(key, struct{}{}); !loaded {
-		lggr.Warnw("Failed to resolve CRE WASM setting. Using default value", "key", key, "err", err)
+		lggr.Warnw("Failed to resolve CRE setting. Using default value", "key", key, "err", err)
 	}
+}
+
+func resolveSetting[T any](ctx context.Context, lggr logger.Logger, snapshot *limiterSettingsSnapshot, setting settings.Setting[T]) T {
+	if snapshot == nil {
+		return setting.DefaultValue
+	}
+	value, err := setting.GetOrDefault(ctx, snapshot.getter)
+	if err != nil {
+		// GetOrDefault returns the default alongside the error. Settings
+		// failures remain non-fatal for the execution.
+		snapshot.logFallback(lggr, setting.Key, err)
+	}
+	return value
 }
 
 // validate reports the required settings the payload left empty. The enclave

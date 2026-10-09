@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 
 	"log"
@@ -57,8 +58,8 @@ func StartNitroEnclave(
 
 	// Verify PTP clock synchronization.
 	clockSource := getClockSource()
-	if clockSource != "kvm-clock" {
-		return fmt.Errorf("invalid clock source: %s", clockSource)
+	if err := validateClockSource(runtime.GOARCH, clockSource); err != nil {
+		return err
 	}
 	chronySources := getChronySources()
 	if strings.Contains(chronySources, "* PHC") {
@@ -88,6 +89,22 @@ func StartNitroEnclave(
 	}
 	defer listener.Close() //nolint:errcheck // best-effort cleanup
 	return server.Start(listener)
+}
+
+func validateClockSource(architecture, source string) error {
+	var expected string
+	switch architecture {
+	case "amd64":
+		expected = "kvm-clock"
+	case "arm64":
+		expected = "arch_sys_counter"
+	default:
+		return fmt.Errorf("unsupported Nitro architecture: %s", architecture)
+	}
+	if source != expected {
+		return fmt.Errorf("invalid clock source for %s: %s, want %s", architecture, source, expected)
+	}
+	return nil
 }
 
 func getClockSource() string {
