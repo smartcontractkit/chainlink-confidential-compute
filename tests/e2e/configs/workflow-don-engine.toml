@@ -98,7 +98,10 @@
   override_mode = "each"
   http_port_range_start = 10400
 
-  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":false}}", CL_CRE_SETTINGS_DEFAULT = "{\"RemoteExecutableWorkflowDONBindingEnabled\":\"true\"}" }
+  # VaultGetSecretsIncludePublicKeyEnabled: Vault GetSecrets responses carry the
+  # DKG RawVaultPublicKey so the confidential-workflows runtime GetSecret path uses
+  # the live key forwarded via the relay. Exercises the response-key path end-to-end.
+  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":false,\"VaultGetSecretsIncludePublicKeyEnabled\":true}}", CL_CRE_SETTINGS_DEFAULT = "{\"RemoteExecutableWorkflowDONBindingEnabled\":\"true\"}" }
   supported_evm_chains = [1337, 2337]
   capabilities = ["vault"]
   exposes_remote_capabilities = true

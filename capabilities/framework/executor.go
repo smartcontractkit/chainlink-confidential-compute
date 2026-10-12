@@ -370,6 +370,10 @@ type RealExecutor struct {
 type cachedEDKS struct {
 	encryptedSecret           []byte
 	encryptedDecryptionShares [][]byte
+	// rawVaultPublicKey is the vault public key from the GetSecrets response that
+	// produced these shares (empty if that response did not carry one). Cached so
+	// cache hits reuse the same key and stay reshare-safe.
+	rawVaultPublicKey []byte
 }
 
 func NewRealExecutor(
@@ -608,7 +612,7 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 		// Get encrypted decryption shares from VaultDON
 		vaultDONRequestSent = true
 		vaultDONAttemptStart := time.Now()
-		encryptedSecrets, encryptedDecryptionShares, err := e.GetEncryptedDecryptionShares(
+		encryptedSecrets, encryptedDecryptionShares, rawVaultPublicKey, err := e.GetEncryptedDecryptionShares(
 			ctx,
 			innerLggr,
 			secrets,
@@ -647,6 +651,11 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 			CiphertextNames:              inputCiphertextNames,
 			EnclaveEphemeralPublicKey:    enclaveParams.EnclaveEphemeralPublicKey,
 			EncryptedDecryptionKeyShares: encryptedDecryptionShares,
+			// Vault public key of the DKG instance that produced the shares, carried inline
+			// in the vault DON response. Empty when the vault plugin gate is off (cache hits
+			// or older nodes), in which case the enclave uses its configured MasterPublicKey.
+			// Signed as part of ComputeRequest.Hash().
+			MasterPublicKey: rawVaultPublicKey,
 			AppID:                        e.capabilityID,
 			Version:                      e.confidentialComputeVersion,
 		}
@@ -1332,6 +1341,19 @@ func (e *RealExecutor) getEnclaveParams(ctx context.Context, lggr logger.Logger,
 	}, nil
 }
 
+// cachedPublicKeysMatch reports whether every cached entry carries the same
+// rawVaultPublicKey (byte-equal, treating empty as a distinct value). A batch that
+// mixes keys must not be served from cache because all ciphertexts in a request
+// are decrypted under one MasterPublicKey.
+func cachedPublicKeysMatch(cached []*cachedEDKS) bool {
+	for _, entry := range cached {
+		if !bytes.Equal(entry.rawVaultPublicKey, cached[0].rawVaultPublicKey) {
+			return false
+		}
+	}
+	return true
+}
+
 func generateSecretCacheKey(enclaveEphemeralPublicKey []byte, secret *framework.SecretIdentifier, workflowOwner string) [32]byte {
 	owner := workflowOwner
 	keyData := fmt.Sprintf("%x-%s-%s-%s", enclaveEphemeralPublicKey, secret.Key, secret.Namespace, owner)
@@ -1348,18 +1370,18 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 	enclaveEphemeralPublicKey []byte,
 	metadata capabilities.RequestMetadata,
 	metrics types.Emitter,
-) ([][]byte, [][][]byte, error) {
+) ([][]byte, [][][]byte, []byte, error) {
 	lggr.Debugw("Attempting to get encrypted decrypted shares from VaultDON capability",
 		"enclaveEphemeralPublicKey", fmt.Sprintf("%x", enclaveEphemeralPublicKey[:8]))
 
 	// Short circuit Vault DON call if no secrets are required.
 	if len(vaultDONSecrets) == 0 {
 		lggr.Debugw("no secrets required, skipping VaultDON call")
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	if e.vaultDON.Capability == nil {
-		return nil, nil, errors.New("VaultDON capability is not initialized")
+		return nil, nil, nil, errors.New("VaultDON capability is not initialized")
 	}
 	enclaveEphemeralPublicKeyHex := hex.EncodeToString(enclaveEphemeralPublicKey)
 	enableSecretsCache := e.getCapConfig().EnableSecretsCache
@@ -1367,24 +1389,44 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 	// It's technically suboptimal to require all secrets be cached to not send a request,
 	// but this is simpler logic and practically just as effective for real users.
 	if enableSecretsCache {
-		var allSecretsAreCached = true
+		cached := make([]*cachedEDKS, 0, len(vaultDONSecrets))
+		allSecretsAreCached := true
 		for i := range vaultDONSecrets {
-			if _, ok := e.secretsCache.Get(generateSecretCacheKey(enclaveEphemeralPublicKey, vaultDONSecrets[i], metadata.WorkflowOwner)); !ok {
+			entry, ok := e.secretsCache.Get(generateSecretCacheKey(enclaveEphemeralPublicKey, vaultDONSecrets[i], metadata.WorkflowOwner))
+			if !ok {
 				allSecretsAreCached = false
 				break
 			}
+			cached = append(cached, entry)
+		}
+		// The cache key does not include the DKG generation, so a batch can mix
+		// secrets cached before and after a reshare under the same enclave ephemeral
+		// key. Every ciphertext in a request is decrypted under a single
+		// MasterPublicKey, so serving such a batch would apply one key to shares from
+		// a different DKG and fail aggregation on every retry. Only serve from cache
+		// when all entries agree on the response public key (including empty vs
+		// present); otherwise treat it as a miss and refetch the whole batch.
+		if allSecretsAreCached && !cachedPublicKeysMatch(cached) {
+			lggr.Debugw("cached secrets disagree on vault public key; refetching batch from VaultDON", "num_secrets", len(vaultDONSecrets))
+			allSecretsAreCached = false
 		}
 		if allSecretsAreCached {
 			encryptedSecrets := make([][]byte, 0, len(vaultDONSecrets))
 			encryptedDecryptionShares := make([][][]byte, 0, len(vaultDONSecrets))
-			for i := range vaultDONSecrets {
-				cachedEDKS, _ := e.secretsCache.Get(generateSecretCacheKey(enclaveEphemeralPublicKey, vaultDONSecrets[i], metadata.WorkflowOwner))
-				encryptedSecrets = append(encryptedSecrets, cachedEDKS.encryptedSecret)
-				encryptedDecryptionShares = append(encryptedDecryptionShares, cachedEDKS.encryptedDecryptionShares)
+			for _, entry := range cached {
+				encryptedSecrets = append(encryptedSecrets, entry.encryptedSecret)
+				encryptedDecryptionShares = append(encryptedDecryptionShares, entry.encryptedDecryptionShares)
 			}
+			// All cached entries agree on the key (checked above), so any of them is
+			// representative; empty means the responses carried no key and the enclave
+			// falls back to its configured MasterPublicKey.
+			rawVaultPublicKey := cached[0].rawVaultPublicKey
 			lggr.Debugw("All secrets retrieved from cache", "num_secrets", len(vaultDONSecrets))
 			metrics.Emit("vault_don_cache_hit", nil)
-			return encryptedSecrets, encryptedDecryptionShares, nil
+			if len(rawVaultPublicKey) > 0 {
+				lggr.Debug("using vault public key from cached GetSecrets response")
+			}
+			return encryptedSecrets, encryptedDecryptionShares, rawVaultPublicKey, nil
 		}
 		metrics.Emit("vault_don_cache_miss", nil)
 	}
@@ -1408,13 +1450,13 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 	}
 	vaultDONInputAny, err := anypb.New(vaultDONRequestPayload)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal VaultDON request payload to Any: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to marshal VaultDON request payload to Any: %w", err)
 	}
 
 	vaultMetadata := metadata
 	e.applyPropagatedOrgIDToVault(ctx, &vaultMetadata)
 	if err := e.applyWorkflowDONBindingToVault(ctx, &vaultMetadata); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	vaultDONRequest := capabilities.CapabilityRequest{
@@ -1430,14 +1472,27 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 		"metadata", vaultMetadata)
 	vaultDONResponse, err := e.vaultDON.Capability.Execute(ctx, vaultDONRequest)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to execute VaultDON capability: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to execute VaultDON capability: %w", err)
 	}
 	lggr.Debugw("VaultDON response received", "secretCount", len(vaultDONSecrets))
 
 	var vaultDONOutput vault.GetSecretsResponse
 	err = vaultDONResponse.Payload.UnmarshalTo(&vaultDONOutput)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to unmarshal VaultDON response payload: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to unmarshal VaultDON response payload: %w", err)
+	}
+
+	// Prefer the vault public key carried inline in the response (the key of the DKG
+	// instance that produced these shares) so a reshare needs no infra/config update.
+	// Decoded to the tdh2 marshaled bytes the enclave combiner expects; empty when the
+	// plugin gate is off, in which case the enclave uses its configured MasterPublicKey.
+	var rawVaultPublicKey []byte
+	if raw := vaultDONOutput.GetRawVaultPublicKey(); raw != "" {
+		rawVaultPublicKey, err = hex.DecodeString(raw)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to decode RawVaultPublicKey from VaultDON response: %w", err)
+		}
+		lggr.Debug("using vault public key from GetSecrets response")
 	}
 
 	encryptedSecrets := make([][]byte, 0)
@@ -1456,15 +1511,15 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 			// TODO: replace this string match with a typed origin/code field on SecretResponse.
 			// Source: chainlink core ocr2 vault plugin, userFacingError() helper.
 			if resp.GetError() == types.ErrVaultSystemErrorFallback {
-				return nil, nil, innerErr
+				return nil, nil, nil, innerErr
 			}
-			return nil, nil, caperrors.NewPublicUserError(innerErr, caperrors.InvalidArgument)
+			return nil, nil, nil, caperrors.NewPublicUserError(innerErr, caperrors.InvalidArgument)
 		}
 		if resp.GetId() == nil || resp.GetId().GetKey() == "" {
-			return nil, nil, fmt.Errorf("VaultDON response at index %d is missing a valid secret identifier", responseIndex)
+			return nil, nil, nil, fmt.Errorf("VaultDON response at index %d is missing a valid secret identifier", responseIndex)
 		}
 		if slices.Contains(seenKeys, resp.GetId().GetKey()) {
-			return nil, nil, fmt.Errorf("duplicate VaultDON response for secret key %s at index %d", resp.GetId().GetKey(), responseIndex)
+			return nil, nil, nil, fmt.Errorf("duplicate VaultDON response for secret key %s at index %d", resp.GetId().GetKey(), responseIndex)
 		}
 		seenKeys = append(seenKeys, resp.GetId().GetKey())
 	}
@@ -1478,7 +1533,7 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 			}
 		}
 		if matchingResp == nil {
-			return nil, nil, fmt.Errorf("no response from VaultDON for secret with key %s, namespace %s, owner %s", secretReq.Id.GetKey(), secretReq.Id.GetNamespace(), secretReq.Id.GetOwner())
+			return nil, nil, nil, fmt.Errorf("no response from VaultDON for secret with key %s, namespace %s, owner %s", secretReq.Id.GetKey(), secretReq.Id.GetNamespace(), secretReq.Id.GetOwner())
 		}
 		orderedVaultDONResponses = append(orderedVaultDONResponses, matchingResp)
 	}
@@ -1486,18 +1541,18 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 	for _, secretResp := range orderedVaultDONResponses {
 		secretData := secretResp.GetData()
 		if secretData == nil {
-			return nil, nil, fmt.Errorf("VaultDON returned no data for secret %s", secretResp.GetId().GetKey())
+			return nil, nil, nil, fmt.Errorf("VaultDON returned no data for secret %s", secretResp.GetId().GetKey())
 		}
 
 		encryptedSecret, err := hex.DecodeString(secretData.GetEncryptedValue())
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to decode hex-encoded ciphertext for secret %s: %w", secretResp.GetId().GetKey(), err)
+			return nil, nil, nil, fmt.Errorf("failed to decode hex-encoded ciphertext for secret %s: %w", secretResp.GetId().GetKey(), err)
 		}
 		encryptedSecrets = append(encryptedSecrets, encryptedSecret)
 
 		encryptedDecryptionSharesForSecret := make([][]byte, 0)
 		if len(secretData.GetEncryptedDecryptionKeyShares()) != 1 {
-			return nil, nil, fmt.Errorf("expected exactly one set of encrypted decryption key shares for secret %s, got %d", secretResp.GetId().GetKey(), len(secretData.GetEncryptedDecryptionKeyShares()))
+			return nil, nil, nil, fmt.Errorf("expected exactly one set of encrypted decryption key shares for secret %s, got %d", secretResp.GetId().GetKey(), len(secretData.GetEncryptedDecryptionKeyShares()))
 		}
 		shares := secretData.GetEncryptedDecryptionKeyShares()[0]
 		if len(shares.GetBinaryShares()) > 0 {
@@ -1506,16 +1561,16 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 			for _, shareStr := range shares.GetShares() {
 				shareBytes, err := hex.DecodeString(shareStr)
 				if err != nil {
-					return nil, nil, fmt.Errorf("failed to decode hex-encoded share for secret %s: %w", secretResp.GetId().GetKey(), err)
+					return nil, nil, nil, fmt.Errorf("failed to decode hex-encoded share for secret %s: %w", secretResp.GetId().GetKey(), err)
 				}
 				encryptedDecryptionSharesForSecret = append(encryptedDecryptionSharesForSecret, shareBytes)
 			}
 		} else {
-			return nil, nil, fmt.Errorf("no decryption shares found for secret %s: neither binary nor hex-encoded shares present", secretResp.GetId().GetKey())
+			return nil, nil, nil, fmt.Errorf("no decryption shares found for secret %s: neither binary nor hex-encoded shares present", secretResp.GetId().GetKey())
 		}
 		minimumSharesRequired := e.vaultDON.CryptographyThreshold
 		if len(encryptedDecryptionSharesForSecret) < minimumSharesRequired {
-			return nil, nil, fmt.Errorf("not enough encrypted decryption key shares for secret %s, expected at least %d, got %d", secretResp.GetId().GetKey(), minimumSharesRequired, len(encryptedDecryptionSharesForSecret))
+			return nil, nil, nil, fmt.Errorf("not enough encrypted decryption key shares for secret %s, expected at least %d, got %d", secretResp.GetId().GetKey(), minimumSharesRequired, len(encryptedDecryptionSharesForSecret))
 		}
 		encryptedDecryptionShares = append(encryptedDecryptionShares, encryptedDecryptionSharesForSecret)
 	}
@@ -1527,11 +1582,12 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 			e.secretsCache.Set(cacheKey, &cachedEDKS{
 				encryptedSecret:           encryptedSecrets[i],
 				encryptedDecryptionShares: encryptedDecryptionShares[i],
+				rawVaultPublicKey:         rawVaultPublicKey,
 			}, nil)
 		}
 		lggr.Debugw("cached VaultDON secrets", "secretCount", len(vaultDONSecrets))
 	}
-	return encryptedSecrets, encryptedDecryptionShares, nil
+	return encryptedSecrets, encryptedDecryptionShares, rawVaultPublicKey, nil
 }
 
 func sanitizeLogString(s string) string {

@@ -163,6 +163,11 @@ func prepareAndExecuteSignedRequests(
 	httpClient *http.Client,
 	appID string,
 	version string,
+	// requestMasterPublicKey is placed in each ComputeRequest.MasterPublicKey.
+	// It is normally keyStorage.MasterPublicKey, but may be nil to exercise the
+	// enclave's fallback to its configured key. Share computation below always
+	// uses the real keyStorage key regardless.
+	requestMasterPublicKey []byte,
 ) ([]*types.ExecuteResponse, error) {
 	var masterPublicKey tdh2easy.PublicKey
 	if err := masterPublicKey.Unmarshal(keyStorage.MasterPublicKey); err != nil {
@@ -229,7 +234,7 @@ func prepareAndExecuteSignedRequests(
 					PublicData:                   publicData,
 					Ciphertexts:                  userCiphertexts,
 					CiphertextNames:              userCiphertextNames,
-					MasterPublicKey:              keyStorage.MasterPublicKey,
+					MasterPublicKey:              requestMasterPublicKey,
 					EnclaveEphemeralPublicKey:    enclaveKey.EnclavePublicKey,
 					EncryptedDecryptionKeyShares: precomputedShares[enclaveIdx],
 					AppID:                        appID,
