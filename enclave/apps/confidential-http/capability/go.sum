@@ -226,6 +226,12 @@ github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928172131-390b2a4775
 github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928172131-390b2a477571/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
 github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260915184316-2730f1867c92 h1:Z1OIGukDhJD+Gknr5G07Vtml24E7BwKaIQoWzV/SdqA=
 github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260915184316-2730f1867c92/go.mod h1:Scyk7O80fde5rJF3Ty3fEE3xiS6j84eWbu8/2gl3pIY=
+github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20261012154907-6fe380f41788 h1:yufHZac3TwxGl6pEkGzcQ9nEloXD7wfQWy3UWGldy5g=
+github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20261012154907-6fe380f41788/go.mod h1:Y4iM/Q0D2xqFcwDqXhD4Rgg7mYD5inF48v3lsmMhobM=
+github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework v0.0.0-20261012154907-6fe380f41788 h1:dSOqhW3+Mj8eeRvSFbP/uKoqdr1bTRE79GnZE4u/2dg=
+github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework v0.0.0-20261012154907-6fe380f41788/go.mod h1:s5ruPYOmjU6Mtj7vyORngSFygBjdO+h4lKFvqFR5534=
+github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-20261012154907-6fe380f41788 h1:oMvLpovgvBPOZdP9vzXo5+WLGZbeprC6F8hEZZRR0Ik=
+github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-20261012154907-6fe380f41788/go.mod h1:gdOeo6v/nef5gjtqGRV20zieXlGwDgGks+iMLg8ON/I=
 github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260804191526-b7a850ae7648 h1:WEUMkKQPAgcNMRgES6CBWrRUiII+HKEWQjulKQBSuMA=
 github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260804191526-b7a850ae7648/go.mod h1:/i8hjTPFdVWHiY+QjeSiVS2Z3GB3WAZznGgXHstC02E=
 github.com/smartcontractkit/chainlink-protos/linking-service/go v0.0.0-20251002192024-d2ad9222409b h1:QuI6SmQFK/zyUlVWEf0GMkiUYBPY4lssn26nKSd/bOM=
