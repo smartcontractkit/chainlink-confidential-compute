@@ -1,4 +1,4 @@
-package app
+package binaryfetch
 
 import (
 	"context"
@@ -16,6 +16,9 @@ import (
 // testBinary is arbitrary raw bytes standing in for a brotli-compressed WASM
 // binary (the exact bytes binary_hash covers).
 var testBinary = []byte("fake-brotli-compressed-wasm-binary")
+
+// cacheKeyFor mirrors how the enclave keys entries: by binary hash.
+func cacheKeyFor(hash []byte) string { return fmt.Sprintf("%x", hash) }
 
 func testBinaryHash() []byte {
 	h := sha256.Sum256(testBinary)
@@ -51,7 +54,7 @@ func TestFetch_Success(t *testing.T) {
 	raw := &stubRawFetcher{data: map[string][]byte{"loc": testBinary}}
 	f := NewBinaryFetcher(logger.Test(t))
 
-	got, err := f.Fetch(context.Background(), "loc", testBinaryHash(), raw)
+	got, err := f.Fetch(context.Background(), cacheKeyFor(testBinaryHash()), "loc", testBinaryHash(), raw)
 	require.NoError(t, err)
 	assert.Equal(t, testBinary, got)
 }
@@ -60,11 +63,11 @@ func TestFetch_CacheHit(t *testing.T) {
 	raw := &stubRawFetcher{data: map[string][]byte{"loc": testBinary}}
 	f := NewBinaryFetcher(logger.Test(t))
 
-	_, err := f.Fetch(context.Background(), "loc", testBinaryHash(), raw)
+	_, err := f.Fetch(context.Background(), cacheKeyFor(testBinaryHash()), "loc", testBinaryHash(), raw)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), raw.calls.Load())
 
-	got, err := f.Fetch(context.Background(), "loc", testBinaryHash(), raw)
+	got, err := f.Fetch(context.Background(), cacheKeyFor(testBinaryHash()), "loc", testBinaryHash(), raw)
 	require.NoError(t, err)
 	assert.Equal(t, testBinary, got)
 	assert.Equal(t, int32(1), raw.calls.Load(), "expected cache hit, but fetcher was called again")
@@ -74,7 +77,7 @@ func TestFetch_HashMismatch(t *testing.T) {
 	raw := &stubRawFetcher{data: map[string][]byte{"loc": testBinary}}
 	f := NewBinaryFetcher(logger.Test(t))
 
-	_, err := f.Fetch(context.Background(), "loc", make([]byte, 32), raw)
+	_, err := f.Fetch(context.Background(), cacheKeyFor(make([]byte, 32)), "loc", make([]byte, 32), raw)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hash mismatch")
 }
@@ -83,7 +86,7 @@ func TestFetch_RawError(t *testing.T) {
 	raw := &stubRawFetcher{err: fmt.Errorf("storage down")}
 	f := NewBinaryFetcher(logger.Test(t))
 
-	_, err := f.Fetch(context.Background(), "loc", testBinaryHash(), raw)
+	_, err := f.Fetch(context.Background(), cacheKeyFor(testBinaryHash()), "loc", testBinaryHash(), raw)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "storage down")
 }
@@ -92,14 +95,14 @@ func TestFetch_EmptyHash_Rejected(t *testing.T) {
 	raw := &stubRawFetcher{data: map[string][]byte{"loc": testBinary}}
 	f := NewBinaryFetcher(logger.Test(t))
 
-	_, err := f.Fetch(context.Background(), "loc", nil, raw)
+	_, err := f.Fetch(context.Background(), "key", "loc", nil, raw)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "binary_hash is required")
 }
 
 func TestFetch_NilRawFetcher_Rejected(t *testing.T) {
 	f := NewBinaryFetcher(logger.Test(t))
-	_, err := f.Fetch(context.Background(), "loc", testBinaryHash(), nil)
+	_, err := f.Fetch(context.Background(), cacheKeyFor(testBinaryHash()), "loc", testBinaryHash(), nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credentials not yet provisioned")
 }
@@ -121,11 +124,11 @@ func lruBinaries(t *testing.T) (binaries [][]byte, hashes [][]byte, data map[str
 func TestFetch_LRU_EvictsOldest(t *testing.T) {
 	binaries, hashes, data := lruBinaries(t)
 	raw := &stubRawFetcher{data: data}
-	f := newBinaryFetcher(logger.Test(t), 25) // fits 2 entries of 10 bytes
+	f := NewBinaryFetcherWithStore(logger.Test(t), NewMemoryStore(), 25) // fits 2 entries of 10 bytes
 
 	fetch := func(i int) {
 		t.Helper()
-		got, err := f.Fetch(context.Background(), fmt.Sprintf("loc-%d", i), hashes[i], raw)
+		got, err := f.Fetch(context.Background(), cacheKeyFor(hashes[i]), fmt.Sprintf("loc-%d", i), hashes[i], raw)
 		require.NoError(t, err)
 		assert.Equal(t, binaries[i], got)
 	}
@@ -147,11 +150,11 @@ func TestFetch_LRU_EvictsOldest(t *testing.T) {
 func TestFetch_LRU_AccessRefreshesEntry(t *testing.T) {
 	binaries, hashes, data := lruBinaries(t)
 	raw := &stubRawFetcher{data: data}
-	f := newBinaryFetcher(logger.Test(t), 25)
+	f := NewBinaryFetcherWithStore(logger.Test(t), NewMemoryStore(), 25)
 
 	fetch := func(i int) {
 		t.Helper()
-		got, err := f.Fetch(context.Background(), fmt.Sprintf("loc-%d", i), hashes[i], raw)
+		got, err := f.Fetch(context.Background(), cacheKeyFor(hashes[i]), fmt.Sprintf("loc-%d", i), hashes[i], raw)
 		require.NoError(t, err)
 		assert.Equal(t, binaries[i], got)
 	}
@@ -161,10 +164,9 @@ func TestFetch_LRU_AccessRefreshesEntry(t *testing.T) {
 	fetch(0) // refresh 0 -> LRU order [0, 1]
 	fetch(2) // evicts 1
 
-	f.mu.Lock()
-	_, has0 := f.items[fmt.Sprintf("%x", hashes[0])]
-	_, has1 := f.items[fmt.Sprintf("%x", hashes[1])]
-	f.mu.Unlock()
-	assert.True(t, has0, "binary 0 should still be cached after refresh")
-	assert.False(t, has1, "binary 1 should have been evicted")
+	calls := raw.calls.Load()
+	fetch(0)
+	assert.Equal(t, calls, raw.calls.Load(), "binary 0 should still be cached after refresh")
+	fetch(1)
+	assert.Equal(t, calls+1, raw.calls.Load(), "binary 1 should have been evicted")
 }

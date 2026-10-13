@@ -1,4 +1,4 @@
-package app
+package binaryfetch
 
 import (
 	"context"
@@ -170,7 +170,7 @@ func (f *StorageFetcher) FetchBinary(ctx context.Context, locator string) ([]byt
 	if err != nil {
 		return nil, fmt.Errorf("resolving artifact %q: %w", locator, err)
 	}
-	return f.download(ctx, url)
+	return f.Download(ctx, url)
 }
 
 // artifactID extracts the storage-service artifact id from a binary locator.
@@ -227,8 +227,10 @@ func (f *StorageFetcher) withJWT(ctx context.Context, req any) (context.Context,
 	return metadata.AppendToOutgoingContext(ctx, nodeauthgrpc.AuthorizationHeader, nodeauthgrpc.BearerPrefix+token), nil
 }
 
-// download GETs the pre-signed URL and returns the body, size-limited.
-func (f *StorageFetcher) download(ctx context.Context, url string) ([]byte, error) {
+// Download GETs the pre-signed artifact URL and returns the decoded body,
+// size-limited. Exposed so callers can exercise the artifact HTTP client's
+// policy (HTTPS-only, no redirects) without a storage service.
+func (f *StorageFetcher) Download(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("building download request: %w", err)

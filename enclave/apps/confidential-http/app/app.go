@@ -59,7 +59,7 @@ func NewHTTPEnclaveApp(httpClient types.HTTPClient, opts ...Option) types.Enclav
 	return app
 }
 
-func (a *httpEnclaveApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, _ ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
+func (a *httpEnclaveApp) Execute(requestID [32]byte, appID string, inputData []byte, _ []byte, secretsMap map[string][]byte, emitter types.Emitter, _ ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
 	if appID != types.AppIDConfidentialHTTP {
 		return nil, &types.ExecuteError{
 			Error: fmt.Sprintf("invalid app ID: expected %s, got %s", types.AppIDConfidentialHTTP, appID),

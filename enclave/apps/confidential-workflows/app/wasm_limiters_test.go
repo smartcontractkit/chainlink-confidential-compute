@@ -78,7 +78,7 @@ func TestWASMModuleLimiters_Defaults(t *testing.T) {
 
 func TestWASMModuleLimiters_InjectedOverrides(t *testing.T) {
 	a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t)).(*confidentialWorkflowsApp)
-	req := testSettings("127.0.0.1:1")
+	req := testSettings()
 	req.CRESettings = json.RawMessage(`{
 		"global": {
 			"WASMPollOneoffSubscriptionLimit": "64"
@@ -104,7 +104,6 @@ func TestWASMModuleLimiters_InjectedOverrides(t *testing.T) {
 	raw, err := json.Marshal(req)
 	require.NoError(t, err)
 	require.NoError(t, a.InjectSettings(raw))
-	t.Cleanup(func() { require.NoError(t, a.storageFetcher.Close()) })
 
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
 	moduleLimiters := newWASMModuleLimiters(ctx, a.logger, a.limiterSettings.Snapshot())
@@ -154,7 +153,7 @@ func TestInjectSettings_LimiterSettings(t *testing.T) {
 	}
 	inject := func(t *testing.T, a *confidentialWorkflowsApp, creSettings json.RawMessage) error {
 		t.Helper()
-		req := testSettings("127.0.0.1:1")
+		req := testSettings()
 		req.CRESettings = creSettings
 		raw, err := json.Marshal(req)
 		require.NoError(t, err)
@@ -182,7 +181,6 @@ func TestInjectSettings_LimiterSettings(t *testing.T) {
 		assert.Equal(t, config.Size(256)*config.MByte, memoryLimit(t, a))
 
 		require.NoError(t, inject(t, a, nil))
-		t.Cleanup(func() { require.NoError(t, a.storageFetcher.Close()) })
 		assert.Equal(t, cresettings.Default.PerWorkflow.WASMMemoryLimit.DefaultValue, memoryLimit(t, a))
 	})
 }

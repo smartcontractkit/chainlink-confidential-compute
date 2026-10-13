@@ -197,7 +197,11 @@ func TestInspectPublicDataConfidentialHTTP(t *testing.T) {
 	publicData, err := proto.Marshal(req)
 	require.NoError(t, err)
 
-	metadata := inspectPublicData(lggr, types.AppIDConfidentialHTTP, publicData)
+	host := NewHostServer(t.Context(), &http.Client{})
+	t.Cleanup(host.cancel)
+	metadata, binary, err := host.publicDataPrehook(lggr, types.AppIDConfidentialHTTP, publicData)
+	require.NoError(t, err)
+	assert.Nil(t, binary)
 
 	assert.Equal(t, executionMetadata{appID: types.AppIDConfidentialHTTP}, metadata)
 	fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA")
@@ -236,7 +240,11 @@ func TestInspectPublicDataConfidentialWorkflows(t *testing.T) {
 	publicData, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
-	metadata := inspectPublicData(lggr, types.AppIDConfidentialWorkflows, publicData)
+	host := NewHostServer(t.Context(), &http.Client{})
+	t.Cleanup(host.cancel)
+	metadata, binary, err := host.publicDataPrehook(lggr, types.AppIDConfidentialWorkflows, publicData)
+	require.NoError(t, err)
+	assert.Nil(t, binary, "no binary without a provider")
 
 	assert.Equal(t, executionMetadata{
 		appID:       types.AppIDConfidentialWorkflows,
@@ -265,7 +273,11 @@ func TestInspectPublicDataInvalidProto(t *testing.T) {
 		t.Run(appID, func(t *testing.T) {
 			lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 
-			metadata := inspectPublicData(lggr, appID, []byte{0xff})
+			host := NewHostServer(t.Context(), &http.Client{})
+			t.Cleanup(host.cancel)
+			metadata, binary, err := host.publicDataPrehook(lggr, appID, []byte{0xff})
+			require.NoError(t, err)
+			assert.Nil(t, binary)
 
 			assert.Equal(t, executionMetadata{appID: appID}, metadata)
 			fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA_DECODE_ERR")
@@ -348,7 +360,11 @@ func TestInspectResponseOutputUnknownApp(t *testing.T) {
 func TestInspectPublicDataUnknownApp(t *testing.T) {
 	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 
-	metadata := inspectPublicData(lggr, "unknown-app", []byte("opaque"))
+	host := NewHostServer(t.Context(), &http.Client{})
+	t.Cleanup(host.cancel)
+	metadata, binary, err := host.publicDataPrehook(lggr, "unknown-app", []byte("opaque"))
+	require.NoError(t, err)
+	assert.Nil(t, binary)
 
 	assert.Equal(t, executionMetadata{appID: "unknown-app"}, metadata)
 	fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA_UNSUPPORTED")
@@ -546,7 +562,7 @@ func TestProcessBatchRecordsSubCapabilityFailures(t *testing.T) {
 		}}})
 		host.metrics = recordedMetrics
 
-		_, failureReason, err := host.processBatch(reqs)
+		_, failureReason, err := host.processBatch(reqs, nil)
 
 		require.NoError(t, err)
 		assert.Empty(t, failureReason)
@@ -569,7 +585,7 @@ func TestProcessBatchRecordsSubCapabilityFailures(t *testing.T) {
 		}}})
 		host.metrics = recordedMetrics
 
-		resp, failureReason, err := host.processBatch(reqs)
+		resp, failureReason, err := host.processBatch(reqs, nil)
 
 		require.Error(t, err)
 		assert.Nil(t, resp)
@@ -588,7 +604,7 @@ func TestProcessBatchRecordsSubCapabilityFailures(t *testing.T) {
 		}}})
 		host.metrics = recordedMetrics
 
-		_, _, err := host.processBatch(reqs)
+		_, _, err := host.processBatch(reqs, nil)
 
 		require.EqualError(t, err, "enclave returned error: 500 Internal Server Error - "+responseBody)
 		assert.Empty(t, recordedMetrics.subCapabilityFailuresSnapshot())
@@ -811,11 +827,11 @@ func TestHandleExecuteWithBatchingAndCaching(t *testing.T) {
 	require.Len(t, mockTransport.requests, 1)
 
 	// Verify that the batch request contains all three original requests
-	var enclaveReqs []types.SignedComputeRequest
 	bodyBytes, err := io.ReadAll(mockTransport.requests[0].Body)
 	require.NoError(t, err)
-	err = json.Unmarshal(bodyBytes, &enclaveReqs)
+	enclaveBatch, err := types.UnmarshalExecuteBatch(bodyBytes)
 	require.NoError(t, err)
+	enclaveReqs := enclaveBatch.Requests
 	assert.Len(t, enclaveReqs, numRequests)
 	for i := 0; i < numRequests; i++ {
 		assert.Equal(t, sha256.Sum256([]byte("test-request-id-batching-caching")), enclaveReqs[i].RequestID)
@@ -1431,11 +1447,11 @@ func TestHandleExecuteWithInvalidSigner(t *testing.T) {
 	assert.Equal(t, 1, len(mockTransport.requests))
 
 	// Verify the batch contains only the three unique valid signatures (not the duplicate).
-	var enclaveReqs []types.SignedComputeRequest
 	bodyBytes, err := io.ReadAll(mockTransport.requests[0].Body)
 	require.NoError(t, err)
-	err = json.Unmarshal(bodyBytes, &enclaveReqs)
+	enclaveBatch, err := types.UnmarshalExecuteBatch(bodyBytes)
 	require.NoError(t, err)
+	enclaveReqs := enclaveBatch.Requests
 	assert.Equal(t, 3, len(enclaveReqs))
 }
 

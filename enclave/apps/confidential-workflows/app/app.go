@@ -1,8 +1,9 @@
 package app
 
 import (
+	"bytes"
 	"context"
-	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +19,6 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/host"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
-	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"google.golang.org/protobuf/proto"
 )
@@ -33,7 +33,6 @@ import (
 // see PRIV-443).
 type confidentialWorkflowsApp struct {
 	logger              logger.Logger
-	fetcher             *BinaryFetcher
 	httpFetcher         *httpfetch.Fetcher
 	requirementsHandler host.RequirementsHandler
 	tpe                 sdkpb.TeeType
@@ -59,10 +58,6 @@ type confidentialWorkflowsApp struct {
 	// baked in; the storage endpoint, the ed25519 storage key, and the gateway
 	// URL all arrive at runtime. mu guards everything below.
 	mu                sync.Mutex
-	storageServiceURL string // startup default (fake/tests); an injected URL overrides
-	storageServiceTLS bool
-	storageFetcher    RawFetcher
-	storageFactory    StorageFetcherFactory
 	dispatcher        RemoteDispatcher        // nil = local mode
 	dispatcherFactory RemoteDispatcherFactory // builds dispatcher on first GatewayURL injection
 	lastConfig        types.EnclaveConfig
@@ -74,14 +69,11 @@ var _ types.EnclaveApp = (*confidentialWorkflowsApp)(nil)
 // Config requires explicit transports to prevent direct network access.
 type Config struct {
 	HTTPFetcher             *httpfetch.Fetcher
-	StorageFetcherFactory   StorageFetcherFactory
 	RemoteDispatcherFactory RemoteDispatcherFactory
 	MaxConcurrentExecutions int64
 }
 
 type Option func(*confidentialWorkflowsApp)
-
-type StorageFetcherFactory func(storageURL string, tls bool, privateKey string, maxBytes int64, timeout time.Duration, lggr logger.Logger) (RawFetcher, ed25519.PublicKey, error)
 
 // GatewayConfig carries the injected gateway tunables to the dispatcher
 // factory. Zero values mean "use the built-in default" (resolved by the
@@ -101,14 +93,6 @@ type GatewayConfig struct {
 
 // RemoteDispatcherFactory defers construction until the host injects the gateway URL.
 type RemoteDispatcherFactory func(gateway GatewayConfig) (RemoteDispatcher, error)
-
-func storageFetcherFactory(newHTTPClient func() types.HTTPClient) StorageFetcherFactory {
-	return func(storageURL string, tls bool, privateKey string, maxBytes int64, timeout time.Duration, lggr logger.Logger) (RawFetcher, ed25519.PublicKey, error) {
-		return NewStorageFetcher(
-			storageURL, tls, privateKey, maxBytes, timeout, lggr, newHTTPClient(),
-		)
-	}
-}
 
 // WithRemoteDispatcher enables remote dynamic secrets and remote capability
 // dispatch with a dispatcher built up-front. Used by tests that already know the
@@ -140,22 +124,6 @@ func WithHTTPFetcher(f *httpfetch.Fetcher) Option {
 	}
 }
 
-// WithStorageService sets the CRE storage-service gRPC address (and whether to
-// use TLS) that the enclave fetches workflow binaries from. The ed25519 key that
-// authenticates to it is supplied separately via InjectSettings.
-func WithStorageService(url string, tls bool) Option {
-	return func(a *confidentialWorkflowsApp) {
-		a.storageServiceURL = url
-		a.storageServiceTLS = tls
-	}
-}
-
-func WithStorageFetcherFactory(factory StorageFetcherFactory) Option {
-	return func(a *confidentialWorkflowsApp) {
-		a.storageFactory = factory
-	}
-}
-
 // WithMaxConcurrentExecutions bounds concurrent Execute calls to n; n <= 0 means
 // unbounded. The nitro entrypoint derives n from enclave memory so a burst of
 // executions can't exhaust the fixed enclave memory and wedge the VM. fake/local
@@ -167,14 +135,13 @@ func WithMaxConcurrentExecutions(n int64) Option {
 }
 
 // InjectSettings receives the settings JSON injected by the host over vsock and
-// wires up what it carries: the storage fetcher (endpoint + ed25519 key) and, on
-// the first injection, the remote dispatcher (via the factory). The required
-// fields are asserted before anything is applied, so a deployment that forgot
-// one fails the injection instead of running half-configured; see
-// WorkflowSettings. Fetcher tunables (max binary size, fetch timeout, cache
-// size) and the timeouts (global request, gateway client, workflow execution)
-// fall back to the built-in defaults when omitted. Safe to call again (e.g. key
-// rotation), as long as the payload stays complete.
+// wires up what it carries: on the first injection, the remote dispatcher (via
+// the factory). The required fields are asserted before anything is applied, so
+// a deployment that forgot one fails the injection instead of running
+// half-configured; see WorkflowSettings. The timeouts (global request, gateway
+// client, workflow execution) fall back to the built-in defaults when omitted.
+// Safe to call again (e.g. key rotation), as long as the payload stays complete.
+// The storage fields are ignored here: the host fetches workflow binaries.
 func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	var req WorkflowSettings
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -195,7 +162,6 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 		}
 	}
 
-	a.fetcher.SetMaxCacheBytes(int(req.MaxCacheBytes))
 	if a.httpFetcher != nil {
 		a.httpFetcher.SetDefaultTimeout(time.Duration(req.RequestTimeout))
 	}
@@ -205,29 +171,6 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	if req.WorkflowGracePeriod != 0 {
 		a.gracePeriod.Store(int64(req.WorkflowGracePeriod))
 	}
-
-	// The injected endpoint replaces the startup default (which only the fake and
-	// test wirings set).
-	a.mu.Lock()
-	a.storageServiceURL = req.StorageServiceURL
-	a.storageServiceTLS = req.StorageServiceTLS
-	url, tls := a.storageServiceURL, a.storageServiceTLS
-	a.mu.Unlock()
-
-	fetcher, pub, err := a.storageFactory(url, tls, req.StorageKey, req.MaxBinarySize, time.Duration(req.BinaryFetchTimeout), a.logger)
-	if err != nil {
-		return fmt.Errorf("building storage fetcher: %w", err)
-	}
-	a.mu.Lock()
-	old := a.storageFetcher
-	a.storageFetcher = fetcher
-	a.mu.Unlock()
-	if old != nil {
-		if cerr := old.Close(); cerr != nil {
-			a.logger.Warnf("[app] closing previous storage fetcher: %v", cerr)
-		}
-	}
-	a.logger.Infof("[app] storage credentials set (pubkey=%x, storage=%s)", pub, url)
 
 	a.mu.Lock()
 	if a.dispatcher == nil && a.dispatcherFactory != nil {
@@ -275,21 +218,16 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 	if config.HTTPFetcher == nil {
 		return nil, errors.New("HTTP fetcher is required")
 	}
-	if config.StorageFetcherFactory == nil {
-		return nil, errors.New("storage fetcher factory is required")
-	}
 	if config.RemoteDispatcherFactory == nil {
 		return nil, errors.New("remote dispatcher factory is required")
 	}
 
 	a := &confidentialWorkflowsApp{
 		logger:            lggr,
-		fetcher:           NewBinaryFetcher(lggr),
 		httpFetcher:       config.HTTPFetcher,
 		tpe:               tpe,
 		limiter:           newExecutionLimiter(config.MaxConcurrentExecutions),
 		limiterSettings:   &mutableSettings{},
-		storageFactory:    config.StorageFetcherFactory,
 		dispatcherFactory: config.RemoteDispatcherFactory,
 	}
 	a.gracePeriod.Store(int64(types.DefaultWorkflowGracePeriod))
@@ -301,14 +239,10 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 func NewTestConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, opts ...Option) types.EnclaveApp {
 	a := &confidentialWorkflowsApp{
 		logger:          lggr,
-		fetcher:         NewBinaryFetcher(lggr),
 		httpFetcher:     httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
 		tpe:             tpe,
 		limiter:         newExecutionLimiter(0),
 		limiterSettings: &mutableSettings{},
-		storageFactory: storageFetcherFactory(func() types.HTTPClient {
-			return util.NewRestrictedHTTPClient()
-		}),
 	}
 	a.gracePeriod.Store(int64(types.DefaultWorkflowGracePeriod))
 	a.requirementsHandler.Tee = a.validTee
@@ -318,7 +252,7 @@ func NewTestConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, opts
 	return a
 }
 
-func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, rawSignedRequests ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
+func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inputData []byte, unauthenticatedData []byte, secretsMap map[string][]byte, emitter types.Emitter, rawSignedRequests ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
 	// Bound concurrent executions so a burst can't exhaust the fixed enclave
 	// memory and wedge the VM. Fail fast when full rather than piling on.
 	if !a.limiter.tryAcquire() {
@@ -366,6 +300,11 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		}
 	}
 
+	// unauthenticatedData may carry the binary the host pre-fetched. It is not
+	// covered by the DON signatures, so it is verified against the signed
+	// binary_hash below like any other source.
+	hostBinary := unauthenticatedData
+
 	if execution.SdkExecuteRequest == nil {
 		return nil, &types.ExecuteError{
 			Error: "execute_request is required",
@@ -384,21 +323,26 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		"workflow_id": execution.WorkflowId,
 	})
 
-	// Fetch (and cache) the WASM binary directly from the CRE storage service.
-	// binary_url is the storage-service artifact locator; the storage fetcher
-	// authenticates the DownloadArtifact call with the injected ed25519 key and
-	// returns the bytes, which BinaryFetcher verifies against binary_hash.
 	a.mu.Lock()
-	sf := a.storageFetcher
 	dispatcher := a.dispatcher
 	a.mu.Unlock()
-	binary, err := a.fetcher.Fetch(context.Background(), execution.BinaryUrl, execution.BinaryHash, sf)
-	if err != nil {
+
+	// The binary arrives as unauthenticatedData, fetched by the host. The host
+	// is untrusted, so verify it against the signed binary_hash before
+	// executing.
+	if len(hostBinary) == 0 {
 		return nil, &types.ExecuteError{
-			Error: fmt.Sprintf("fetching binary: %s", err.Error()),
+			Error: "no workflow binary supplied by the host",
 			Code:  http.StatusBadGateway,
 		}
 	}
+	if actual := sha256.Sum256(hostBinary); !bytes.Equal(actual[:], execution.BinaryHash) {
+		return nil, &types.ExecuteError{
+			Error: fmt.Sprintf("host-supplied binary hash mismatch: expected %x, got %x", execution.BinaryHash, actual[:]),
+			Code:  http.StatusBadGateway,
+		}
+	}
+	binary := hostBinary
 
 	helper := &enclaveExecutionHelper{
 		requestID:        requestID,
