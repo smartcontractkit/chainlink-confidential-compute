@@ -1,4 +1,4 @@
-package app
+package binaryfetch
 
 import (
 	"bytes"
@@ -33,6 +33,10 @@ func (p trustedKeyProvider) IsNodePubKeyTrusted(_ context.Context, key ed25519.P
 // BinaryUrl must collapse to the bare artifact id; a value that is already an id
 // must pass through unchanged. Passing the full URL as the id is what caused the
 // storage service to return NotFound.
+// testStorageKeyHex is a deterministic ed25519 seed used to authenticate to the
+// storage service in tests.
+const testStorageKeyHex = "0000000000000000000000000000000000000000000000000000000000000001"
+
 func TestArtifactID(t *testing.T) {
 	const id = "00ff45641a2cb008d2cc7a8ad509671bf130b63e0dd3c1539dfa7dc61958b86d"
 

@@ -8,7 +8,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -98,4 +100,18 @@ func GetConfidentialComputePayloadPrefix() string {
 
 func GetConfidentialComputeConfigUpdatePrefix() string {
 	return "CONFIDENTIAL_COMPUTE_CONFIG_UPDATE_"
+}
+
+// EnvInt reads an integer environment variable, falling back to def when unset
+// or unparseable.
+func EnvInt(name string, def int) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	parsed, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return parsed
 }

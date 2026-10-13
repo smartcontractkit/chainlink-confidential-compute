@@ -1,11 +1,9 @@
 package main
 
 import (
-	"crypto/ed25519"
 	"flag"
 	"log"
 	"net/http"
-	"time"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/app"
@@ -77,24 +75,6 @@ func main() {
 		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier, gw.RetryBackoff, gw.RetryTimeout), nil
 	}
 
-	// allow-reconfig is measured into the PCR, so the host cannot enable the fixture profile.
-	storageFactory := func(storageURL string, useTLS bool, privateKey string, maxBytes int64, timeout time.Duration, lggr cllogger.Logger) (app.RawFetcher, ed25519.PublicKey, error) {
-		operatorDialer, err := proxyclient.NewConfiguredEndpointDialer(types.ProxyParentCID, types.ProxyPort, storageURL)
-		if err != nil {
-			return nil, nil, err
-		}
-		artifactDialer := proxyclient.NewPreSignedURLDialer(types.ProxyParentCID, types.ProxyPort)
-		var artifactClient types.HTTPClient = util.NewRestrictedHTTPClientWithDialer(artifactDialer.DialContext)
-		if *allowReconfig {
-			artifactDialer = proxyclient.NewInsecureFixtureDialerForTests(types.ProxyParentCID, types.ProxyPort)
-			artifactClient = &http.Client{Transport: tunnelTransport(artifactDialer, false)}
-		}
-		return app.NewStorageFetcher(
-			storageURL, useTLS, privateKey, maxBytes, timeout, lggr, artifactClient,
-			app.WithStorageDialer(operatorDialer.DialContext),
-		)
-	}
-
 	// Cap concurrent executions at (enclave memory - reserve) / per-exec so a burst
 	// can't exhaust the fixed enclave memory and wedge the VM. Derived from memory
 	// read at startup, so it scales with the enclave's sizing.
@@ -111,7 +91,6 @@ func main() {
 		appLogger,
 		app.Config{
 			RemoteDispatcherFactory: dispatcherFactory,
-			StorageFetcherFactory:   storageFactory,
 			HTTPFetcher: httpfetch.NewFetcherWithClient(
 				httpfetch.DefaultPolicy(),
 				util.NewRestrictedHTTPClientWithDialer(

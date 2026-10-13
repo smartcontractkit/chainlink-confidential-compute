@@ -1,8 +1,10 @@
 package types
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"hash"
 	"net/http"
 	"time"
@@ -203,6 +205,43 @@ func writeLengthPrefix(h hash.Hash, length int) {
 type SignedComputeRequest struct {
 	ComputeRequest
 	Signature []byte `json:"signature"`
+}
+
+// ExecuteBatch is the body the enclave's execute endpoint accepts: the signed
+// quorum batch plus data the host fetched on the enclave's behalf.
+type ExecuteBatch struct {
+	Requests []SignedComputeRequest `json:"requests"`
+	// UnauthenticatedData carries data the host fetched on the enclave's behalf
+	// (the workflow binary for confidential-workflows), outside the signed
+	// requests. It is NOT covered by the DON signatures: the enclave app must
+	// verify it — for binaries, against the signed binary_hash — before use,
+	// and fetch the data itself when it is empty.
+	UnauthenticatedData []byte `json:"unauthenticatedData,omitempty"`
+}
+
+// MarshalExecuteBatch encodes a batch for the enclave.
+func MarshalExecuteBatch(batch ExecuteBatch) ([]byte, error) {
+	return json.Marshal(batch)
+}
+
+// UnmarshalExecuteBatch decodes an execute body, accepting both the current
+// envelope and the bare request array sent by hosts predating it. Host and
+// enclave ship as separately tagged images, so a rolling deploy runs both.
+func UnmarshalExecuteBatch(body []byte) (ExecuteBatch, error) {
+	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var reqs []SignedComputeRequest
+		if err := json.Unmarshal(body, &reqs); err != nil {
+			return ExecuteBatch{}, err
+		}
+		return ExecuteBatch{Requests: reqs}, nil
+	}
+
+	var batch ExecuteBatch
+	if err := json.Unmarshal(body, &batch); err != nil {
+		return ExecuteBatch{}, err
+	}
+	return batch, nil
 }
 
 // MetricEvent is a single emitted observability event. Unlike the Metrics map
@@ -441,9 +480,12 @@ type Emitter interface {
 }
 
 type EnclaveApp interface {
+	// unauthenticatedData carries data the host fetched on the enclave's behalf,
+	// outside the signed requests (see ExecuteBatch). Apps that need nothing
+	// extra ignore it.
 	// rawSignedRequests is the signed compute-request batch this execution came from;
 	// confidential-workflows forwards it to the relay DON for authorization, other apps ignore it.
-	Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter Emitter, rawSignedRequests ...SignedComputeRequest) ([]byte, *ExecuteError)
+	Execute(requestID [32]byte, appID string, inputData []byte, unauthenticatedData []byte, secretsMap map[string][]byte, emitter Emitter, rawSignedRequests ...SignedComputeRequest) ([]byte, *ExecuteError)
 }
 
 type MemoryEstimateResponse struct {

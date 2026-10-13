@@ -24,7 +24,7 @@ func NewEchoEnclaveApp() types.EnclaveApp {
 	return &echoEnclaveApp{}
 }
 
-func (a *echoEnclaveApp) Execute(_ [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, _ ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
+func (a *echoEnclaveApp) Execute(_ [32]byte, appID string, inputData []byte, _ []byte, secretsMap map[string][]byte, emitter types.Emitter, _ ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
 	if appID != types.AppIDConfidentialEcho {
 		return nil, &types.ExecuteError{
 			Error: fmt.Sprintf("invalid app ID: expected %s, got %s", types.AppIDConfidentialEcho, appID),
