@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/ed25519"
 	"flag"
 	"log"
 	"net/http"
@@ -90,29 +89,11 @@ func main() {
 		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier, gw.RetryBackoff, gw.RetryTimeout), nil
 	}
 
-	storageFactory := func(storageURL string, useTLS bool, privateKey string, maxBytes int64, timeout time.Duration, lggr cllogger.Logger) (app.RawFetcher, ed25519.PublicKey, error) {
-		operatorDialer, err := proxyclient.NewConfiguredEndpointDialer(types.ProxyParentCID, types.ProxyPort, storageURL)
-		if err != nil {
-			return nil, nil, err
-		}
-		artifactDialer := proxyclient.NewPreSignedURLDialer(types.ProxyParentCID, types.ProxyPort)
-		var artifactClient types.HTTPClient = util.NewRestrictedHTTPClientWithDialer(artifactDialer.DialContext)
-		if *allowReconfig {
-			artifactDialer = proxyclient.NewInsecureFixtureDialerForTests(types.ProxyParentCID, types.ProxyPort)
-			artifactClient = &http.Client{Transport: tunnelTransport(artifactDialer, false)}
-		}
-		return app.NewStorageFetcher(
-			storageURL, useTLS, privateKey, maxBytes, timeout, lggr, artifactClient,
-			app.WithStorageDialer(operatorDialer.DialContext),
-		)
-	}
-
 	confApp, err := app.NewConfidentialWorkflowsApp(
 		sdkpb.TeeType_TEE_TYPE_AWS_NITRO,
 		appLogger,
 		app.Config{
 			RemoteDispatcherFactory: dispatcherFactory,
-			StorageFetcherFactory:   storageFactory,
 			HTTPFetcher: httpfetch.NewFetcherWithClient(
 				httpfetch.DefaultPolicy(),
 				util.NewRestrictedHTTPClientWithDialer(
