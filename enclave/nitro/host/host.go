@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -54,6 +55,11 @@ var (
 	// storage key all travel in here, since a measured EIF can't bake them in.
 	// Empty means nothing is injected. Reads ENCLAVE_SETTINGS (a JSON object).
 	settingsJSON = flag.String("settings", os.Getenv("ENCLAVE_SETTINGS"), "JSON settings object to inject into the enclave over vsock, forwarded verbatim. The enclave app owns the schema. Reads ENCLAVE_SETTINGS.")
+	// maxConcurrentExecutions bounds enclave executions in flight from this
+	// host, below the enclave's own memory-derived cap. The enclave cap can't
+	// account for native WASM compilation memory, and changing it changes the
+	// measured EIF; this one is tunable per deployment.
+	maxConcurrentExecutions = flag.String("max-concurrent-executions", os.Getenv("MAX_CONCURRENT_EXECUTIONS"), "Max enclave executions in flight from this host; excess quorum-reached batches are rejected at capacity. Empty or 0 means unbounded. Reads MAX_CONCURRENT_EXECUTIONS.")
 
 	// readHeaderTimeout bounds how long a client may take to send request headers.
 	readHeaderTimeout = flag.Duration("read-header-timeout", 30*time.Second, "Max duration allowed to read request headers")
@@ -85,6 +91,29 @@ type hostServer struct {
 	verifier             signatureverifier.SignatureVerifier
 	logger               cllogger.SugaredLogger
 	metrics              executionMetrics
+	executionSlots       chan struct{} // nil = unbounded; see maxConcurrentExecutions
+}
+
+// tryAcquireExecutionSlot reserves an enclave execution slot without waiting.
+// Rejecting rather than queueing keeps the host from dispatching work whose
+// callers have already given up; a deadline-aware queue would trade that for
+// better burst absorption.
+func (h *hostServer) tryAcquireExecutionSlot() bool {
+	if h.executionSlots == nil {
+		return true
+	}
+	select {
+	case h.executionSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *hostServer) releaseExecutionSlot() {
+	if h.executionSlots != nil {
+		<-h.executionSlots
+	}
 }
 
 type batchRequest struct {
@@ -629,7 +658,14 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 
 		h.processRequestMutex.Unlock()
 
-		if shouldProcess {
+		if shouldProcess && !h.tryAcquireExecutionSlot() {
+			reqLog.Warnw("rejecting batch: host execution limit reached",
+				"event", "REJECT",
+				"reason", executionFailureCapacity,
+				"maxConcurrentExecutions", cap(h.executionSlots))
+			h.metrics.startExecution(metadata, time.Since(br.createdAt))(executionOutcomeError, executionFailureCapacity)
+			h.completeBatch(requestHash, nil, errors.New("host at capacity: too many concurrent executions"))
+		} else if shouldProcess {
 			quorumWait := time.Since(br.createdAt)
 			finishExecution := h.metrics.startExecution(metadata, quorumWait)
 			reqLog.Infow("quorum reached, dispatching to enclave",
@@ -639,6 +675,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 			go func() {
 				enclaveStart := time.Now()
 				resp, failureReason, err := h.processBatch(requests)
+				h.releaseExecutionSlot()
 				enclaveDuration := time.Since(enclaveStart)
 				outcome := executionOutcomeSuccess
 				if err != nil {
@@ -976,6 +1013,16 @@ func main() {
 	host := NewHostServer(ctx, nil)
 	host.logger = lggr
 	host.metrics = metrics
+	if *maxConcurrentExecutions != "" {
+		n, err := strconv.Atoi(*maxConcurrentExecutions)
+		if err != nil || n < 0 {
+			log.Fatalf("max-concurrent-executions (%q) must be a non-negative integer", *maxConcurrentExecutions)
+		}
+		if n > 0 {
+			host.executionSlots = make(chan struct{}, n)
+		}
+	}
+	lggr.Infow("host concurrent execution limit", "maxConcurrentExecutions", cap(host.executionSlots))
 	if telemetryCfg.enabled() {
 		go metrics.monitorEnclaveMemory(ctx, host.enclaveClient, lggr, enclaveMemoryPollInterval, enclaveMemoryPollTimeout)
 	}

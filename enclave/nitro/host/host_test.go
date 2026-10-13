@@ -484,6 +484,41 @@ func TestHandleExecuteRecordsEnclaveError(t *testing.T) {
 	assert.Equal(t, 1, transport.callCount())
 }
 
+func TestHandleExecuteRejectsAboveHostExecutionLimit(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	transport := newControlledRoundTripper(util.MustMarshal(t, types.ExecuteResponse{}), nil)
+	recordedMetrics := newRecordingExecutionMetrics()
+	host := NewHostServer(context.Background(), &http.Client{Transport: transport})
+	host.config = types.EnclaveConfig{Signers: [][]byte{publicKey}, T: 1, F: 0}
+	host.metrics = recordedMetrics
+	host.executionSlots = make(chan struct{}, 1)
+	execute := func(name string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := types.ComputeRequest{RequestID: sha256.Sum256([]byte(name)), AppID: types.AppIDConfidentialWorkflows}
+		host.handleExecute(recorder, signedExecuteRequest(t, request, privateKey))
+		return recorder
+	}
+
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { firstDone <- execute("holds-the-slot") }()
+	waitForTestSignal(t, transport.started, "enclave request")
+
+	rejected := execute("over-the-limit")
+	assert.Equal(t, http.StatusInternalServerError, rejected.Code)
+	assert.Contains(t, rejected.Body.String(), "host at capacity")
+	assert.Equal(t, 1, transport.callCount(), "rejected batch must not reach the enclave")
+
+	close(transport.release)
+	assert.Equal(t, http.StatusOK, (<-firstDone).Code)
+	assert.Equal(t, http.StatusOK, execute("after-release").Code, "slot must be released once the enclave returns")
+	assert.Equal(t, 2, transport.callCount())
+
+	_, completed := recordedMetrics.snapshot()
+	require.Len(t, completed, 3)
+	assert.Equal(t, executionFailureCapacity, completed[0].failureReason)
+}
+
 func TestExecutionFailureReasonForStatus(t *testing.T) {
 	tests := map[int]string{
 		http.StatusBadRequest:         executionFailureInvalid,
