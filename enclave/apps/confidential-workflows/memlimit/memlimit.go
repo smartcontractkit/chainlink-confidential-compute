@@ -20,7 +20,7 @@ const (
 
 	// PerExecMB tracks cresettings.Default.PerWorkflow.WASMMemoryLimit (100 MB).
 	// An injected override above 100 MB can exceed this budget.
-	PerExecMB uint64 = 100
+	PerExecMB uint64 = 200
 
 	// FallbackConcurrency is used when total memory can't be read (non-Linux
 	// dev builds, or a sysinfo error). Conservative on purpose.
