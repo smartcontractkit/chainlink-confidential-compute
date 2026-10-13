@@ -191,7 +191,7 @@ func TestPublicKeysHydrationDoesNotOverwriteConcurrentConfig(t *testing.T) {
 
 type configRecoveryApp struct{}
 
-func (configRecoveryApp) Execute(_ [32]byte, _ string, input []byte, _ map[string][]byte, _ types.Emitter, _ ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
+func (configRecoveryApp) Execute(_ [32]byte, _ string, input []byte, _ []byte, _ map[string][]byte, _ types.Emitter, _ ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
 	return input, nil
 }
 

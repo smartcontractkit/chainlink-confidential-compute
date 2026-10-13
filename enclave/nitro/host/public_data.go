@@ -19,38 +19,44 @@ type executionMetadata struct {
 	requestKind string
 }
 
-// inspectPublicData decodes public data once so app-specific logging and
-// execution metrics derive their observations from the same typed message.
-func inspectPublicData(reqLog cllogger.SugaredLogger, appID string, publicData []byte) executionMetadata {
+// publicDataPrehook decodes public data once so app-specific logging and
+// execution metrics derive their observations from the same typed message, and
+// fetches the workflow binary for confidential-workflows requests so it can
+// ride along with the batch as unauthenticatedData. The binary travels outside
+// the signed requests; the enclave verifies it against the signed binary_hash.
+// A binary fetch failure is an error: the request fails rather than degrading
+// to the enclave's own fetch.
+func (h *hostServer) publicDataPrehook(reqLog cllogger.SugaredLogger, appID string, publicData []byte) (executionMetadata, []byte, error) {
 	switch appID {
 	case types.AppIDConfidentialHTTP:
 		req, err := decodeHTTPPublicData(publicData)
 		if err != nil {
 			logPublicDataDecodeError(reqLog, appID, len(publicData), err)
-			return executionMetadata{appID: appID}
+			return executionMetadata{appID: appID}, nil, nil
 		}
 
 		metadata := httpExecutionMetadata()
 		logHTTPPublicData(reqLog, req, len(publicData))
-		return metadata
+		return metadata, nil, nil
 
 	case types.AppIDConfidentialWorkflows:
 		execution, err := decodeWorkflowPublicData(publicData)
 		if err != nil {
 			logPublicDataDecodeError(reqLog, appID, len(publicData), err)
-			return executionMetadata{appID: appID}
+			return executionMetadata{appID: appID}, nil, nil
 		}
 
 		metadata := workflowExecutionMetadata(execution)
 		logWorkflowPublicData(reqLog, execution, len(publicData))
-		return metadata
+		binary, err := h.binaries.binaryFor(h.ctx, execution)
+		return metadata, binary, err
 
 	default:
 		reqLog.Debugw("publicData decoder unavailable",
 			"event", "PUBLIC_DATA_UNSUPPORTED",
 			"appID", appID,
 			"publicDataLen", len(publicData))
-		return executionMetadata{appID: appID}
+		return executionMetadata{appID: appID}, nil, nil
 	}
 }
 

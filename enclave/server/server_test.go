@@ -91,7 +91,7 @@ func newMockEnclaveApp() *mockEnclaveApp {
 	}
 }
 
-func (m *mockEnclaveApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, _ ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
+func (m *mockEnclaveApp) Execute(requestID [32]byte, appID string, inputData []byte, _ []byte, secretsMap map[string][]byte, emitter types.Emitter, _ ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
 	return m.executeFunc(requestID, appID, inputData, secretsMap, emitter)
 }
 
