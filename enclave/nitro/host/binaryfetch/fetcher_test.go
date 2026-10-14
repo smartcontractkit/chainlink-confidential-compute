@@ -170,3 +170,54 @@ func TestFetch_LRU_AccessRefreshesEntry(t *testing.T) {
 	fetch(1)
 	assert.Equal(t, calls+1, raw.calls.Load(), "binary 1 should have been evicted")
 }
+
+// A corrupted cache entry must be replaced, not just bypassed. The refetch
+// repairs the cache, so a later execution still succeeds once storage is
+// unavailable -- otherwise every execution re-downloads and the workflow breaks
+// outright the moment storage goes away.
+func TestFetch_CorruptedEntryIsReplaced(t *testing.T) {
+	store := NewMemoryStore()
+	f := NewBinaryFetcherWithStore(logger.Test(t), store, 1<<20)
+	key := cacheKeyFor(testBinaryHash())
+
+	// Seed the cache with bytes that do not match the hash, as a damaged disk
+	// cache would hold.
+	f.cache.Put(key, []byte("corrupted-bytes"))
+	require.Equal(t, len("corrupted-bytes"), f.cache.Bytes())
+
+	raw := &stubRawFetcher{data: map[string][]byte{"loc": testBinary}}
+	got, err := f.Fetch(context.Background(), key, "loc", testBinaryHash(), raw)
+	require.NoError(t, err)
+	assert.Equal(t, testBinary, got)
+	assert.Equal(t, int32(1), raw.calls.Load())
+
+	// The repaired entry is what the store now holds.
+	cached, ok := store.Get(key)
+	require.True(t, ok, "entry must still be cached after repair")
+	assert.Equal(t, testBinary, cached, "the corrupted bytes must have been replaced")
+	assert.Equal(t, len(testBinary), f.cache.Bytes(), "accounting must track the replacement")
+
+	// With storage now unavailable the execution still succeeds from cache.
+	dead := &stubRawFetcher{err: fmt.Errorf("storage unavailable")}
+	got, err = f.Fetch(context.Background(), key, "loc", testBinaryHash(), dead)
+	require.NoError(t, err, "a repaired cache must serve the binary without storage")
+	assert.Equal(t, testBinary, got)
+	assert.Zero(t, dead.calls.Load(), "storage must not be consulted on a healthy cache hit")
+}
+
+// If the refetch itself fails, the bad entry is still gone: better to fail
+// loudly than to keep serving bytes that do not match the signed hash.
+func TestFetch_CorruptedEntryDroppedWhenRefetchFails(t *testing.T) {
+	store := NewMemoryStore()
+	f := NewBinaryFetcherWithStore(logger.Test(t), store, 1<<20)
+	key := cacheKeyFor(testBinaryHash())
+	f.cache.Put(key, []byte("corrupted-bytes"))
+
+	dead := &stubRawFetcher{err: fmt.Errorf("storage unavailable")}
+	_, err := f.Fetch(context.Background(), key, "loc", testBinaryHash(), dead)
+	require.Error(t, err)
+
+	_, ok := store.Get(key)
+	assert.False(t, ok, "the corrupted entry must not survive a failed refetch")
+	assert.Zero(t, f.cache.Bytes(), "accounting must not leak the dropped entry")
+}

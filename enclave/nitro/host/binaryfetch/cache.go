@@ -137,6 +137,15 @@ func (c *Cache) Put(key string, value []byte) {
 	c.items[key] = el
 }
 
+// Delete removes key from the index and the store. Used to invalidate an entry
+// whose bytes no longer match the hash they are supposed to have.
+func (c *Cache) Delete(key string) {
+	c.mu.Lock()
+	c.removeLocked(key)
+	c.mu.Unlock()
+	c.store.Delete(key)
+}
+
 // releaseReservation gives back bytes reserved by Put when the entry is never
 // published.
 func (c *Cache) releaseReservation(size int) {
