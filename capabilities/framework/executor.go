@@ -974,17 +974,22 @@ func (e *RealExecutor) startEnclaveRefreshLoop() {
 	}()
 }
 
-// Close stops the background enclave-refresh loop.
+// Close stops the background enclave-refresh loop and closes the enclave
+// client, which stops the pool's proactive public-key refresh.
 func (e *RealExecutor) Close() error {
 	e.initializedMutex.Lock()
 	cancel := e.refreshCancel
 	done := e.refreshDone
+	client := e.enclaveClient
 	e.refreshCancel = nil
 	e.initializedMutex.Unlock()
 
 	if cancel != nil {
 		cancel()
 		<-done
+	}
+	if client != nil {
+		return client.Close()
 	}
 	return nil
 }
