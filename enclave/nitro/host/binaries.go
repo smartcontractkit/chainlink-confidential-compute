@@ -99,7 +99,14 @@ func newBinaryProviderWithCache(settings string, cacheDir string, maxCacheBytes 
 	}
 
 	// Unlike the enclave, the host reaches the storage service directly: it is
-	// already outside the TEE and owns the egress path.
+	// already outside the TEE and owns the egress path. The artifact client is
+	// SSRF-restricted (HTTPS only, no private addresses); e2e runs against a
+	// loopback fake storage service over plain HTTP, so they set the same
+	// OUTBOUND_ALLOW_LOCAL_FOR_TESTS escape hatch the SOCKS proxy honors.
+	artifactClient := types.HTTPClient(util.NewRestrictedHTTPClient())
+	if *outboundAllowLocalForTests {
+		artifactClient = util.NewUnrestrictedClient()
+	}
 	raw, pub, err := binaryfetch.NewStorageFetcher(
 		parsed.StorageServiceURL,
 		parsed.StorageServiceTLS,
@@ -107,7 +114,7 @@ func newBinaryProviderWithCache(settings string, cacheDir string, maxCacheBytes 
 		parsed.MaxBinarySize,
 		timeout,
 		lggr,
-		util.NewRestrictedHTTPClient(),
+		artifactClient,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("building storage fetcher: %w", err)
