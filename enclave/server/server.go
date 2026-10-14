@@ -241,7 +241,8 @@ func (s *enclaveServer) attestPublicKeys(dataToAttest [32]byte) ([]byte, error) 
 // handleMemory handles the GET /memory endpoint. It reports coarse enclave
 // resource usage: memory rounded to the nearest megabyte and process and guest
 // CPU time rounded to the nearest second. The granularity limits the resolution
-// of resource-based side channels into the confidential workload.
+// of resource-based side channels into the confidential workload. Process
+// metrics include compilation but exclude execution workers.
 func (s *enclaveServer) handleMemory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, fmt.Sprintf("method not allowed: %v", r.Method), http.StatusMethodNotAllowed)

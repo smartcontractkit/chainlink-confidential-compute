@@ -3,21 +3,18 @@ package main
 import (
 	"flag"
 	"log"
-	"net/http"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/app"
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/nitrotransport"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/worker"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/memlimit"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/wasmruntime"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
-	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
-	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 )
 
@@ -53,31 +50,19 @@ func main() {
 
 	kc := keychain.NewBoxKeychain(logger, nil, nil, nil)
 	comb := combiner.NewTDH2EasyCombiner()
-
-	// A Nitro EIF is measured (PCR), so environment-specific endpoints cannot be
-	// baked in. The gateway URL, storage endpoint, and storage key are all
-	// injected by the host at runtime over vsock (see host injectSettings ->
-	// app.InjectSettings). This factory builds the remote dispatcher once the
-	// gateway URL arrives.
-	dispatcherFactory := func(gw app.GatewayConfig) (app.RemoteDispatcher, error) {
-		if gw.RequestTimeout <= 0 {
-			gw.RequestTimeout = *gatewayTimeout
-		}
-		dialer, err := proxyclient.NewConfiguredEndpointDialer(types.ProxyParentCID, types.ProxyPort, gw.URL)
-		if err != nil {
-			return nil, err
-		}
-		client := gateway.NewGatewayClient(gw.URL, att, gateway.WithHTTPClient(&http.Client{
-			Timeout:   gw.RequestTimeout,
-			Transport: tunnelTransport(dialer, true),
-		}))
-		verifier := signatureverifier.NewEd25519SignatureVerifier()
-		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier, gw.RetryBackoff, gw.RetryTimeout), nil
+	processes, err := worker.NewProcesses("/usr/bin/workflow-worker", nil, nil, kc, appLogger)
+	if err != nil {
+		logger.Fatalf("Failed to configure worker: %v", err)
 	}
 
-	// Cap concurrent executions at (enclave memory - reserve) / per-exec so a burst
-	// can't exhaust the fixed enclave memory and wedge the VM. Derived from memory
-	// read at startup, so it scales with the enclave's sizing.
+	// The host owns storage downloads and forwards the full runtime settings
+	// over vsock. This factory validates gateway configuration when settings
+	// arrive; execution workers construct their own dispatchers.
+	dispatcherFactory := func(gw app.GatewayConfig) (app.RemoteDispatcher, error) {
+		return nitrotransport.Dispatcher(gw, types.EnclaveConfig{}, att, kc, appLogger, 0)
+	}
+
+	// Admission budgets for cold workers but does not enforce a native RSS limit.
 	limit := memlimit.Derive()
 	appLogger.Infow("Confidential workflows concurrency limit",
 		"maxConcurrentExecutions", limit.MaxConcurrent,
@@ -86,17 +71,25 @@ func main() {
 		"perExecMB", limit.PerExecMB,
 		"memoryIntrospected", limit.Introspected,
 	)
+	// Nitro mounts /tmp noexec; serialized modules need executable mappings.
+	compiler, err := wasmruntime.NewCompiler("/var/lib/workflow-artifacts")
+	if err != nil {
+		logger.Fatalf("Failed to construct workflow compiler: %v", err)
+	}
+	defer func() {
+		if err := compiler.Close(); err != nil {
+			appLogger.Warnw("closing workflow compiler", "error", err)
+		}
+	}()
 	confApp, err := app.NewConfidentialWorkflowsApp(
 		sdkpb.TeeType_TEE_TYPE_AWS_NITRO,
 		appLogger,
 		app.Config{
+			Compiler:                compiler,
+			Worker:                  processes,
+			GatewayTimeout:          *gatewayTimeout,
 			RemoteDispatcherFactory: dispatcherFactory,
-			HTTPFetcher: httpfetch.NewFetcherWithClient(
-				httpfetch.DefaultPolicy(),
-				util.NewRestrictedHTTPClientWithDialer(
-					proxyclient.NewWorkflowControlledDialer(types.ProxyParentCID, types.ProxyPort).DialContext,
-				),
-			),
+			HTTPFetcher:             nitrotransport.HTTPFetcher(0),
 			MaxConcurrentExecutions: limit.MaxConcurrent,
 		},
 	)
@@ -116,13 +109,5 @@ func main() {
 	)
 	if err != nil {
 		logger.Fatalf("Failed to start Nitro enclave: %v", err)
-	}
-}
-
-func tunnelTransport(dialer *proxyclient.Dialer, disableKeepAlives bool) *http.Transport {
-	return &http.Transport{
-		DialContext:       dialer.DialContext,
-		DisableKeepAlives: disableKeepAlives,
-		ForceAttemptHTTP2: true,
 	}
 }

@@ -236,7 +236,7 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	}
 	goRuntimeMemory, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.memory.go_runtime",
-		metric.WithDescription("Memory mapped by the enclave Go runtime, quantized to the nearest MiB inside the enclave"),
+		metric.WithDescription("Memory mapped by the enclave coordinator Go runtime, excluding workers, quantized to the nearest MiB inside the enclave"),
 		metric.WithUnit("By"),
 		metric.WithInt64Callback(metrics.observeGoRuntimeMemory),
 	)
@@ -254,7 +254,7 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	}
 	processRSSMemory, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.memory.rss",
-		metric.WithDescription("Resident memory of the enclave process, including native Wasmtime allocations, quantized to the nearest MiB inside the enclave"),
+		metric.WithDescription("Resident memory of the enclave coordinator process, excluding workers, quantized to the nearest MiB inside the enclave"),
 		metric.WithUnit("By"),
 		metric.WithInt64Callback(metrics.observeProcessRSSMemory),
 	)
@@ -290,7 +290,7 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	}
 	peakRSSMemory, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.memory.rss_peak",
-		metric.WithDescription("High-water mark of the enclave process's resident set (/proc/self/status VmHWM), quantized to the nearest MiB inside the enclave; monotonic, so a spike between two polls stays visible"),
+		metric.WithDescription("High-water mark of the enclave coordinator's resident set (/proc/self/status VmHWM), excluding workers, quantized to the nearest MiB inside the enclave"),
 		metric.WithUnit("By"),
 		metric.WithInt64Callback(metrics.observePeakRSSMemory),
 	)

@@ -18,6 +18,9 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/settings"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/host"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/wasmlimits"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/worker"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/wasmruntime"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"google.golang.org/protobuf/proto"
@@ -36,13 +39,16 @@ type confidentialWorkflowsApp struct {
 	httpFetcher         *httpfetch.Fetcher
 	requirementsHandler host.RequirementsHandler
 	tpe                 sdkpb.TeeType
+	worker              WorkerRunner
+	compiler            workflowCompiler
+	gatewayTimeout      time.Duration
 
-	// limiter bounds concurrent executions so a burst can't exhaust the fixed
-	// enclave memory and wedge the VM. Unbounded unless WithMaxConcurrentExecutions
+	// limiter reduces memory pressure from concurrent executions; it is not an
+	// RSS limit. Unbounded unless WithMaxConcurrentExecutions
 	// is set (the nitro entrypoint derives a limit from enclave memory).
 	limiter *executionLimiter
 
-	// executionTimeout bounds a single WASM run (nanoseconds; 0 = the WASM
+	// executionTimeout bounds preparation plus execution (nanoseconds; 0 = the WASM
 	// host's own default). Injected via InjectSettings, read on every Execute,
 	// so it is atomic rather than guarded by mu.
 	executionTimeout atomic.Int64
@@ -62,42 +68,39 @@ type confidentialWorkflowsApp struct {
 	dispatcherFactory RemoteDispatcherFactory // builds dispatcher on first GatewayURL injection
 	lastConfig        types.EnclaveConfig
 	haveConfig        bool
+	gatewayConfig     GatewayConfig
 }
 
 var _ types.EnclaveApp = (*confidentialWorkflowsApp)(nil)
 
 // Config requires explicit transports to prevent direct network access.
 type Config struct {
+	Compiler                *wasmruntime.Compiler
+	Worker                  WorkerRunner
+	GatewayTimeout          time.Duration
 	HTTPFetcher             *httpfetch.Fetcher
 	RemoteDispatcherFactory RemoteDispatcherFactory
 	MaxConcurrentExecutions int64
 }
 
+type WorkerRunner interface {
+	Run(context.Context, worker.Job) (worker.Reply, error)
+}
+
+type workflowCompiler interface {
+	Compile(context.Context, logger.Logger, wasmlimits.Config, []byte, time.Duration) (wasmruntime.PreparedArtifact, error)
+}
+
 type Option func(*confidentialWorkflowsApp)
 
-// GatewayConfig carries the injected gateway tunables to the dispatcher
-// factory. Zero values mean "use the built-in default" (resolved by the
-// factory or the dispatcher).
-type GatewayConfig struct {
-	// URL is the Gateway endpoint(s) for remote dispatch, comma-separated.
-	URL string
-	// RequestTimeout caps a single enclave->gateway HTTP exchange.
-	RequestTimeout time.Duration
-	// RetryBackoff paces successive gateway round-trips after a transient
-	// transport failure (gateway rotation, proxy 5xx).
-	RetryBackoff time.Duration
-	// RetryTimeout bounds the full gateway retry window for one capability call
-	// or secret fetch (all attempts, including backoffs).
-	RetryTimeout time.Duration
-}
+type GatewayConfig = worker.GatewayConfig
 
 // RemoteDispatcherFactory defers construction until the host injects the gateway URL.
 type RemoteDispatcherFactory func(gateway GatewayConfig) (RemoteDispatcher, error)
 
-// WithRemoteDispatcher enables remote dynamic secrets and remote capability
-// dispatch with a dispatcher built up-front. Used by tests that already know the
-// gateway endpoint; the nitro/fake mains use WithRemoteDispatcherFactory since
-// the gateway URL is injected at runtime.
+// WithRemoteDispatcher supplies a dispatcher to in-process test workers only.
+// Process-backed workers construct their own from the gateway configuration
+// captured by the dispatcher factory during settings injection.
 func WithRemoteDispatcher(d RemoteDispatcher) Option {
 	return func(a *confidentialWorkflowsApp) {
 		a.dispatcher = d
@@ -108,7 +111,7 @@ func WithRemoteDispatcher(d RemoteDispatcher) Option {
 // dispatcher from a Gateway URL and client timeout injected at runtime (via
 // InjectSettings). The measured EIF can't bake the gateway URL, so the
 // nitro/fake mains pass a factory here and the dispatcher is created when the
-// host injects the URL. A non-positive timeout means the caller's own default.
+// host injects the URL. InjectSettings resolves the request timeout first.
 func WithRemoteDispatcherFactory(f RemoteDispatcherFactory) Option {
 	return func(a *confidentialWorkflowsApp) {
 		a.dispatcherFactory = f
@@ -125,9 +128,8 @@ func WithHTTPFetcher(f *httpfetch.Fetcher) Option {
 }
 
 // WithMaxConcurrentExecutions bounds concurrent Execute calls to n; n <= 0 means
-// unbounded. The nitro entrypoint derives n from enclave memory so a burst of
-// executions can't exhaust the fixed enclave memory and wedge the VM. fake/local
-// runs and tests leave it unbounded.
+// unbounded. The nitro entrypoint derives n from enclave memory as an admission
+// heuristic. Fake/local runs and tests leave it unbounded.
 func WithMaxConcurrentExecutions(n int64) Option {
 	return func(a *confidentialWorkflowsApp) {
 		a.limiter = newExecutionLimiter(n)
@@ -174,12 +176,16 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 
 	a.mu.Lock()
 	if a.dispatcher == nil && a.dispatcherFactory != nil {
-		d, err := a.dispatcherFactory(GatewayConfig{
+		gw := GatewayConfig{
 			URL:            req.GatewayURL,
 			RequestTimeout: time.Duration(req.GatewayRequestTimeout),
 			RetryBackoff:   time.Duration(req.GatewayRetryBackoff),
 			RetryTimeout:   time.Duration(req.GatewayRetryTimeout),
-		})
+		}
+		if gw.RequestTimeout <= 0 {
+			gw.RequestTimeout = a.gatewayTimeout
+		}
+		d, err := a.dispatcherFactory(gw)
 		if err != nil {
 			a.mu.Unlock()
 			return fmt.Errorf("building remote dispatcher: %w", err)
@@ -190,6 +196,7 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 			d.SetConfig(a.lastConfig)
 		}
 		a.dispatcher = d
+		a.gatewayConfig = gw
 		a.logger.Infof("[app] remote dispatch enabled (gateway=%s)", req.GatewayURL)
 	}
 	a.mu.Unlock()
@@ -203,7 +210,7 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 // config) picks it up in InjectSettings.
 func (a *confidentialWorkflowsApp) OnConfigUpdate(config types.EnclaveConfig) {
 	a.mu.Lock()
-	a.lastConfig = config
+	a.lastConfig = config.Copy()
 	a.haveConfig = true
 	d := a.dispatcher
 	a.mu.Unlock()
@@ -215,6 +222,12 @@ func (a *confidentialWorkflowsApp) OnConfigUpdate(config types.EnclaveConfig) {
 
 // NewConfidentialWorkflowsApp requires every production transport explicitly.
 func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config Config) (types.EnclaveApp, error) {
+	if config.Compiler == nil {
+		return nil, errors.New("compiler is required")
+	}
+	if config.Worker == nil {
+		return nil, errors.New("worker runner is required")
+	}
 	if config.HTTPFetcher == nil {
 		return nil, errors.New("HTTP fetcher is required")
 	}
@@ -223,6 +236,9 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 	}
 
 	a := &confidentialWorkflowsApp{
+		worker:            config.Worker,
+		compiler:          config.Compiler,
+		gatewayTimeout:    config.GatewayTimeout,
 		logger:            lggr,
 		httpFetcher:       config.HTTPFetcher,
 		tpe:               tpe,
@@ -323,10 +339,6 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		"workflow_id": execution.WorkflowId,
 	})
 
-	a.mu.Lock()
-	dispatcher := a.dispatcher
-	a.mu.Unlock()
-
 	// The binary arrives as unauthenticatedData, fetched by the host. The host
 	// is untrusted, so verify it against the signed binary_hash before
 	// executing.
@@ -344,19 +356,6 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	}
 	binary := hostBinary
 
-	helper := &enclaveExecutionHelper{
-		requestID:        requestID,
-		workflowID:       execution.WorkflowId,
-		owner:            execution.GetOwner(),
-		executionID:      execution.GetExecutionId(),
-		orgID:            execution.GetOrgId(),
-		signedRequests:   rawSignedRequests,
-		logger:           a.logger,
-		emitter:          emitter,
-		remoteDispatcher: dispatcher,
-		httpFetcher:      a.httpFetcher,
-	}
-
 	if !host.CheckRequirements(context.Background(), a.requirementsHandler, execution.Requirements) {
 		reqSerialized, _ := json.Marshal(execution.Requirements)
 		return nil, &types.ExecuteError{
@@ -365,63 +364,89 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		}
 	}
 
-	restrictedHelper := host.NewRestrictedExecutionHelper(helper, execution.Restrictions)
-
-	// Execute the WASM binary with the deserialized ExecuteRequest.
-	// The fetched binary is brotli-compressed.
-	// chainlink-common's WASM host applies workflow-scoped resource limits (e.g.
-	// concurrent capability calls) keyed off CRE metadata in the context.
-	execCtx := contexts.WithCRE(context.Background(), contexts.CRE{
-		Org:      execution.GetOrgId(),
-		Owner:    execution.GetOwner(),
-		Workflow: execution.WorkflowId,
-	})
-	// Both bounds come from the same setting: the ctx deadline unblocks host-side
-	// capability and secrets calls, while the module timeout is what actually
-	// interrupts the guest.
-	execTimeout := time.Duration(a.executionTimeout.Load())
-	if execTimeout > 0 {
-		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(execCtx, execTimeout)
-		defer cancel()
-	}
+	execCtx := workflowContext(&execution)
 	executionLogger := logger.With(a.logger, append(contexts.CREValue(execCtx).LoggerKVs(), "execution_id", execution.GetExecutionId())...)
 	if execution.GetOrgId() == "" {
 		executionLogger.Warnw("Workflow execution is missing org ID")
 	}
 	snapshot := a.limiterSettings.Snapshot()
-	helper.httpLimits = newHTTPActionLimits(execCtx, executionLogger, snapshot)
-	result, err := executeWasm(execCtx, executionLogger, snapshot, binary, execution.SdkExecuteRequest, true, restrictedHelper, execTimeout)
+	resolved := resolveWASMLimits(execCtx, executionLogger, snapshot)
+	httpLimits := newHTTPActionLimits(execCtx, executionLogger, snapshot)
+	a.mu.Lock()
+	cfg, gw := a.lastConfig.Copy(), a.gatewayConfig
+	a.mu.Unlock()
+	httpTimeout := a.httpFetcher.DefaultTimeout()
+	prepared, err := a.compiler.Compile(execCtx, executionLogger, resolved, binary, time.Duration(a.executionTimeout.Load()))
 	if err != nil {
-		// A timed-out execution is a caller-facing condition, not an enclave
-		// failure: the WASM host normalizes its epoch deadline to
-		// context.DeadlineExceeded. Set the sentinel so the executor classifies
-		// it as a user error (workflow ran over budget) instead of infrastructure.
-		code := http.StatusInternalServerError
-		errMsg := fmt.Sprintf("executing wasm: %s", err.Error())
-		if errors.Is(err, context.DeadlineExceeded) {
-			code = http.StatusGatewayTimeout
-			errMsg = fmt.Sprintf("%s: %s", types.ErrWasmExecutionTimeout, errMsg)
-		}
-		return nil, &types.ExecuteError{
-			Error: errMsg,
-			Code:  code,
-		}
+		return nil, wasmExecutionError(err)
+	}
+	defer wasmruntime.RemoveArtifact(executionLogger, prepared.Path)
+	reply, runErr := a.worker.Run(context.Background(), worker.Job{
+		Limits: resolved, HTTPActionLimits: worker.HTTPActionLimits{CallLimit: httpLimits.callLimit, Fetch: httpLimits.fetch},
+		RequestID: requestID, Execution: inputData, ArtifactPath: prepared.Path,
+		Config: cfg, Gateway: gw,
+		HTTPTimeout: httpTimeout, ExecutionDeadline: prepared.Deadline, SignedRequests: rawSignedRequests,
+	})
+	if runErr != nil {
+		a.logger.Errorw("workflow worker failed", "requestID", fmt.Sprintf("%x", requestID), "workflowID", execution.WorkflowId, "error", runErr)
+		return nil, &types.ExecuteError{Error: "workflow worker failed", Code: http.StatusInternalServerError}
+	}
+	for _, event := range reply.Events {
+		emitter.Emit(event.Event, event.Details)
+	}
+	if reply.Error != nil {
+		return nil, reply.Error
+	}
+	var response confworkflowtypes.ConfidentialWorkflowResponse
+	if err := proto.Unmarshal(reply.Result, &response); err != nil {
+		return nil, &types.ExecuteError{Error: "invalid worker result", Code: http.StatusInternalServerError}
+	}
+	return reply.Result, nil
+}
+
+// ExecuteWorkflow reuses the same helper and timeout policy in workers and local tests.
+func ExecuteWorkflow(lggr logger.Logger, resolved wasmlimits.Config, httpLimits worker.HTTPActionLimits, requestID [32]byte, execution *confworkflowtypes.WorkflowExecution, artifactPath string, signedRequests []types.SignedComputeRequest, emitter types.Emitter, dispatcher RemoteDispatcher, fetcher *httpfetch.Fetcher, deadline time.Time) ([]byte, *types.ExecuteError) {
+	helper := host.NewRestrictedExecutionHelper(&enclaveExecutionHelper{
+		requestID: requestID, workflowID: execution.WorkflowId, owner: execution.GetOwner(),
+		executionID: execution.GetExecutionId(), orgID: execution.GetOrgId(), signedRequests: signedRequests,
+		logger: lggr, emitter: emitter, remoteDispatcher: dispatcher, httpFetcher: fetcher,
+		httpLimits: httpActionLimits{callLimit: httpLimits.CallLimit, fetch: httpLimits.Fetch},
+	}, execution.Restrictions)
+
+	execCtx := workflowContext(execution)
+	if !deadline.IsZero() {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithDeadline(execCtx, deadline)
+		defer cancel()
+	}
+	executionLogger := logger.With(lggr, append(contexts.CREValue(execCtx).LoggerKVs(), "execution_id", execution.GetExecutionId())...)
+	result, err := wasmruntime.Execute(execCtx, executionLogger, resolved, artifactPath, execution.SdkExecuteRequest, helper)
+	if err != nil {
+		return nil, wasmExecutionError(err)
 	}
 
-	// Wrap the serialized ExecutionResult in a ConfidentialWorkflowResponse.
-	// The framework's base_action.go unmarshals enclave output as the TOutput
-	// type parameter, which for this capability is ConfidentialWorkflowResponse.
-	cwResp := &confworkflowtypes.ConfidentialWorkflowResponse{SdkExecutionResult: result}
-	cwRespBytes, err := proto.Marshal(cwResp)
+	// Wrapping here preserves a nil SDK result as a valid, empty response.
+	response, err := proto.Marshal(&confworkflowtypes.ConfidentialWorkflowResponse{SdkExecutionResult: result})
 	if err != nil {
-		return nil, &types.ExecuteError{
-			Error: fmt.Sprintf("marshalling workflow response: %s", err.Error()),
-			Code:  http.StatusInternalServerError,
-		}
+		return nil, &types.ExecuteError{Error: fmt.Sprintf("marshalling workflow response: %s", err), Code: http.StatusInternalServerError}
 	}
+	return response, nil
+}
 
-	return cwRespBytes, nil
+func wasmExecutionError(err error) *types.ExecuteError {
+	code := http.StatusInternalServerError
+	message := fmt.Sprintf("executing wasm: %s", err)
+	if errors.Is(err, context.DeadlineExceeded) {
+		code = http.StatusGatewayTimeout
+		message = fmt.Sprintf("%s: %s", types.ErrWasmExecutionTimeout, message)
+	}
+	return &types.ExecuteError{Error: message, Code: code}
+}
+
+func workflowContext(execution *confworkflowtypes.WorkflowExecution) context.Context {
+	return contexts.WithCRE(context.Background(), contexts.CRE{
+		Org: execution.GetOrgId(), Owner: execution.GetOwner(), Workflow: execution.WorkflowId,
+	})
 }
 
 // TEEs can't tell what region they are in, so we just check the TEE type and rely on the DON to ensure it's sending to the right place

@@ -24,14 +24,3 @@ func TestRestrictedArtifactClientKeepsSafeurlWrapper(t *testing.T) {
 		require.True(t, util.IsRequestBlockedError(err), raw)
 	}
 }
-
-func TestTunnelTransport(t *testing.T) {
-	dialer := proxyclient.NewWorkflowControlledDialer(types.ProxyParentCID, types.ProxyPort)
-
-	for _, disableKeepAlives := range []bool{true, false} {
-		transport := tunnelTransport(dialer, disableKeepAlives)
-		require.NotNil(t, transport.DialContext, "the tunnel dialer must be installed")
-		require.Equal(t, disableKeepAlives, transport.DisableKeepAlives)
-		require.True(t, transport.ForceAttemptHTTP2)
-	}
-}

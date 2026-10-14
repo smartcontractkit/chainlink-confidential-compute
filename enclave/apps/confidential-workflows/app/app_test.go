@@ -20,6 +20,8 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/wasmlimits"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/wasmruntime"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
@@ -54,6 +56,8 @@ func makeExecution(t *testing.T, workflowID, binaryURL string, binaryHash []byte
 
 func TestNewConfidentialWorkflowsAppRequiresProductionTransports(t *testing.T) {
 	valid := Config{
+		Compiler:    testCompiler(t),
+		Worker:      &capturingWorker{},
 		HTTPFetcher: httpfetch.NewFetcherWithClient(httpfetch.DefaultPolicy(), util.NewUnrestrictedClient()),
 		RemoteDispatcherFactory: func(GatewayConfig) (RemoteDispatcher, error) {
 			return &testRemoteDispatcher{}, nil
@@ -61,6 +65,8 @@ func TestNewConfidentialWorkflowsAppRequiresProductionTransports(t *testing.T) {
 	}
 
 	tests := map[string]func(*Config){
+		"compiler":                  func(c *Config) { c.Compiler = nil },
+		"worker runner":             func(c *Config) { c.Worker = nil },
 		"HTTP fetcher":              func(c *Config) { c.HTTPFetcher = nil },
 		"remote dispatcher factory": func(c *Config) { c.RemoteDispatcherFactory = nil },
 	}
@@ -579,20 +585,19 @@ func TestExecute_ExecutionTimeout(t *testing.T) {
 // Every execution is held for the grace period before it starts; a negative
 // setting turns the wait off entirely.
 func TestExecute_GracePeriod(t *testing.T) {
-	raw := buildTestWasm(t, "hello")
-	var compressed bytes.Buffer
-	w := brotli.NewWriter(&compressed)
-	_, err := w.Write(raw)
-	require.NoError(t, err)
-	require.NoError(t, w.Close())
-
-	binary := compressed.Bytes()
+	binary := []byte("source")
 	hash := sha256.Sum256(binary)
 
 	run := func(t *testing.T, grace time.Duration) time.Duration {
 		t.Helper()
+		var compilationStarted time.Time
 		app, locator := newStorageBackedAppWithSettings(t, binary, func(s *WorkflowSettings) {
 			s.WorkflowGracePeriod = Duration(grace)
+		}, func(a *confidentialWorkflowsApp) {
+			a.compiler = compilerFunc(func(context.Context, logger.Logger, wasmlimits.Config, []byte, time.Duration) (wasmruntime.PreparedArtifact, error) {
+				compilationStarted = time.Now()
+				return wasmruntime.PreparedArtifact{}, fmt.Errorf("stop at compilation")
+			})
 		})
 
 		execution := makeExecution(t, "wf-grace", locator, hash[:])
@@ -601,8 +606,9 @@ func TestExecute_GracePeriod(t *testing.T) {
 
 		start := time.Now()
 		_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, binary, nil, emitter.NewNoOpEmitter())
-		require.Nil(t, execErr, "expected no error, got: %+v", execErr)
-		return time.Since(start)
+		require.NotNil(t, execErr)
+		require.Contains(t, execErr.Error, "stop at compilation")
+		return compilationStarted.Sub(start)
 	}
 
 	t.Run("injected period is waited out", func(t *testing.T) {
@@ -614,45 +620,55 @@ func TestExecute_GracePeriod(t *testing.T) {
 	})
 }
 
-// The host injects both timeouts over vsock; the gateway one reaches the
-// dispatcher factory and a zero leaves the factory's own fallback in charge.
 func TestInjectSettings_Timeouts(t *testing.T) {
-	newApp := func() (*confidentialWorkflowsApp, *time.Duration) {
-		var got time.Duration
-		a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t),
-			WithRemoteDispatcherFactory(func(gw GatewayConfig) (RemoteDispatcher, error) {
-				got = gw.RequestTimeout
-				return &testRemoteDispatcher{}, nil
-			}),
-		).(*confidentialWorkflowsApp)
-		return a, &got
-	}
+	for _, test := range []struct {
+		name     string
+		injected time.Duration
+		fallback time.Duration
+		want     time.Duration
+	}{
+		{"explicit", 75 * time.Second, 30 * time.Second, 75 * time.Second},
+		{"omitted uses fallback", 0, 30 * time.Second, 30 * time.Second},
+		{"negative uses fallback", -1, 30 * time.Second, 30 * time.Second},
+		{"zero fallback disables timeout", 0, 0, 0},
+		{"negative fallback disables timeout", 0, -1, -1},
+		{"explicit overrides disabled fallback", 75 * time.Second, 0, 75 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var got GatewayConfig
+			calls := 0
+			app, err := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), Config{
+				Compiler:       testCompiler(t),
+				Worker:         &capturingWorker{},
+				HTTPFetcher:    httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
+				GatewayTimeout: test.fallback,
+				RemoteDispatcherFactory: func(gw GatewayConfig) (RemoteDispatcher, error) {
+					got = gw
+					calls++
+					return &testRemoteDispatcher{}, nil
+				},
+			})
+			require.NoError(t, err)
+			a := app.(*confidentialWorkflowsApp)
+			s := testSettings()
+			s.RequestTimeout, s.ExecutionTimeout = Duration(80*time.Second), Duration(80*time.Second)
+			s.GatewayRequestTimeout = Duration(test.injected)
+			raw, err := json.Marshal(s)
+			require.NoError(t, err)
+			require.NoError(t, a.InjectSettings(raw))
+			assert.Equal(t, test.want, got.RequestTimeout)
+			assert.Equal(t, got, a.gatewayConfig, "workers and the factory receive the same resolved settings")
+			assert.Equal(t, 80*time.Second, a.httpFetcher.DefaultTimeout())
+			assert.Equal(t, int64(80*time.Second), a.executionTimeout.Load())
 
-	inject := func(t *testing.T, a *confidentialWorkflowsApp, mutate func(*WorkflowSettings)) {
-		t.Helper()
-		s := testSettings()
-		mutate(&s)
-		raw, err := json.Marshal(s)
-		require.NoError(t, err)
-		require.NoError(t, a.InjectSettings(raw))
-	}
-
-	t.Run("forwarded to the dispatcher factory", func(t *testing.T) {
-		a, got := newApp()
-		inject(t, a, func(s *WorkflowSettings) {
-			s.RequestTimeout = Duration(80 * time.Second)
-			s.GatewayRequestTimeout = Duration(75 * time.Second)
-			s.ExecutionTimeout = Duration(80 * time.Second)
+			s.GatewayRequestTimeout = Duration(90 * time.Second)
+			raw, err = json.Marshal(s)
+			require.NoError(t, err)
+			require.NoError(t, a.InjectSettings(raw))
+			assert.Equal(t, 1, calls)
+			assert.Equal(t, got, a.gatewayConfig, "gateway settings remain sticky after construction")
 		})
-		assert.Equal(t, 75*time.Second, *got)
-		assert.Equal(t, int64(80*time.Second), a.executionTimeout.Load())
-	})
-
-	t.Run("omitted leaves the fallback to the factory", func(t *testing.T) {
-		a, got := newApp()
-		inject(t, a, func(*WorkflowSettings) {})
-		assert.Zero(t, *got)
-	})
+	}
 }
 
 // A payload missing required settings is rejected whole, and nothing is applied:

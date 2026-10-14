@@ -8,11 +8,11 @@ func TestConcurrency(t *testing.T) {
 		totalMB, reserveMB, perExecMB uint64
 		want                          int64
 	}{
-		{"staging 2048 yields 10", 2048, 1024, 100, 10},
-		{"introspected below 2048 stays close", 1950, 1024, 128, 7},
-		{"scales up on a 4096 enclave", 4096, 1024, 128, 24},
-		{"reserve exceeds total clamps to 1", 512, 1024, 128, 1},
-		{"total equals reserve clamps to 1", 1024, 1024, 128, 1},
+		{"staging 2048 budgets two cold workers", 2048, ReserveMB, PerExecMB, 2},
+		{"introspected below 2048 budgets one", 1950, ReserveMB, PerExecMB, 1},
+		{"scales up on a 4096 enclave", 4096, ReserveMB, PerExecMB, 6},
+		{"reserve exceeds total clamps to 1", 512, ReserveMB, PerExecMB, 1},
+		{"total equals reserve clamps to 1", 1024, ReserveMB, PerExecMB, 1},
 		{"zero per-exec clamps to 1", 2048, 1024, 0, 1},
 	}
 	for _, tc := range cases {

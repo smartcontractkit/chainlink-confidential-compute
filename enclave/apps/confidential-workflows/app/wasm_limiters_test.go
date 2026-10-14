@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/config"
 	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
-	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/internal/wasmlimits"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,57 +22,21 @@ import (
 func TestWASMModuleLimiters_Defaults(t *testing.T) {
 	defaults := cresettings.Default.PerWorkflow
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
-	moduleLimiters := newWASMModuleLimiters(ctx, logger.Test(t), nil)
-	t.Cleanup(func() { require.NoError(t, moduleLimiters.Close()) })
-
-	cfg := &host.ModuleConfig{}
-	moduleLimiters.apply(cfg)
-	require.NotNil(t, cfg.MemoryLimiter)
-	require.NotNil(t, cfg.MaxCompressedBinaryLimiter)
-	require.NotNil(t, cfg.MaxDecompressedBinaryLimiter)
-	require.NotNil(t, cfg.MaxResponseSizeLimiter)
-	require.NotNil(t, cfg.PendingCallsLimiter)
-	require.NotNil(t, cfg.EnableUserMetricsLimiter)
-	require.NotNil(t, cfg.MaxUserMetricPayloadLimiter)
-	require.NotNil(t, cfg.MaxUserMetricNameLengthLimiter)
-	require.NotNil(t, cfg.MaxUserMetricLabelsPerMetricLimiter)
-	require.NotNil(t, cfg.MaxUserMetricLabelValueLengthLimiter)
-	require.NotNil(t, cfg.MaxSubscriptionsLimiter)
-	assert.Equal(t, uint32(defaults.LogLineLimit.DefaultValue), cfg.MaxLogLenBytes)
-
-	memory, err := cfg.MemoryLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, defaults.WASMMemoryLimit.DefaultValue, memory)
-	compressed, err := cfg.MaxCompressedBinaryLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, defaults.WASMCompressedBinarySizeLimit.DefaultValue, compressed)
-	decompressed, err := cfg.MaxDecompressedBinaryLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, defaults.WASMBinarySizeLimit.DefaultValue, decompressed)
-	response, err := cfg.MaxResponseSizeLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, defaults.ExecutionResponseLimit.DefaultValue, response)
-	pendingCalls, err := cfg.PendingCallsLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 30, pendingCalls)
-	userMetricsEnabled, err := cfg.EnableUserMetricsLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.False(t, userMetricsEnabled)
-	metricPayload, err := cfg.MaxUserMetricPayloadLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, defaults.UserMetricPayloadLimit.DefaultValue, metricPayload)
-	metricName, err := cfg.MaxUserMetricNameLengthLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 128, metricName)
-	metricLabels, err := cfg.MaxUserMetricLabelsPerMetricLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 20, metricLabels)
-	metricLabelValue, err := cfg.MaxUserMetricLabelValueLengthLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 256, metricLabelValue)
-	subscriptions, err := cfg.MaxSubscriptionsLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 128, subscriptions)
+	want := wasmlimits.Config{
+		Memory:                     defaults.WASMMemoryLimit.DefaultValue,
+		MaxCompressedBinary:        defaults.WASMCompressedBinarySizeLimit.DefaultValue,
+		MaxDecompressedBinary:      defaults.WASMBinarySizeLimit.DefaultValue,
+		MaxResponseSize:            defaults.ExecutionResponseLimit.DefaultValue,
+		PendingCalls:               30,
+		EnableUserMetrics:          false,
+		MaxUserMetricPayload:       defaults.UserMetricPayloadLimit.DefaultValue,
+		MaxUserMetricNameLength:    128,
+		MaxUserMetricLabels:        20,
+		MaxUserMetricLabelValueLen: 256,
+		MaxSubscriptions:           128,
+		MaxLogLenBytes:             uint32(defaults.LogLineLimit.DefaultValue),
+	}
+	assert.Equal(t, want, resolveWASMLimits(ctx, logger.Test(t), nil))
 }
 
 func TestWASMModuleLimiters_InjectedOverrides(t *testing.T) {
@@ -106,45 +69,21 @@ func TestWASMModuleLimiters_InjectedOverrides(t *testing.T) {
 	require.NoError(t, a.InjectSettings(raw))
 
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
-	moduleLimiters := newWASMModuleLimiters(ctx, a.logger, a.limiterSettings.Snapshot())
-	t.Cleanup(func() { require.NoError(t, moduleLimiters.Close()) })
-	cfg := &host.ModuleConfig{}
-	moduleLimiters.apply(cfg)
-	assert.Equal(t, uint32(2*config.KByte), cfg.MaxLogLenBytes)
-
-	memory, err := cfg.MemoryLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, config.Size(256)*config.MByte, memory)
-	compressed, err := cfg.MaxCompressedBinaryLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, config.Size(11)*config.MByte, compressed)
-	decompressed, err := cfg.MaxDecompressedBinaryLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, config.Size(12)*config.MByte, decompressed)
-	response, err := cfg.MaxResponseSizeLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, config.Size(13)*config.KByte, response)
-	pendingCalls, err := cfg.PendingCallsLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 7, pendingCalls)
-	userMetricsEnabled, err := cfg.EnableUserMetricsLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.True(t, userMetricsEnabled)
-	metricPayload, err := cfg.MaxUserMetricPayloadLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, config.Size(14)*config.KByte, metricPayload)
-	metricName, err := cfg.MaxUserMetricNameLengthLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 15, metricName)
-	metricLabels, err := cfg.MaxUserMetricLabelsPerMetricLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 16, metricLabels)
-	metricLabelValue, err := cfg.MaxUserMetricLabelValueLengthLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 17, metricLabelValue)
-	subscriptions, err := cfg.MaxSubscriptionsLimiter.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, 64, subscriptions)
+	want := wasmlimits.Config{
+		Memory:                     256 * config.MByte,
+		MaxCompressedBinary:        11 * config.MByte,
+		MaxDecompressedBinary:      12 * config.MByte,
+		MaxResponseSize:            13 * config.KByte,
+		PendingCalls:               7,
+		EnableUserMetrics:          true,
+		MaxUserMetricPayload:       14 * config.KByte,
+		MaxUserMetricNameLength:    15,
+		MaxUserMetricLabels:        16,
+		MaxUserMetricLabelValueLen: 17,
+		MaxSubscriptions:           64,
+		MaxLogLenBytes:             uint32(2 * config.KByte),
+	}
+	assert.Equal(t, want, resolveWASMLimits(ctx, a.logger, a.limiterSettings.Snapshot()))
 }
 
 func TestInjectSettings_LimiterSettings(t *testing.T) {
@@ -162,11 +101,7 @@ func TestInjectSettings_LimiterSettings(t *testing.T) {
 	memoryLimit := func(t *testing.T, a *confidentialWorkflowsApp) config.Size {
 		t.Helper()
 		ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
-		moduleLimiters := newWASMModuleLimiters(ctx, a.logger, a.limiterSettings.Snapshot())
-		defer func() { require.NoError(t, moduleLimiters.Close()) }()
-		limit, err := moduleLimiters.memory.Limit(ctx)
-		require.NoError(t, err)
-		return limit
+		return resolveWASMLimits(ctx, a.logger, a.limiterSettings.Snapshot()).Memory
 	}
 
 	t.Run("malformed payload", func(t *testing.T) {
@@ -232,12 +167,8 @@ func TestWASMModuleLimiters_InvalidOrUnreachableOverrideUsesDefault(t *testing.T
 			source := &mutableSettings{}
 			source.SetGetter(getter)
 			ctx := contexts.WithCRE(t.Context(), test.cre)
-			moduleLimiters := newWASMModuleLimiters(ctx, logger.Test(t), source.Snapshot())
-			t.Cleanup(func() { require.NoError(t, moduleLimiters.Close()) })
-
-			got, err := moduleLimiters.memory.Limit(ctx)
-			require.NoError(t, err)
-			assert.Equal(t, test.want, got)
+			resolved := resolveWASMLimits(ctx, logger.Test(t), source.Snapshot())
+			assert.Equal(t, test.want, resolved.Memory)
 		})
 	}
 }
@@ -253,12 +184,8 @@ func TestWASMModuleLimiters_InvalidLogLineLimitUsesDefault(t *testing.T) {
 			source.SetGetter(getter)
 			ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
 
-			moduleLimiters := newWASMModuleLimiters(ctx, logger.Test(t), source.Snapshot())
-			t.Cleanup(func() { require.NoError(t, moduleLimiters.Close()) })
-			cfg := &host.ModuleConfig{}
-			moduleLimiters.apply(cfg)
-
-			assert.Equal(t, uint32(cresettings.Default.PerWorkflow.LogLineLimit.DefaultValue), cfg.MaxLogLenBytes)
+			resolved := resolveWASMLimits(ctx, logger.Test(t), source.Snapshot())
+			assert.Equal(t, uint32(cresettings.Default.PerWorkflow.LogLineLimit.DefaultValue), resolved.MaxLogLenBytes)
 		})
 	}
 }
@@ -284,11 +211,8 @@ func TestWASMModuleLimiters_ScopeResolution(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			lggr, logs := logger.TestObserved(t, zapcore.WarnLevel)
 			ctx := contexts.WithCRE(t.Context(), test.cre)
-			l := newWASMModuleLimiters(ctx, lggr, &limiterSettingsSnapshot{getter: getter})
-			t.Cleanup(func() { require.NoError(t, l.Close()) })
-			got, err := l.memory.Limit(ctx)
-			require.NoError(t, err)
-			assert.Equal(t, test.want, got)
+			resolved := resolveWASMLimits(ctx, lggr, &limiterSettingsSnapshot{getter: getter})
+			assert.Equal(t, test.want, resolved.Memory)
 			assert.Zero(t, logs.Len())
 		})
 	}
@@ -315,27 +239,17 @@ func TestWASMModuleLimiters_Snapshot(t *testing.T) {
 		return getter.GetScoped(ctx, scope, key)
 	}))
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Owner: "owner", Workflow: "workflow"})
-	l := newWASMModuleLimiters(ctx, logger.Test(t), source.Snapshot())
-	t.Cleanup(func() { require.NoError(t, l.Close()) })
-	for range 2 {
-		memory, err := l.memory.Limit(ctx)
-		require.NoError(t, err)
-		assert.Equal(t, 256*config.MByte, memory)
-		pendingCalls, err := l.pendingCalls.Limit(ctx)
-		require.NoError(t, err)
-		assert.Equal(t, 7, pendingCalls)
-		assert.Equal(t, uint32(2*config.KByte), l.maxLogLenBytes)
-	}
+	resolved := resolveWASMLimits(ctx, logger.Test(t), source.Snapshot())
+	assert.Equal(t, 256*config.MByte, resolved.Memory)
+	assert.Equal(t, 7, resolved.PendingCalls)
+	assert.Equal(t, uint32(2*config.KByte), resolved.MaxLogLenBytes)
 	require.Len(t, calls, 12)
 	for key, count := range calls {
 		assert.Equal(t, 1, count, key)
 	}
-	next := newWASMModuleLimiters(ctx, logger.Test(t), source.Snapshot())
-	t.Cleanup(func() { require.NoError(t, next.Close()) })
-	memory, err := next.memory.Limit(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, cresettings.Default.PerWorkflow.WASMMemoryLimit.DefaultValue, memory)
-	assert.Equal(t, uint32(cresettings.Default.PerWorkflow.LogLineLimit.DefaultValue), next.maxLogLenBytes)
+	next := resolveWASMLimits(ctx, logger.Test(t), source.Snapshot())
+	assert.Equal(t, cresettings.Default.PerWorkflow.WASMMemoryLimit.DefaultValue, next.Memory)
+	assert.Equal(t, uint32(cresettings.Default.PerWorkflow.LogLineLimit.DefaultValue), next.MaxLogLenBytes)
 }
 
 func TestWASMModuleLimiters_FallbackLogsBoundedPerInjection(t *testing.T) {
@@ -349,42 +263,12 @@ func TestWASMModuleLimiters_FallbackLogsBoundedPerInjection(t *testing.T) {
 		var wg sync.WaitGroup
 		for range 8 {
 			wg.Go(func() {
-				l := newWASMModuleLimiters(ctx, lggr, source.Snapshot())
-				defer func() { assert.NoError(t, l.Close()) }()
-				memory, err := l.memory.Limit(ctx)
-				assert.NoError(t, err)
-				assert.Equal(t, cresettings.Default.PerWorkflow.WASMMemoryLimit.DefaultValue, memory)
+				resolved := resolveWASMLimits(ctx, lggr, source.Snapshot())
+				assert.Equal(t, cresettings.Default.PerWorkflow.WASMMemoryLimit.DefaultValue, resolved.Memory)
 			})
 		}
 		wg.Wait()
 		assert.Equal(t, generation, logs.Len())
 	}
 	assert.Equal(t, cresettings.Default.PerWorkflow.WASMMemoryLimit.Key, logs.All()[0].ContextMap()["key"])
-}
-
-func TestWASMModuleLimiters_PendingCallsAndClose(t *testing.T) {
-	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Owner: "owner", Workflow: "workflow"})
-	for _, used := range []bool{false, true} {
-		t.Run(fmt.Sprintf("used=%t", used), func(t *testing.T) {
-			l := newWASMModuleLimiters(ctx, logger.Test(t), nil)
-			if used {
-				limit := cresettings.Default.PerWorkflow.CapabilityConcurrencyLimit.DefaultValue
-				require.NoError(t, l.pendingCalls.Use(ctx, limit))
-				err := l.pendingCalls.Use(ctx, 1)
-				require.ErrorContains(t, err, "resource limited for workflow[workflow]")
-				require.NoError(t, l.pendingCalls.Free(ctx, limit))
-				free, err := l.pendingCalls.Wait(ctx, 1)
-				require.NoError(t, err)
-				free()
-			}
-			done := make(chan error, 1)
-			go func() { done <- l.Close() }()
-			select {
-			case err := <-done:
-				require.NoError(t, err)
-			case <-time.After(5 * time.Second):
-				t.Fatal("limiter Close blocked")
-			}
-		})
-	}
 }
