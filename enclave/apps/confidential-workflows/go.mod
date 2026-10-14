@@ -6,7 +6,7 @@ require (
 	github.com/andybalholm/brotli v1.2.2
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20261014150709-d3ec3d0d722b
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
-	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20261013212015-e622e8b83b6b
+	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20261014151355-5868490cb3e3
 	github.com/smartcontractkit/chainlink-protos/storage-service v0.3.0
 	github.com/smartcontractkit/chainlink-protos/workflows/go v0.0.0-20260528173149-f5b8336b19d9
 	github.com/smartcontractkit/cre-sdk-go v1.17.0-capdev.1
