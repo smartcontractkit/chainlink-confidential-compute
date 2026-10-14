@@ -2,6 +2,7 @@ package tests
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/tls"
@@ -65,10 +66,14 @@ import (
 	ttypes "github.com/smartcontractkit/chainlink/system-tests/tests/test-helpers/configuration"
 )
 
+// relativePathToRepoRoot locates the chainlink checkout: CHAINLINK_REPO_ROOT
+// when set (the Makefile's pinned checkout), otherwise the sibling checkout CI
+// uses.
+var relativePathToRepoRoot = cmp.Or(os.Getenv("CHAINLINK_REPO_ROOT"), "../../../chainlink")
+
 const (
-	relativePathToRepoRoot = "../../../chainlink"
-	workflowOwner          = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
-	requestCount           = 6
+	workflowOwner = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+	requestCount  = 6
 	// interRequestDelay is the delay between consecutive requests,
 	// giving key rotation a chance to trigger during the test.
 	interRequestDelay = 5 * time.Second
