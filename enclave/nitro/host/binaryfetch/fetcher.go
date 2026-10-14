@@ -62,7 +62,12 @@ func (f *BinaryFetcher) Fetch(ctx context.Context, cacheKey, locator string, bin
 		// workflow ID) is only valid if it still matches the hash the request
 		// carries, so verify on the hit path too.
 		if err := Verify(cached, binaryHash); err != nil {
-			f.logger.Warnf("cached binary %q failed verification, re-fetching: %v", cacheKey, err)
+			// Drop the bad entry so the refetch below can replace it. Put is a
+			// no-op for a key that already exists, so without this the stale
+			// bytes would survive and every execution would re-download them --
+			// and start failing outright once storage is unavailable.
+			f.logger.Warnf("cached binary %q failed verification, invalidating and re-fetching: %v", cacheKey, err)
+			f.cache.Delete(cacheKey)
 		} else {
 			return cached, nil
 		}
