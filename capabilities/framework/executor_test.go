@@ -65,6 +65,7 @@ type MockEnclaveClient struct {
 	UpdateNodesFunc   func(ctx context.Context, nodes []enclavetypes.Enclave) error
 	UpdateConfigFunc  func(ctx context.Context, update enclavetypes.UpdateConfigRequest) error
 	GetConfigsFunc    func(ctx context.Context) ([]enclavetypes.EnclaveConfig, error)
+	CloseFunc         func() error
 }
 
 func (m *MockEnclaveClient) GetPublicKeys(ctx context.Context, requestID [32]byte, checkRequirements enclavetypes.RequirementsChecker) ([]enclavetypes.EnclavePublicKeyData, error) {
@@ -147,7 +148,12 @@ func (m *MockEnclaveClient) GetConfigs(ctx context.Context) ([]enclavetypes.Encl
 
 func (m *MockEnclaveClient) GetCacheStats() map[string]interface{} { return nil }
 
-func (m *MockEnclaveClient) Close() error { return nil }
+func (m *MockEnclaveClient) Close() error {
+	if m.CloseFunc != nil {
+		return m.CloseFunc()
+	}
+	return nil
+}
 
 type mockKeystore struct {
 	core.UnimplementedKeystore
@@ -1900,6 +1906,22 @@ func TestExecutor_ConcurrentRefreshAndExecute_NoDataRace(t *testing.T) {
 
 	close(start)
 	wg.Wait()
+}
+
+func TestExecutor_CloseClosesEnclaveClient(t *testing.T) {
+	closeCalls := 0
+	mockEnclaveClient := &MockEnclaveClient{CloseFunc: func() error {
+		closeCalls++
+		return nil
+	}}
+	executor := framework.NewTestExecutor(
+		logger.Test(t), getMockKeystore(), mockEnclaveClient, framework.VaultDON{},
+		NewMockMetrics(), getDefaultRateLimiter(),
+		1, 0, "test-capability-id", false, TEST_NODE_ID, getMockCapabilitiesRegistry(t, framework.VaultDON{}),
+	)
+
+	require.NoError(t, executor.Close())
+	assert.Equal(t, 1, closeCalls)
 }
 
 func TestEnsureFreshEnclaves_ConfigurationChange(t *testing.T) {
