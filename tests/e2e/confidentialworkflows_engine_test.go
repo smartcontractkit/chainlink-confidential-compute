@@ -180,6 +180,11 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger, bootCRESet
 	storageAddr, storageSvc := startFakeStorageService(t, enclaveHostAddr())
 	t.Setenv("REQUIRE_BFT_QUORUM", "true")
 	t.Setenv("OUTBOUND_ALLOW_LOCAL_FOR_TESTS", "true")
+	// The HOST fetches the workflow binary from the fake storage service and
+	// hands it to the enclave with each request; the enclave has no fallback.
+	// A temp cache dir enables host-side fetching, and the unrestricted
+	// artifact client (from the flag above) lets it reach the loopback fake.
+	t.Setenv("BINARY_CACHE_DIR", t.TempDir())
 
 	// The whole runtime configuration reaches the enclave as one opaque JSON
 	// payload (ENCLAVE_SETTINGS): the host forwards it verbatim and the enclave
