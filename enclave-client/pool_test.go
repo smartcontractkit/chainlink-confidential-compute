@@ -1600,6 +1600,53 @@ func TestProactiveCacheGracefulShutdown(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// Close must return even when it lands while a periodic refresh is in flight.
+// The loop previously re-read refreshStopCh after Close had set it to nil, so
+// it selected on a nil channel forever and Close blocked in refreshWg.Wait.
+func TestProactiveCacheCloseDuringRefresh(t *testing.T) {
+	t.Parallel()
+	fixture := newTestFixture(t)
+
+	var requests atomic.Int32
+	refreshing := make(chan struct{})
+	var refreshingOnce sync.Once
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The first request is the synchronous warmup; later ones are periodic
+		// refreshes, which block until Close cancels them.
+		if requests.Add(1) > 1 {
+			refreshingOnce.Do(func() { close(refreshing) })
+			<-r.Context().Done()
+			return
+		}
+		resp := fixture.createPublicKeyResponse()
+		assert.NoError(t, json.NewEncoder(w).Encode(&resp))
+	}))
+	defer mockServer.Close()
+
+	pool, err := newTestPoolWithCache(
+		fixture.createNodes(mockServer.URL, 1),
+		&mockAllEnclaveSelector{},
+		nil,
+		proactiveCacheConfig(500*time.Millisecond, 0.1),
+	)
+	require.NoError(t, err)
+
+	select {
+	case <-refreshing:
+	case <-time.After(5 * time.Second):
+		t.Fatal("periodic refresh never started")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- pool.Close() }()
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return while a refresh was in flight")
+	}
+}
+
 func TestSessionPersistence(t *testing.T) {
 	t.Parallel()
 	fixture := newTestFixture(t)
