@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/host/binaryfetch"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -100,5 +104,36 @@ func TestCacheKey(t *testing.T) {
 		assert.Equal(t, hex.EncodeToString([]byte(unsafe)), got)
 		assert.NotContains(t, got, "/")
 		assert.NotContains(t, got, "..")
+	}
+}
+
+// countingRawFetcher stands in for the storage-service fetcher and records how
+// many times the host actually reached for a binary.
+type countingRawFetcher struct {
+	calls  atomic.Int32
+	binary []byte
+	err    error
+}
+
+func (c *countingRawFetcher) FetchBinary(context.Context, string) ([]byte, error) {
+	c.calls.Add(1)
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.binary, nil
+}
+
+func (c *countingRawFetcher) Close() error { return nil }
+
+// testBinaryProvider builds a provider backed by raw, with an in-memory cache,
+// so tests can assert on exactly when storage is touched.
+func testBinaryProvider(t *testing.T, raw binaryfetch.RawFetcher) *binaryProvider {
+	t.Helper()
+	lggr := cllogger.Sugared(cllogger.Nop())
+	return &binaryProvider{
+		fetcher: binaryfetch.NewBinaryFetcherWithStore(lggr, binaryfetch.NewMemoryStore(), 1<<20),
+		raw:     raw,
+		timeout: 5 * time.Second,
+		logger:  lggr,
 	}
 }
