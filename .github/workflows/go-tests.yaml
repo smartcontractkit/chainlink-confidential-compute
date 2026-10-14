@@ -24,7 +24,7 @@ on:
 env:
   CHAINLINK_COMMIT_SHA: bfbfcc3438256dbff184e708cb69f6625f69f1d5
   LEGACY_COMMIT_SHA: c81a7a6bd15999eb3136e7526e8d833d3760755e # release/1.4.8 pin commit; the commit pointing to whatever capability gitref is deployed in Chainlink's plugins.public.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.public.yaml.
-  LEGACY_ENCLAVE_RELEASE: v1.4.3 # The release tag whose enclave app the legacy-enclaves leg checks out and runs locally as a fake enclave: the release of the confidential-http enclave image in confidential-compute-infra deploy/config/enclave/prod.yaml.
+  LEGACY_ENCLAVE_RELEASE: v1.4.3 # The release tag whose enclave app the legacy-enclaves leg checks out and runs locally as a fake enclave: the release of the confidential-http enclave image in confidential-compute-infra deploy/config/enclave/prod.yaml. The nightly legacy-enclave-drift job flags when it changes.
   # Pinned refs for the supporting CRE Docker images, used as GHCR cache keys.
   JD_VERSION: 0.22.1 # job-distributor release (checked out as v${JD_VERSION})
   ATLAS_SHA: da84cb72d3a160e02896247d46ab4b9806ebee2f # chip-ingress + chip-config
@@ -1038,3 +1038,43 @@ jobs:
             fi
           done
           echo "All jobs passed successfully"
+
+  # The legacy-enclaves leg only tests compatibility if it runs the enclave
+  # release production runs.
+  legacy-enclave-drift:
+    name: Check LEGACY_ENCLAVE_RELEASE against production
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup GitHub Token
+        id: setup-github-token
+        uses: smartcontractkit/.github/actions/setup-github-token@ef78fa97bf3c77de6563db1175422703e9e6674f # setup-github-token@0.2.1
+        with:
+          aws-role-arn: ${{ secrets.AWS_OIDC_GLOBAL_READ_ONLY_TOKEN_ISSUER_ROLE_ARN }}
+          aws-lambda-url: ${{ secrets.AWS_INFRA_RELENG_TOKEN_ISSUER_LAMBDA_URL }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          aws-role-duration-seconds: "1800"
+
+      - name: Compare LEGACY_ENCLAVE_RELEASE with production
+        env:
+          GH_TOKEN: ${{ steps.setup-github-token.outputs.access-token }}
+        run: |
+          set -euo pipefail
+          image=$(gh api repos/smartcontractkit/confidential-compute-infra/contents/deploy/config/enclave/prod.yaml --jq .content | base64 -d | yq '.containers.enclave.image.tag')
+          if [[ "$image" != enclave-sha-* ]] || ! git cat-file -e "${image#enclave-sha-}^{commit}" 2>/dev/null; then
+            echo "::error::could not resolve the production enclave image '${image}' to a commit in this repository"
+            exit 1
+          fi
+          enclave=$(git describe --tags --abbrev=0 "${image#enclave-sha-}")
+          echo "production enclave image ${image} is from ${enclave}"
+          if [ "$enclave" != "$LEGACY_ENCLAVE_RELEASE" ]; then
+            echo "::error::LEGACY_ENCLAVE_RELEASE is ${LEGACY_ENCLAVE_RELEASE}, but production runs ${image} from ${enclave}"
+            exit 1
+          fi
