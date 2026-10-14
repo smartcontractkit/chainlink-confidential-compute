@@ -1,8 +1,11 @@
 package binaryfetch
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
@@ -199,4 +202,67 @@ func TestCache_SetMaxCacheBytesEvicts(t *testing.T) {
 	// Non-positive values are ignored.
 	c.SetMaxCacheBytes(0)
 	assert.Equal(t, 10, c.Bytes())
+}
+
+// Concurrent Puts for different keys must not overshoot the bound. Without
+// reserving the incoming bytes before releasing the lock, every writer sees the
+// same free space, evicts to fit, and then publishes -- so the total lands well
+// over maxCacheBytes.
+func TestCache_ConcurrentPutsRespectBound(t *testing.T) {
+	const (
+		writers   = 16
+		valueSize = 10
+		maxBytes  = 50 // fits 5 entries
+	)
+	store := NewMemoryStore()
+	c := NewCache(logger.Test(t), store, maxBytes)
+
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c.Put(fmt.Sprintf("key-%02d", i), bytes.Repeat([]byte("x"), valueSize))
+		}(i)
+	}
+	wg.Wait()
+
+	assert.LessOrEqual(t, c.Bytes(), maxBytes, "cache must never exceed its byte bound")
+
+	// Accounting must also match what the store actually holds.
+	entries, err := store.Entries()
+	require.NoError(t, err)
+	total := 0
+	for _, size := range entries {
+		total += size
+	}
+	assert.Equal(t, total, c.Bytes(), "byte accounting must match the store contents")
+}
+
+// A store write failure must give back the bytes Put reserved, or the cache
+// slowly starves itself.
+func TestCache_FailedPutReleasesReservation(t *testing.T) {
+	store := &failingStore{Store: NewMemoryStore(), fail: true}
+	c := NewCache(logger.Test(t), store, 100)
+
+	c.Put("key-1", []byte("1234567890"))
+	assert.Zero(t, c.Bytes(), "a failed write must not leak reserved bytes")
+
+	// The cache is still usable for its full capacity afterwards.
+	store.fail = false
+	c.Put("key-2", []byte("1234567890"))
+	assert.Equal(t, 10, c.Bytes())
+}
+
+// failingStore makes Put fail on demand.
+type failingStore struct {
+	Store
+	fail bool
+}
+
+func (s *failingStore) Put(key string, value []byte) error {
+	if !s.fail {
+		return s.Store.Put(key, value)
+	}
+	return fmt.Errorf("disk full")
 }
