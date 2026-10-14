@@ -67,7 +67,7 @@ func TestWASMModuleLimiters_Defaults(t *testing.T) {
 	assert.Equal(t, 128, metricName)
 	metricLabels, err := cfg.MaxUserMetricLabelsPerMetricLimiter.Limit(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, 20, metricLabels)
+	assert.Equal(t, defaults.UserMetricLabelsPerMetric.DefaultValue, metricLabels)
 	metricLabelValue, err := cfg.MaxUserMetricLabelValueLengthLimiter.Limit(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 256, metricLabelValue)
