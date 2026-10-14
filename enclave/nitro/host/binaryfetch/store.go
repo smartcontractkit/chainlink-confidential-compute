@@ -110,15 +110,30 @@ func safeKey(key string) error {
 	return nil
 }
 
-func (s *DiskStore) path(key string) string {
-	return filepath.Join(s.dir, key+binaryFileExt)
+// path resolves key to its file inside the cache directory. It re-validates the
+// key and confirms the result is contained in s.dir, so a key that somehow got
+// past safeKey still cannot escape the cache directory. Callers must treat an
+// error as "no such entry" rather than falling back to an unchecked path.
+func (s *DiskStore) path(key string) (string, error) {
+	if err := safeKey(key); err != nil {
+		return "", err
+	}
+	// safeKey restricts keys to [A-Za-z0-9_-], so Join cannot climb out of
+	// s.dir; the containment check below makes that guarantee explicit rather
+	// than implied by the character set.
+	resolved := filepath.Clean(filepath.Join(s.dir, key+binaryFileExt))
+	if filepath.Dir(resolved) != filepath.Clean(s.dir) {
+		return "", fmt.Errorf("cache key %q escapes the cache directory", key)
+	}
+	return resolved, nil
 }
 
 func (s *DiskStore) Get(key string) ([]byte, bool) {
-	if err := safeKey(key); err != nil {
+	path, err := s.path(key)
+	if err != nil {
 		return nil, false
 	}
-	b, err := os.ReadFile(s.path(key))
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false
 	}
@@ -128,7 +143,8 @@ func (s *DiskStore) Get(key string) ([]byte, bool) {
 // Put writes the binary via a temp file and renames it into place, so a crash
 // or a concurrent reader never observes a partially written binary.
 func (s *DiskStore) Put(key string, value []byte) error {
-	if err := safeKey(key); err != nil {
+	path, err := s.path(key)
+	if err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(s.dir, key+".tmp-*")
@@ -145,17 +161,18 @@ func (s *DiskStore) Put(key string, value []byte) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("closing temp file: %w", err)
 	}
-	if err := os.Rename(tmpName, s.path(key)); err != nil {
+	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("renaming into cache: %w", err)
 	}
 	return nil
 }
 
 func (s *DiskStore) Delete(key string) {
-	if err := safeKey(key); err != nil {
+	path, err := s.path(key)
+	if err != nil {
 		return
 	}
-	_ = os.Remove(s.path(key))
+	_ = os.Remove(path)
 }
 
 // Entries lists the cache files left behind by a previous process, letting the

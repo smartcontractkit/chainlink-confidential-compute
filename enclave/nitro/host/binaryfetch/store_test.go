@@ -266,3 +266,28 @@ func (s *failingStore) Put(key string, value []byte) error {
 	}
 	return fmt.Errorf("disk full")
 }
+
+// Keys that could escape the cache directory must be refused at path
+// resolution, independent of the character allowlist in safeKey.
+func TestDiskStore_PathContainsKeysToCacheDir(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewDiskStore(dir)
+	require.NoError(t, err)
+
+	for _, key := range []string{
+		"../escape",
+		"../../etc/passwd",
+		"sub/dir",
+		"..",
+		".",
+		"with\x00null",
+	} {
+		_, err := s.path(key)
+		assert.Error(t, err, "key %q must not resolve to a path", key)
+	}
+
+	// A legitimate key resolves inside the directory.
+	resolved, err := s.path("abc123")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(dir, "abc123"+binaryFileExt), resolved)
+}
