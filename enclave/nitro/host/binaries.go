@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -27,20 +28,44 @@ var (
 	binaryCacheMaxBytes = flag.Int("binary-cache-max-bytes", util.EnvInt("BINARY_CACHE_MAX_BYTES", types.DefaultMaxBinaryCacheBytes), "Max total size of the on-disk workflow binary cache. Reads BINARY_CACHE_MAX_BYTES.")
 )
 
-// newBinaryProvider builds the binary provider from the binary-cache flags
-// and the settings payload. It returns nil (logging why) when host-side
-// fetching is disabled or could not be set up, leaving the enclave to fetch
-// binaries itself, so failure here is never fatal.
-func newBinaryProvider(settings string, lggr cllogger.SugaredLogger) *binaryProvider {
-	if *binaryCacheDir == "" {
-		return nil
-	}
-	provider, err := newBinaryProviderWithCache(settings, *binaryCacheDir, *binaryCacheMaxBytes, lggr)
+// newBinaryProvider builds the binary provider from the binary-cache flags and
+// the settings payload.
+//
+// It returns a nil provider (with no error) only when the settings carry no
+// storage credentials, which means the app does not execute workflow binaries.
+// Settings that DO carry them with no cache directory configured is a
+// deployment mistake, not a degraded mode: the enclave cannot fetch for itself,
+// so every execution would fail. That returns an error and the host refuses to
+// start, which surfaces the missing config immediately instead of as a steady
+// stream of failed workflows.
+func newBinaryProvider(settings string, lggr cllogger.SugaredLogger) (*binaryProvider, error) {
+	parsed, ok, err := parseHostStorageSettings(settings)
 	if err != nil {
-		lggr.Errorw("host binary fetching disabled, enclave will fetch its own", "error", err)
-		return nil
+		return nil, err
 	}
-	return provider
+	if !ok {
+		return nil, nil
+	}
+	if *binaryCacheDir == "" {
+		return nil, errors.New("settings carry storage credentials but no binary cache directory is configured; set BINARY_CACHE_DIR")
+	}
+	return newBinaryProviderWithCache(parsed, *binaryCacheDir, *binaryCacheMaxBytes, lggr)
+}
+
+// parseHostStorageSettings extracts the storage fields the host needs. ok is
+// false when the payload carries no storage credentials at all.
+func parseHostStorageSettings(settings string) (hostStorageSettings, bool, error) {
+	var parsed hostStorageSettings
+	if strings.TrimSpace(settings) == "" {
+		return parsed, false, nil
+	}
+	if err := json.Unmarshal([]byte(settings), &parsed); err != nil {
+		return parsed, false, fmt.Errorf("parsing settings for binary fetching: %w", err)
+	}
+	if parsed.StorageKey == "" || parsed.StorageServiceURL == "" {
+		return parsed, false, nil
+	}
+	return parsed, true, nil
 }
 
 // binaryProvider fetches workflow binaries on the enclave's behalf and caches
@@ -67,23 +92,9 @@ type hostStorageSettings struct {
 	BinaryFetchTimeout string `json:"binaryFetchTimeout"`
 }
 
-// newBinaryProviderWithCache builds a provider from the settings payload and an
-// explicit cache location. It returns a nil provider (with no error) when the
-// settings carry no storage credentials, which is the case for apps that do
-// not execute workflow binaries.
-func newBinaryProviderWithCache(settings string, cacheDir string, maxCacheBytes int, lggr cllogger.SugaredLogger) (*binaryProvider, error) {
-	if strings.TrimSpace(settings) == "" {
-		return nil, nil
-	}
-
-	var parsed hostStorageSettings
-	if err := json.Unmarshal([]byte(settings), &parsed); err != nil {
-		return nil, fmt.Errorf("parsing settings for binary fetching: %w", err)
-	}
-	if parsed.StorageKey == "" || parsed.StorageServiceURL == "" {
-		return nil, nil
-	}
-
+// newBinaryProviderWithCache builds a provider for parsed storage settings,
+// caching into cacheDir.
+func newBinaryProviderWithCache(parsed hostStorageSettings, cacheDir string, maxCacheBytes int, lggr cllogger.SugaredLogger) (*binaryProvider, error) {
 	timeout := types.DefaultBinaryFetchTimeout
 	if parsed.BinaryFetchTimeout != "" {
 		d, err := time.ParseDuration(parsed.BinaryFetchTimeout)
@@ -134,10 +145,10 @@ func newBinaryProviderWithCache(settings string, cacheDir string, maxCacheBytes 
 	}, nil
 }
 
-// binaryFor returns the workflow binary for a decoded execution. An incomplete
-// payload yields (nil, nil): the enclave validates the payload and reports the
-// real error. A fetch failure yields the error, which fails the request rather
-// than degrading to the enclave's own fetch against the same storage service.
+// binaryFor returns the workflow binary for a decoded execution. Every failure
+// is an error: the enclave has no fetch path of its own, so a request that
+// reaches here without a usable binary cannot execute, and reporting why at the
+// host beats a bare "no binary supplied" from inside the enclave.
 //
 // The cache is keyed by workflow ID: a workflow ID commits to its binary
 // (GenerateWorkflowID hashes the binary), so the mapping is stable. The enclave
@@ -145,10 +156,23 @@ func newBinaryProviderWithCache(settings string, cacheDir string, maxCacheBytes 
 // cache entry fails closed rather than executing.
 func (p *binaryProvider) binaryFor(ctx context.Context, execution *confworkflowtypes.WorkflowExecution) ([]byte, error) {
 	if p == nil {
+		// Startup already rejected settings that need fetching without a cache
+		// directory, so a nil provider here means the deployment carries no
+		// storage credentials at all and runs no workflow binaries.
 		return nil, nil
 	}
-	if execution.GetWorkflowId() == "" || execution.GetBinaryUrl() == "" || len(execution.GetBinaryHash()) == 0 {
-		return nil, nil
+	var missing []string
+	if execution.GetWorkflowId() == "" {
+		missing = append(missing, "workflow_id")
+	}
+	if execution.GetBinaryUrl() == "" {
+		missing = append(missing, "binary_url")
+	}
+	if len(execution.GetBinaryHash()) == 0 {
+		missing = append(missing, "binary_hash")
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("workflow execution is missing %s", strings.Join(missing, ", "))
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)

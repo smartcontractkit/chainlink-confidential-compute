@@ -16,8 +16,11 @@ import (
 
 const testStorageKeyHex = "0000000000000000000000000000000000000000000000000000000000000001"
 
-func TestNewBinaryProvider_DisabledWithoutStorageSettings(t *testing.T) {
+// Settings without storage credentials mean the deployment runs no workflow
+// binaries: no provider, and no error.
+func TestNewBinaryProvider_NilWithoutStorageSettings(t *testing.T) {
 	lggr := cllogger.Sugared(cllogger.Nop())
+	t.Cleanup(withBinaryCacheDir(t.TempDir()))
 	for name, settings := range map[string]string{
 		"empty":           "",
 		"whitespace":      "   ",
@@ -27,22 +30,36 @@ func TestNewBinaryProvider_DisabledWithoutStorageSettings(t *testing.T) {
 		"empty json body": `{}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			p, err := newBinaryProviderWithCache(settings, t.TempDir(), 1024, lggr)
+			p, err := newBinaryProvider(settings, lggr)
 			require.NoError(t, err, "missing storage settings should disable fetching, not error")
 			assert.Nil(t, p)
 		})
 	}
 }
 
+// Storage credentials with no cache directory is a deployment mistake: the
+// enclave cannot fetch for itself, so the host must refuse to start rather than
+// fail every execution at runtime.
+func TestNewBinaryProvider_ErrorsWhenCacheDirMissing(t *testing.T) {
+	t.Cleanup(withBinaryCacheDir(""))
+	_, err := newBinaryProvider(
+		`{"storageKey":"`+testStorageKeyHex+`","storageServiceUrl":"storage.invalid:443"}`,
+		cllogger.Sugared(cllogger.Nop()),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "BINARY_CACHE_DIR")
+}
+
 func TestNewBinaryProvider_RejectsMalformedSettings(t *testing.T) {
 	lggr := cllogger.Sugared(cllogger.Nop())
+	t.Cleanup(withBinaryCacheDir(t.TempDir()))
 
-	_, err := newBinaryProviderWithCache("not json", t.TempDir(), 1024, lggr)
+	_, err := newBinaryProvider("not json", lggr)
 	require.Error(t, err)
 
-	_, err = newBinaryProviderWithCache(
+	_, err = newBinaryProvider(
 		`{"storageKey":"`+testStorageKeyHex+`","storageServiceUrl":"storage:443","binaryFetchTimeout":"nope"}`,
-		t.TempDir(), 1024, lggr,
+		lggr,
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "binaryFetchTimeout")
@@ -50,9 +67,10 @@ func TestNewBinaryProvider_RejectsMalformedSettings(t *testing.T) {
 
 func TestNewBinaryProvider_Enabled(t *testing.T) {
 	lggr := cllogger.Sugared(cllogger.Nop())
-	p, err := newBinaryProviderWithCache(
+	t.Cleanup(withBinaryCacheDir(t.TempDir()))
+	p, err := newBinaryProvider(
 		`{"storageKey":"`+testStorageKeyHex+`","storageServiceUrl":"storage.invalid:443","binaryFetchTimeout":"30s"}`,
-		t.TempDir(), 1024, lggr,
+		lggr,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, p)
@@ -60,7 +78,15 @@ func TestNewBinaryProvider_Enabled(t *testing.T) {
 	assert.Equal(t, 30*1e9, float64(p.timeout))
 }
 
-// A nil provider is the disabled case and must stay safe to call.
+// withBinaryCacheDir points the flag at dir and returns a cleanup that restores it.
+func withBinaryCacheDir(dir string) func() {
+	previous := *binaryCacheDir
+	*binaryCacheDir = dir
+	return func() { *binaryCacheDir = previous }
+}
+
+// A nil provider is the no-storage-credentials case, which startup already
+// vetted. It must stay safe to call rather than panicking.
 func TestBinaryProvider_NilIsSafe(t *testing.T) {
 	var p *binaryProvider
 	binary, err := p.binaryFor(t.Context(), nil)
@@ -69,26 +95,31 @@ func TestBinaryProvider_NilIsSafe(t *testing.T) {
 	assert.NoError(t, p.Close())
 }
 
-// Incomplete executions degrade to no binary rather than erroring: the
-// enclave validates the payload and reports the real error.
-func TestBinaryProvider_SkipsIncompleteExecutions(t *testing.T) {
+// An execution missing the fields needed to fetch is an error naming them,
+// rather than a silent "no binary" the enclave has to rediscover.
+func TestBinaryProvider_IncompleteExecutionErrors(t *testing.T) {
 	lggr := cllogger.Sugared(cllogger.Nop())
-	p, err := newBinaryProviderWithCache(
+	t.Cleanup(withBinaryCacheDir(t.TempDir()))
+	p, err := newBinaryProvider(
 		`{"storageKey":"`+testStorageKeyHex+`","storageServiceUrl":"storage.invalid:443"}`,
-		t.TempDir(), 1024, lggr,
+		lggr,
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, p.Close()) })
 
-	for name, execution := range map[string]*confworkflowtypes.WorkflowExecution{
-		"no workflow id": {BinaryUrl: "storage://b", BinaryHash: []byte{1}},
-		"no binary url":  {WorkflowId: "wf", BinaryHash: []byte{1}},
-		"no hash":        {WorkflowId: "wf", BinaryUrl: "storage://b"},
+	for name, tt := range map[string]struct {
+		execution *confworkflowtypes.WorkflowExecution
+		want      string
+	}{
+		"no workflow id": {&confworkflowtypes.WorkflowExecution{BinaryUrl: "storage://b", BinaryHash: []byte{1}}, "workflow_id"},
+		"no binary url":  {&confworkflowtypes.WorkflowExecution{WorkflowId: "wf", BinaryHash: []byte{1}}, "binary_url"},
+		"no hash":        {&confworkflowtypes.WorkflowExecution{WorkflowId: "wf", BinaryUrl: "storage://b"}, "binary_hash"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			binary, err := p.binaryFor(t.Context(), execution)
+			binary, err := p.binaryFor(t.Context(), tt.execution)
 			assert.Nil(t, binary)
-			assert.NoError(t, err)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want, "the error must name the missing field")
 		})
 	}
 }
