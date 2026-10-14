@@ -357,7 +357,7 @@ type RealExecutor struct {
 	capabilityRegistry core.CapabilitiesRegistry
 	nodeID             string
 	proposalInFlight   atomic.Bool
-	donMu              sync.RWMutex
+	donMu              sync.RWMutex // also guards nodeID, enclaves and vaultDON.CryptographyThreshold, rewritten by the background refresh
 	donMembers         [][]byte
 	donF               uint32
 	enclaves           []types.Enclave
@@ -1009,14 +1009,18 @@ func (e *RealExecutor) EnsureFreshEnclaves(ctx context.Context) error {
 			"endpoint": "publicKeys",
 		})
 	} else {
+		e.donMu.Lock()
 		e.enclaves = nodes
+		e.donMu.Unlock()
 	}
 
 	vaultDONPossibleFaultyNodes, err := getVaultDONPossibleFaultyNodes(ctx, e.vaultDON.Capability, int(localNode.WorkflowDON.F))
 	if err != nil {
 		return fmt.Errorf("failed to get VaultDON possible faulty nodes: %w", err)
 	}
+	e.donMu.Lock()
 	e.vaultDON.CryptographyThreshold = getVaultDONThreshold(vaultDONPossibleFaultyNodes)
+	e.donMu.Unlock()
 
 	newMembers := peerIDsToSortedBytes(localNode.WorkflowDON.Members)
 	newF := uint32(localNode.WorkflowDON.F)
@@ -1130,6 +1134,8 @@ func (e *RealExecutor) broadcastConfigUpdate(ctx context.Context, newMembers [][
 }
 
 func (e *RealExecutor) GetEnclaves() []types.Enclave {
+	e.donMu.RLock()
+	defer e.donMu.RUnlock()
 	return e.enclaves
 }
 
@@ -1148,7 +1154,9 @@ func (e *RealExecutor) getLocalNodeAndCapConfig(ctx context.Context) (capabiliti
 		return capabilities.Node{}, capabilities.CapabilityConfiguration{}, fmt.Errorf("local node does not have a WorkflowDON ID, cannot initialise confidential http action capability")
 	}
 	if localNode.PeerID != nil {
+		e.donMu.Lock()
 		e.nodeID = localNode.PeerID.String()
+		e.donMu.Unlock()
 	}
 
 	ownCapabilityConfig, err := e.capabilityRegistry.ConfigForCapability(ctx, e.capabilityID, localNode.WorkflowDON.ID)
@@ -1568,7 +1576,9 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 		} else {
 			return nil, nil, nil, fmt.Errorf("no decryption shares found for secret %s: neither binary nor hex-encoded shares present", secretResp.GetId().GetKey())
 		}
+		e.donMu.RLock()
 		minimumSharesRequired := e.vaultDON.CryptographyThreshold
+		e.donMu.RUnlock()
 		if len(encryptedDecryptionSharesForSecret) < minimumSharesRequired {
 			return nil, nil, nil, fmt.Errorf("not enough encrypted decryption key shares for secret %s, expected at least %d, got %d", secretResp.GetId().GetKey(), minimumSharesRequired, len(encryptedDecryptionSharesForSecret))
 		}
