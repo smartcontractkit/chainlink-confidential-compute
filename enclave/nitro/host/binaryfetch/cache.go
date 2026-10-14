@@ -85,19 +85,29 @@ func (c *Cache) Get(key string) ([]byte, bool) {
 
 // Put stores value under key, evicting least-recently-used entries to stay
 // within the byte bound. A value larger than the whole bound is not cached.
+//
+// The store write happens outside the lock so slow disk I/O doesn't block other
+// cache users, so the incoming bytes are *reserved* in cacheBytes before
+// unlocking. Without that reservation two concurrent Puts for different keys
+// would both see the same free space, both evict to fit, and both publish --
+// leaving the cache over its bound.
 func (c *Cache) Put(key string, value []byte) {
+	c.mu.Lock()
 	if len(value) > c.maxCacheBytes {
-		c.logger.Warnf("binary (%d bytes) exceeds cache bound (%d bytes), not caching", len(value), c.maxCacheBytes)
+		maxCacheBytes := c.maxCacheBytes
+		c.mu.Unlock()
+		c.logger.Warnf("binary (%d bytes) exceeds cache bound (%d bytes), not caching", len(value), maxCacheBytes)
 		return
 	}
-
-	c.mu.Lock()
 	if el, ok := c.items[key]; ok {
 		c.evictList.MoveToFront(el)
 		c.mu.Unlock()
 		return
 	}
 	evicted := c.evictToFitLocked(len(value))
+	// Reserve the space now. The entry has no list element yet, so these bytes
+	// are counted but cannot themselves be evicted until it is published.
+	c.cacheBytes += len(value)
 	c.mu.Unlock()
 
 	for _, key := range evicted {
@@ -106,7 +116,9 @@ func (c *Cache) Put(key string, value []byte) {
 
 	if err := c.store.Put(key, value); err != nil {
 		// A cache write failure is not fatal: the caller already holds the
-		// bytes, so log and continue uncached rather than failing the request.
+		// bytes, so release the reservation, log and continue uncached rather
+		// than failing the request.
+		c.releaseReservation(len(value))
 		c.logger.Warnf("caching binary %q: %v", key, err)
 		return
 	}
@@ -114,11 +126,23 @@ func (c *Cache) Put(key string, value []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ok := c.items[key]; ok {
+		// Another goroutine published the same key while we were writing; its
+		// entry already accounts for the bytes, so drop our reservation.
+		c.cacheBytes -= len(value)
 		return
 	}
+	// Publish against the reservation taken above: the bytes are already in
+	// cacheBytes, so only the index entry is added here.
 	el := c.evictList.PushFront(&cacheEntry{key: key, size: len(value)})
 	c.items[key] = el
-	c.cacheBytes += len(value)
+}
+
+// releaseReservation gives back bytes reserved by Put when the entry is never
+// published.
+func (c *Cache) releaseReservation(size int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cacheBytes -= size
 }
 
 // SetMaxCacheBytes updates the cache size bound, evicting least-recently-used
