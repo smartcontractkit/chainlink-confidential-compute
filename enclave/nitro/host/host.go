@@ -99,10 +99,6 @@ type batchRequest struct {
 	processingRequest bool            // true when quorum reached and batch is being processed
 	doneCh            chan struct{}   // closed when batch processing completes (success or failure)
 	doneOnce          sync.Once       // ensures doneCh is closed exactly once
-	// binary is the workflow binary the publicDataPrehook fetched for this
-	// batch, sent to the enclave as unauthenticatedData. All requests in a
-	// batch are identical, so the first request's fetch serves the batch.
-	binary []byte
 }
 
 // signers returns the hex-encoded sender public keys that contributed to the
@@ -487,15 +483,6 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		"ephemeralPK", ephemeralPKHex,
 		"bodyLen", len(body),
 		"arrivalTime", arrivalTime.Format(time.RFC3339Nano))
-	metadata, binary, err := h.publicDataPrehook(reqLog, execReq.AppID, execReq.PublicData)
-	if err != nil {
-		reqLog.Errorw("rejecting request: prehook failed",
-			"event", "REJECT",
-			"reason", "prehook_failed",
-			"error", err)
-		http.Error(w, fmt.Sprintf("error processing request: %v", err), http.StatusBadGateway)
-		return
-	}
 
 	// Log hash input components for debugging hash divergence
 	reqLog.Debugw("hash inputs",
@@ -593,7 +580,6 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 			signersSeen: make(map[string]bool),
 			createdAt:   time.Now(),
 			doneCh:      make(chan struct{}),
-			binary:      binary,
 		}
 
 		// Start a timeout goroutine for this batch
@@ -647,6 +633,18 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		h.processRequestMutex.Unlock()
 
 		if shouldProcess {
+			metadata, binary, err := h.publicDataPrehook(reqLog, execReq.AppID, execReq.PublicData)
+			if err != nil {
+				reqLog.Errorw("rejecting batch: prehook failed",
+					"event", "REJECT",
+					"reason", "prehook_failed",
+					"signers", signers,
+					"error", err)
+				h.completeBatch(requestHash, nil, err)
+				http.Error(w, fmt.Sprintf("error processing request: %v", err), http.StatusBadGateway)
+				return
+			}
+
 			quorumWait := time.Since(br.createdAt)
 			finishExecution := h.metrics.startExecution(metadata, quorumWait)
 			reqLog.Infow("quorum reached, dispatching to enclave",
@@ -655,7 +653,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 				"signatureCount", len(requests))
 			go func() {
 				enclaveStart := time.Now()
-				resp, failureReason, err := h.processBatch(requests, br.binary)
+				resp, failureReason, err := h.processBatch(requests, binary)
 				enclaveDuration := time.Since(enclaveStart)
 				outcome := executionOutcomeSuccess
 				if err != nil {
