@@ -1028,9 +1028,13 @@ func main() {
 
 	// Fetch workflow binaries here rather than inside the enclave, caching them
 	// on a node-local volume so they survive a container restart and don't have
-	// to sit in the enclave's fixed memory. Failing to set this up is not fatal:
-	// the enclave keeps its own fetch path.
-	host.binaries = newBinaryProvider(*settingsJSON, lggr)
+	// to sit in the enclave's fixed memory. The enclave has no fetch path of its
+	// own, so a misconfiguration here fails startup rather than every execution.
+	binaries, err := newBinaryProvider(*settingsJSON, lggr)
+	if err != nil {
+		log.Fatalf("binary fetching misconfigured: %v", err)
+	}
+	host.binaries = binaries
 	defer func() {
 		if cerr := host.binaries.Close(); cerr != nil {
 			lggr.Warnw("closing binary provider", "error", cerr)
