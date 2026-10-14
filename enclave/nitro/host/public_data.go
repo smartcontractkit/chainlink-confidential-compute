@@ -42,6 +42,8 @@ func (h *hostServer) publicDataPrehook(reqLog cllogger.SugaredLogger, appID stri
 	case types.AppIDConfidentialWorkflows:
 		execution, err := decodeWorkflowPublicData(publicData)
 		if err != nil {
+			// Not fatal here: the enclave decodes the same bytes and reports
+			// the payload error with full context.
 			logPublicDataDecodeError(reqLog, appID, len(publicData), err)
 			return executionMetadata{appID: appID}, nil, nil
 		}
