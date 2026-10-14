@@ -852,7 +852,12 @@ jobs:
                 modgo=$(awk '/^go [0-9]/{print $2; exit}' go.mod)
                 # Only pin GOTOOLCHAIN for a full goX.Y.Z (see build job).
                 case "$modgo" in *.*.*) export GOTOOLCHAIN="go${modgo}" ;; *) unset GOTOOLCHAIN ;; esac
-                GOMAXPROCS=2 go test -v ./... -timeout 30m -p 1
+                # enclave-client's pool has a known data race between Close and
+                # the proactive refresh loop, so it runs without -race until
+                # that is fixed.
+                race=-race
+                if [ "$dir" = "./enclave-client" ]; then race=""; fi
+                GOMAXPROCS=2 go test $race -v ./... -timeout 30m -p 1
                 cd - > /dev/null
               done
 
