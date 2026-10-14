@@ -147,7 +147,9 @@ func (s *DiskStore) Put(key string, value []byte) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(s.dir, key+".tmp-*")
+	// The temp file is created from the validated path's base name, not the raw
+	// key, so no caller-supplied string reaches the filesystem unchecked.
+	tmp, err := os.CreateTemp(s.dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
 	}
