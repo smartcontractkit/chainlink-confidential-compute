@@ -17,6 +17,7 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/settings"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/host"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/wasmruntime"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
@@ -41,7 +42,8 @@ type confidentialWorkflowsApp struct {
 	// limiter bounds concurrent executions so a burst can't exhaust the fixed
 	// enclave memory and wedge the VM. Unbounded unless WithMaxConcurrentExecutions
 	// is set (the nitro entrypoint derives a limit from enclave memory).
-	limiter *executionLimiter
+	limiter      *executionLimiter
+	compileQueue *wasmruntime.Queue
 
 	// executionTimeout bounds a single WASM run (nanoseconds; 0 = the WASM
 	// host's own default). Injected via InjectSettings, read on every Execute,
@@ -288,6 +290,7 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 		httpFetcher:       config.HTTPFetcher,
 		tpe:               tpe,
 		limiter:           newExecutionLimiter(config.MaxConcurrentExecutions),
+		compileQueue:      wasmruntime.NewQueue(),
 		limiterSettings:   &mutableSettings{},
 		storageFactory:    config.StorageFetcherFactory,
 		dispatcherFactory: config.RemoteDispatcherFactory,
@@ -305,6 +308,7 @@ func NewTestConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, opts
 		httpFetcher:     httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
 		tpe:             tpe,
 		limiter:         newExecutionLimiter(0),
+		compileQueue:    wasmruntime.NewQueue(),
 		limiterSettings: &mutableSettings{},
 		storageFactory: storageFetcherFactory(func() types.HTTPClient {
 			return util.NewRestrictedHTTPClient()
@@ -432,22 +436,14 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		Owner:    execution.GetOwner(),
 		Workflow: execution.WorkflowId,
 	})
-	// Both bounds come from the same setting: the ctx deadline unblocks host-side
-	// capability and secrets calls, while the module timeout is what actually
-	// interrupts the guest.
 	execTimeout := time.Duration(a.executionTimeout.Load())
-	if execTimeout > 0 {
-		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(execCtx, execTimeout)
-		defer cancel()
-	}
 	executionLogger := logger.With(a.logger, append(contexts.CREValue(execCtx).LoggerKVs(), "execution_id", execution.GetExecutionId())...)
 	if execution.GetOrgId() == "" {
 		executionLogger.Warnw("Workflow execution is missing org ID")
 	}
 	snapshot := a.limiterSettings.Snapshot()
 	helper.httpLimits = newHTTPActionLimits(execCtx, executionLogger, snapshot)
-	result, err := executeWasm(execCtx, executionLogger, snapshot, binary, execution.SdkExecuteRequest, true, restrictedHelper, execTimeout)
+	result, err := executeWasm(execCtx, executionLogger, a.compileQueue, snapshot, binary, execution.SdkExecuteRequest, true, restrictedHelper, execTimeout)
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to
