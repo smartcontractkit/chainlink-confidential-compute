@@ -15,6 +15,7 @@ import (
 	"github.com/smartcontractkit/cre-sdk-go/internal_testing/capabilities/basictrigger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/semaphore"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -63,7 +64,18 @@ func TestExecuteWasm_Hello(t *testing.T) {
 // timeout (wasmtime epoch deadline) is the only thing that can stop it. The
 // WASM host reports that as context.DeadlineExceeded.
 func TestExecuteWasm_Timeout(t *testing.T) {
-	binary := buildTestWasm(t, "spin")
+	// Avoid spending the timeout on compiling the Go runtime.
+	// (module (memory (export "memory") 1) (func (export "_start") (loop (br 0))))
+	binary := []byte{
+		0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+		0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+		0x03, 0x02, 0x01, 0x00,
+		0x05, 0x03, 0x01, 0x00, 0x01,
+		0x07, 0x13, 0x02,
+		0x06, 'm', 'e', 'm', 'o', 'r', 'y', 0x02, 0x00,
+		0x06, '_', 's', 't', 'a', 'r', 't', 0x00, 0x00,
+		0x0a, 0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
+	}
 
 	payload, err := anypb.New(&basictrigger.Outputs{CoolOutput: "cool"})
 	require.NoError(t, err)
@@ -77,6 +89,7 @@ func TestExecuteWasm_Timeout(t *testing.T) {
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
 	result, err := executeWasm(ctx, logger.Test(t), semaphore.NewWeighted(1), nil, binary, execReq, false, &enclaveExecutionHelper{}, time.Second)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorContains(t, err, "executing wasm", "the guest must start before the deadline")
 	require.Nil(t, result)
 	assert.Less(t, time.Since(start), 30*time.Second, "the epoch deadline should interrupt the guest promptly")
 }
@@ -137,7 +150,44 @@ func TestExecuteWasm_CompilationQueue(t *testing.T) {
 	slot.Release(1)
 	releaseGuest()
 	require.NoError(t, <-done)
-	_, err = executeWasm(ctx, logger.Test(t), slot, nil, []byte("invalid wasm"), req, false, &enclaveExecutionHelper{}, 0)
-	require.Error(t, err)
+}
+
+func TestExecuteWasm_CompilationFailureReleasesQueue(t *testing.T) {
+	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
+	slot := semaphore.NewWeighted(1)
+	result, err := executeWasm(ctx, logger.Test(t), slot, nil, []byte("invalid wasm"), nil, false, nil, 0)
+	require.ErrorContains(t, err, "creating wasm module")
+	require.Nil(t, result)
 	require.True(t, slot.TryAcquire(1), "failed compilation must release the slot")
+}
+
+func TestExecuteWasm_CompilationDeadline(t *testing.T) {
+	binary := buildTestWasm(t, "hello")
+	payload, err := anypb.New(&basictrigger.Outputs{CoolOutput: "cool"})
+	require.NoError(t, err)
+	req := &sdkpb.ExecuteRequest{Request: &sdkpb.ExecuteRequest_Trigger{
+		Trigger: &sdkpb.Trigger{Id: 0, Payload: payload},
+	}}
+	for _, test := range []struct {
+		name    string
+		binary  []byte
+		wantLog string
+	}{
+		{"successful compilation", binary, context.DeadlineExceeded.Error()},
+		{"failed compilation", []byte("invalid wasm"), "error creating wasmtime module"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
+			slot := semaphore.NewWeighted(1)
+			lggr, logs := logger.TestObserved(t, zapcore.InfoLevel)
+			result, err := executeWasm(ctx, lggr, slot, nil, test.binary, req, false, &enclaveExecutionHelper{}, time.Nanosecond)
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+			require.ErrorContains(t, err, "creating wasm module", "expired compilation must not start the guest")
+			require.Nil(t, result)
+			completed := logs.FilterMessage("workflow compilation completed").All()
+			require.Len(t, completed, 1)
+			assert.Contains(t, completed[0].ContextMap()["error"], test.wantLog)
+			require.True(t, slot.TryAcquire(1), "expired compilation must release the slot")
+		})
+	}
 }

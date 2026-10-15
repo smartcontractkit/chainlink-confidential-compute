@@ -42,7 +42,11 @@ type confidentialWorkflowsApp struct {
 	// limiter bounds concurrent executions so a burst can't exhaust the fixed
 	// enclave memory and wedge the VM. Unbounded unless WithMaxConcurrentExecutions
 	// is set (the nitro entrypoint derives a limit from enclave memory).
-	limiter     *executionLimiter
+	limiter *executionLimiter
+
+	// compileSlot lets one admitted execution compile at a time, bounding peak
+	// compilation memory while guests run concurrently. Waiting executions keep
+	// their limiter slot; the wait doesn't count against executionTimeout.
 	compileSlot *semaphore.Weighted
 
 	// executionTimeout bounds a single WASM run (nanoseconds; 0 = the WASM
