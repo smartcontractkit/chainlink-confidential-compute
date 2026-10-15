@@ -40,7 +40,7 @@ func TestExecuteWasm_CompilationQueueOverlappingGuests(t *testing.T) {
 		// The WASM host writes to the request, so each guest needs its own.
 		req := makeExecution(t, "workflow", "unused", nil).SdkExecuteRequest
 		wg.Go(func() {
-			_, err := executeWasm(ctx, logger.Test(t), slot, nil, binary, req, false, helper, time.Minute)
+			_, err := executeWasm(ctx, logger.Test(t), emitter.NewNoOpEmitter(), slot, nil, binary, req, false, helper, time.Minute)
 			done <- err
 		})
 	}

@@ -166,6 +166,14 @@ confidential-compute/
 | `http_batch_started` | 79-81 | `num_requests` |
 | `http_batch_completed` | 163-166 | `num_requests`, `duration_seconds` |
 
+**File:** `enclave/apps/confidential-workflows/app/wasm.go`
+
+| Event Name | Line | Details Captured |
+|------------|------|------------------|
+| `workflow_compilation_queue_wait` | 63-65 | `duration_seconds` |
+| `workflow_compilation` | 74-77 | `success`, `duration_seconds` |
+| `workflow_guest_execution` | 101-104 | `success` (false only when the runtime fails, e.g. a timeout; a workflow error result still counts as success), `duration_seconds` |
+
 ---
 
 ## Grafana Dashboard Status

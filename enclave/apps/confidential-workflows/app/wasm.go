@@ -8,6 +8,7 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"golang.org/x/sync/semaphore"
 )
@@ -29,7 +30,10 @@ import (
 // timeout starts once this execution acquires it, so waiting doesn't consume
 // the timeout, and a compilation that outlives it fails without starting the
 // guest.
-func executeWasm(ctx context.Context, lggr logger.Logger, compileSlot *semaphore.Weighted, limiterSettings *limiterSettingsSnapshot, binary []byte, execReq *sdkpb.ExecuteRequest, isCompressed bool, helper host.ExecutionHelper, timeout time.Duration) (*sdkpb.ExecutionResult, error) {
+//
+// emitter receives the compilation queue wait, compilation, and guest execution
+// durations.
+func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter, compileSlot *semaphore.Weighted, limiterSettings *limiterSettingsSnapshot, binary []byte, execReq *sdkpb.ExecuteRequest, isCompressed bool, helper host.ExecutionHelper, timeout time.Duration) (*sdkpb.ExecutionResult, error) {
 	moduleLimiters := newWASMModuleLimiters(ctx, lggr, limiterSettings)
 	defer func() {
 		if err := moduleLimiters.Close(); err != nil && lggr != nil {
@@ -56,6 +60,9 @@ func executeWasm(ctx context.Context, lggr logger.Logger, compileSlot *semaphore
 		}
 		defer compileSlot.Release(1)
 		started := time.Now()
+		emitter.Emit("workflow_compilation_queue_wait", map[string]any{
+			"duration_seconds": started.Sub(queued).Seconds(),
+		})
 		if timeout > 0 {
 			execCtx, cancel = context.WithTimeout(ctx, timeout)
 		}
@@ -63,8 +70,13 @@ func executeWasm(ctx context.Context, lggr logger.Logger, compileSlot *semaphore
 		// Native compilation can't be interrupted, so the timeout may expire
 		// meanwhile. Expiry decides the result; the log keeps any compile error.
 		ctxErr := execCtx.Err()
+		duration := time.Since(started)
+		emitter.Emit("workflow_compilation", map[string]any{
+			"success":          compileErr == nil && ctxErr == nil,
+			"duration_seconds": duration.Seconds(),
+		})
 		if lggr != nil {
-			lggr.Infow("workflow compilation completed", "queueDuration", started.Sub(queued), "duration", time.Since(started), "error", cmp.Or(compileErr, ctxErr))
+			lggr.Infow("workflow compilation completed", "queueDuration", started.Sub(queued), "duration", duration, "error", cmp.Or(compileErr, ctxErr))
 		}
 		if ctxErr != nil {
 			if compiled != nil {
@@ -84,7 +96,12 @@ func executeWasm(ctx context.Context, lggr logger.Logger, compileSlot *semaphore
 	mod.Start()
 	defer mod.Close()
 
+	guestStarted := time.Now()
 	result, err := mod.Execute(execCtx, execReq, helper)
+	emitter.Emit("workflow_guest_execution", map[string]any{
+		"success":          err == nil,
+		"duration_seconds": time.Since(guestStarted).Seconds(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("executing wasm: %w", err)
 	}

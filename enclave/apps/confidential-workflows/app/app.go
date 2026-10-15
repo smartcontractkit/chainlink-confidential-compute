@@ -447,7 +447,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	}
 	snapshot := a.limiterSettings.Snapshot()
 	helper.httpLimits = newHTTPActionLimits(execCtx, executionLogger, snapshot)
-	result, err := executeWasm(execCtx, executionLogger, a.compileSlot, snapshot, binary, execution.SdkExecuteRequest, true, restrictedHelper, execTimeout)
+	result, err := executeWasm(execCtx, executionLogger, emitter, a.compileSlot, snapshot, binary, execution.SdkExecuteRequest, true, restrictedHelper, execTimeout)
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to
