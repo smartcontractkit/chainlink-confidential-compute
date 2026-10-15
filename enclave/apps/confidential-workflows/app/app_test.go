@@ -578,6 +578,16 @@ func TestExecute_ExecutionTimeout(t *testing.T) {
 	require.NotNil(t, execErr)
 	assert.Equal(t, http.StatusGatewayTimeout, execErr.Code)
 	assert.Contains(t, execErr.Error, context.DeadlineExceeded.Error())
+	assert.Contains(t, execErr.Error, types.ErrWasmExecutionTimeout)
+}
+
+// startTimer records when workflow_execute_started is emitted.
+type startTimer struct{ at time.Time }
+
+func (s *startTimer) Emit(event string, _ map[string]any) {
+	if event == "workflow_execute_started" {
+		s.at = time.Now()
+	}
 }
 
 // Every execution is held for the grace period before it starts; a negative
@@ -603,10 +613,14 @@ func TestExecute_GracePeriod(t *testing.T) {
 		data, err := proto.Marshal(execution)
 		require.NoError(t, err)
 
+		// Measures up to workflow_execute_started so the WASM run, which is
+		// slow under -race, does not count against the bound.
+		started := &startTimer{}
 		start := time.Now()
-		_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+		_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, started)
 		require.Nil(t, execErr, "expected no error, got: %+v", execErr)
-		return time.Since(start)
+		require.False(t, started.at.IsZero(), "workflow_execute_started was not emitted")
+		return started.at.Sub(start)
 	}
 
 	t.Run("injected period is waited out", func(t *testing.T) {

@@ -10,6 +10,7 @@ on:
   pull_request:
     branches:
       - main
+      - 'release/**'
     # `labeled` is included so applying the "e2e-real-enclaves" label to a PR
     # triggers a run that adds the real-enclave suite (see the setup job).
     types: [opened, synchronize, reopened, labeled]
@@ -23,15 +24,15 @@ on:
 env:
   CHAINLINK_COMMIT_SHA: bfbfcc3438256dbff184e708cb69f6625f69f1d5
   LEGACY_COMMIT_SHA: c81a7a6bd15999eb3136e7526e8d833d3760755e # release/1.4.8 pin commit; the commit pointing to whatever capability gitref is deployed in Chainlink's plugins.public.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.public.yaml.
-  LEGACY_ENCLAVE_RELEASE: v1.3.0 # The release tag whose enclave app the legacy-enclaves leg checks out and runs locally as a fake enclave. Update this when the deployed production enclave release changes.
+  LEGACY_ENCLAVE_RELEASE: v1.4.3 # The release tag whose enclave app the legacy-enclaves leg checks out and runs locally as a fake enclave: the release of the confidential-http enclave image in confidential-compute-infra deploy/config/enclave/prod.yaml. The nightly legacy-enclave-drift job flags when it changes.
   # Pinned refs for the supporting CRE Docker images, used as GHCR cache keys.
   JD_VERSION: 0.22.1 # job-distributor release (checked out as v${JD_VERSION})
   ATLAS_SHA: da84cb72d3a160e02896247d46ab4b9806ebee2f # chip-ingress + chip-config
   CTF_SHA: dd420c0d953334e3fef9a109b6816de706f6be90 # chip-router
 jobs:
   # Emit the test matrix based on the triggering event. Release-branch pushes
-  # run the real-enclave e2e + integration suite plus the backwards-compat and
-  # legacy-enclaves variants; the nightly schedule runs only the real-enclave
+  # run the unit tests and the real-enclave e2e + integration suite plus the
+  # backwards-compat and legacy-enclaves variants; the nightly schedule runs only the real-enclave
   # e2e + integration suite. Pull requests exercise fake enclaves for the
   # standard and backwards-compat variants, plus the legacy-enclaves variant,
   # which checks out the prior release and runs its enclave app locally as a
@@ -86,12 +87,14 @@ jobs:
               fi
               ;;
             push)
-              # Release-branch pushes: the real e2e + integration suite plus the
-              # backwards-compat and legacy-enclaves variants (dropping the
-              # plain fake-enclave unit/e2e suites a PR runs for fast feedback).
-              # Pushes to main are gated out by run-suite, so this only runs on
-              # release/** pushes.
-              VARIANTS=("$REAL_E2E" "$BACKWARDS_COMPAT" "$LEGACY_ENCLAVES")
+              # Release-branch pushes: the unit tests and the real e2e +
+              # integration suite plus the backwards-compat and legacy-enclaves
+              # variants (dropping the fake-enclave e2e suites a PR runs for fast
+              # feedback). The unit tests run here because the release commit
+              # pins module versions in place of the replace directives main
+              # tests with. Pushes to main are gated out by run-suite, so this
+              # only runs on release/** pushes.
+              VARIANTS=("$UNIT" "$REAL_E2E" "$BACKWARDS_COMPAT" "$LEGACY_ENCLAVES")
               ;;
             *)
               # Nightly schedule: real Nitro enclaves only.
@@ -483,6 +486,14 @@ jobs:
           sudo docker image prune -af 2>/dev/null || true
           df -h /
 
+      # The e2e suites send real requests to postman-echo.com, since the
+      # enclave egress policy blocks private-network fixtures. Fail fast with a
+      # clear cause, after riding out short blips, instead of failing deep
+      # inside a suite.
+      - name: Check postman-echo availability
+        if: ${{ matrix.portion != 'unit' }}
+        run: curl -fsS --retry 5 --retry-connrefused --retry-delay 10 --max-time 10 -o /dev/null https://postman-echo.com/get
+
       - uses: actions/checkout@v4
         with:
           path: confidential-compute
@@ -852,7 +863,12 @@ jobs:
                 modgo=$(awk '/^go [0-9]/{print $2; exit}' go.mod)
                 # Only pin GOTOOLCHAIN for a full goX.Y.Z (see build job).
                 case "$modgo" in *.*.*) export GOTOOLCHAIN="go${modgo}" ;; *) unset GOTOOLCHAIN ;; esac
-                GOMAXPROCS=2 go test -v ./... -timeout 30m -p 1
+                # enclave-client's pool has a known data race between Close and
+                # the proactive refresh loop, so it runs without -race until
+                # that is fixed.
+                race=-race
+                if [ "$dir" = "./enclave-client" ]; then race=""; fi
+                GOMAXPROCS=2 go test $race -v ./... -timeout 30m -p 1
                 cd - > /dev/null
               done
 
@@ -891,7 +907,7 @@ jobs:
         run: |
           git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
 
-          # The legacy-enclave leg runs the v1.3.0 enclave app (from the
+          # The legacy-enclave leg runs the LEGACY_ENCLAVE_RELEASE enclave app (from the
           # cc-legacy checkout, driven by the fake build-and-run script) against
           # the CURRENT capability binary, which the test builds from the
           # current checkout. This verifies the current client/capability can
@@ -1022,3 +1038,43 @@ jobs:
             fi
           done
           echo "All jobs passed successfully"
+
+  # The legacy-enclaves leg only tests compatibility if it runs the enclave
+  # release production runs.
+  legacy-enclave-drift:
+    name: Check LEGACY_ENCLAVE_RELEASE against production
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup GitHub Token
+        id: setup-github-token
+        uses: smartcontractkit/.github/actions/setup-github-token@ef78fa97bf3c77de6563db1175422703e9e6674f # setup-github-token@0.2.1
+        with:
+          aws-role-arn: ${{ secrets.AWS_OIDC_GLOBAL_READ_ONLY_TOKEN_ISSUER_ROLE_ARN }}
+          aws-lambda-url: ${{ secrets.AWS_INFRA_RELENG_TOKEN_ISSUER_LAMBDA_URL }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          aws-role-duration-seconds: "1800"
+
+      - name: Compare LEGACY_ENCLAVE_RELEASE with production
+        env:
+          GH_TOKEN: ${{ steps.setup-github-token.outputs.access-token }}
+        run: |
+          set -euo pipefail
+          image=$(gh api repos/smartcontractkit/confidential-compute-infra/contents/deploy/config/enclave/prod.yaml --jq .content | base64 -d | yq '.containers.enclave.image.tag')
+          if [[ "$image" != enclave-sha-* ]] || ! git cat-file -e "${image#enclave-sha-}^{commit}" 2>/dev/null; then
+            echo "::error::could not resolve the production enclave image '${image}' to a commit in this repository"
+            exit 1
+          fi
+          enclave=$(git describe --tags --abbrev=0 "${image#enclave-sha-}")
+          echo "production enclave image ${image} is from ${enclave}"
+          if [ "$enclave" != "$LEGACY_ENCLAVE_RELEASE" ]; then
+            echo "::error::LEGACY_ENCLAVE_RELEASE is ${LEGACY_ENCLAVE_RELEASE}, but production runs ${image} from ${enclave}"
+            exit 1
+          fi

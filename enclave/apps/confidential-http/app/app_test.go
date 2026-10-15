@@ -997,6 +997,31 @@ func TestHTTPEnclaveApp_Execute_RedirectRejected(t *testing.T) {
 	}
 }
 
+// The executor classifies an oversized body as a user error by matching
+// ErrResponseBodyTooLarge in the enclave's error.
+func TestHTTPEnclaveApp_Execute_ResponseBodyTooLarge(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(make([]byte, maxResponseBytes+1))
+	}))
+	t.Cleanup(server.Close)
+	dialer := &net.Dialer{}
+	client := util.NewRestrictedHTTPClientWithTLSAndDialer(
+		server.Client().Transport.(*http.Transport).TLSClientConfig.Clone(),
+		func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp", server.Listener.Addr().String())
+		},
+	)
+	app := NewHTTPEnclaveApp(client)
+	input, err := proto.Marshal(&enclavetypes.Request{Method: http.MethodGet, Url: server.URL})
+	require.NoError(t, err)
+
+	output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialHTTP, input, nil, &testEmitter{})
+	require.NotNil(t, execErr)
+	assert.Nil(t, output)
+	assert.Equal(t, http.StatusBadRequest, execErr.Code)
+	assert.Contains(t, execErr.Error, types.ErrResponseBodyTooLarge)
+}
+
 func TestHTTPEnclaveApp_Execute_Timeout(t *testing.T) {
 	// Create a mock HTTP client that delays longer than the timeout and respects context cancellation
 	slowClient := httpsmocks.NewMockHTTPClientWithCustomResponse(func(req *http.Request) (*http.Response, error) {
