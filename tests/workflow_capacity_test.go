@@ -47,7 +47,7 @@ func TestConfidentialWorkflowsCapacityE2E(t *testing.T) {
 	hash := sha256.Sum256(binary)
 
 	// Holding downloads keeps admitted slots occupied independently of CPU speed.
-	// Releasing them together also exercises concurrent Go-WASM compilation.
+	// Releasing them together exercises the compilation queue and concurrent guests.
 	entered := make(chan struct{}, 64)
 	release := make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(release) })

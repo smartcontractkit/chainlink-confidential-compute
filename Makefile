@@ -299,6 +299,7 @@ e2e-local-conf-workflows: chainlink-image jd-image chip-router-image atlas-image
 e2e-local-workflow-capacity:
 	command -v nitro-cli >/dev/null && test -c /dev/nitro_enclaves || \
 	  { echo "Requires a dedicated Nitro-capable host; fake enclaves do not enforce this limit."; exit 1; }
+	$(MAKE) --no-print-directory clean-e2e-nitro
 	cd "$(REPO_ROOT)/tests" && \
 	  ENCLAVE_TYPE=NITRO GOMAXPROCS=1 GOFLAGS=-p=1 \
 	  go test -p 1 -v -count=1 -timeout 60m -run '^TestConfidentialWorkflowsCapacityE2E$$' .

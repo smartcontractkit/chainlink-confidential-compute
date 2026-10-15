@@ -20,8 +20,10 @@ requests must report the explicit `enclave at capacity: too many concurrent
 executions` error. The app assigns code 429, but the enclave server currently
 wraps all app errors in HTTP 500; the host then wraps that error again. The test
 checks the capacity reason rather than an HTTP status. Timeouts, EOFs and
-unrelated errors fail the test. Releasing the barrier starts concurrent
-compilation and execution of the existing Go `hello` WASM fixture. Every admitted
+unrelated errors fail the test. Releasing the barrier sends the existing Go
+`hello` WASM fixture through the single-slot compilation queue, then runs the
+guests concurrently. All executions share one binary, so later compilations hit
+the Wasmtime cache; this is not a cold-compilation stress test. Every admitted
 execution must return its expected, attestation-validated result, and a fresh
 execution must succeed after the burst drains.
 
