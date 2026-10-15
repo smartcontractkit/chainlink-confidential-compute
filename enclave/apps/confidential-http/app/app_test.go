@@ -1014,7 +1014,7 @@ func TestHTTPEnclaveApp_Execute_ResponseBodyTooLarge(t *testing.T) {
 	input, err := proto.Marshal(&enclavetypes.Request{Method: http.MethodGet, Url: server.URL})
 	require.NoError(t, err)
 
-	output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialHTTP, input, nil, &testEmitter{})
+	output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialHTTP, input, nil, nil, &testEmitter{})
 	require.NotNil(t, execErr)
 	assert.Nil(t, output)
 	assert.Equal(t, http.StatusBadRequest, execErr.Code)
