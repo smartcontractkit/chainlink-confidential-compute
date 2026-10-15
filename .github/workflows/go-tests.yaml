@@ -801,8 +801,10 @@ jobs:
             # Leave ENCLAVE_TYPE unset so the harness provisions real Nitro enclaves.
             # Skip the confidential-echo reference app: it's a local-dev example
             # not run in CI (building it as a real enclave would only add time).
+            # -count=1: this runner keeps GOCACHE across runs, and enclave images
+            # are built outside Go, so a cached pass would hide enclave changes.
             cd tests
-            GOMAXPROCS=2 go test -v ./... -skip '^TestConfidentialEchoEnclave$' -timeout 90m -p 1
+            GOMAXPROCS=2 go test -v -count=1 ./... -skip '^TestConfidentialEchoEnclave$' -timeout 90m -p 1
             exit 0
           fi
 
