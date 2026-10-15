@@ -98,6 +98,9 @@ func loadConfigFromEnv() (common.Address, *big.Int, uint32, string, string, []ev
 	if capRegAddrStr == "" {
 		return common.Address{}, nil, 0, "", "", nil, nil, 0, false, fmt.Errorf("CAP_REG_ADDR environment variable is required")
 	}
+	if !common.IsHexAddress(capRegAddrStr) {
+		return common.Address{}, nil, 0, "", "", nil, nil, 0, false, fmt.Errorf("failed to parse CAP_REG_ADDR: %s", capRegAddrStr)
+	}
 	capRegAddr := common.HexToAddress(capRegAddrStr)
 
 	chainIDStr := os.Getenv("CHAIN_ID")
@@ -153,6 +156,9 @@ func loadConfigFromEnv() (common.Address, *big.Int, uint32, string, string, []ev
 	tval, err := strconv.ParseUint(tstr, 10, 32)
 	if err != nil {
 		return common.Address{}, nil, 0, "", "", nil, nil, 0, false, fmt.Errorf("failed to parse initial T: %w", err)
+	}
+	if tval == 0 {
+		return common.Address{}, nil, 0, "", "", nil, nil, 0, false, fmt.Errorf("INITIAL_T must be positive")
 	}
 
 	requireBFTQuorum := os.Getenv("REQUIRE_BFT_QUORUM") == "true"

@@ -56,7 +56,7 @@ func TestLoadConfigFromEnv_RequireBFTQuorumIsOptIn(t *testing.T) {
 	}
 }
 
-// A missing or malformed setting must stop the tracker at startup rather
+// A missing or zero-valued setting must stop the tracker at startup rather
 // than let it post a config built from zero values.
 func TestLoadConfigFromEnv_Invalid(t *testing.T) {
 	for name := range validConfigEnv {
@@ -71,10 +71,12 @@ func TestLoadConfigFromEnv_Invalid(t *testing.T) {
 	}
 
 	for name, value := range map[string]string{
+		"CAP_REG_ADDR":              "0x1234",
 		"CHAIN_ID":                  "mainnet",
 		"DON_ID":                    "4294967296",
 		"NODE_CONFIG":               `{"Name":"primary"}`,
 		"INITIAL_MASTER_PUBLIC_KEY": "not-hex",
+		"INITIAL_T":                 "0",
 	} {
 		t.Run(name+"="+value, func(t *testing.T) {
 			setConfigEnv(t, map[string]string{name: value})

@@ -709,7 +709,7 @@ func (c *enclavePool) refreshCacheLoop(ctx context.Context) {
 
 	for {
 		select {
-		case <-c.refreshStopCh:
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			c.refreshAllCachedKeys(ctx)

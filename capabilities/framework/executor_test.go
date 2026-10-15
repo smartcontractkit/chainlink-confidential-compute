@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -63,6 +65,7 @@ type MockEnclaveClient struct {
 	UpdateNodesFunc   func(ctx context.Context, nodes []enclavetypes.Enclave) error
 	UpdateConfigFunc  func(ctx context.Context, update enclavetypes.UpdateConfigRequest) error
 	GetConfigsFunc    func(ctx context.Context) ([]enclavetypes.EnclaveConfig, error)
+	CloseFunc         func() error
 }
 
 func (m *MockEnclaveClient) GetPublicKeys(ctx context.Context, requestID [32]byte, checkRequirements enclavetypes.RequirementsChecker) ([]enclavetypes.EnclavePublicKeyData, error) {
@@ -145,7 +148,12 @@ func (m *MockEnclaveClient) GetConfigs(ctx context.Context) ([]enclavetypes.Encl
 
 func (m *MockEnclaveClient) GetCacheStats() map[string]interface{} { return nil }
 
-func (m *MockEnclaveClient) Close() error { return nil }
+func (m *MockEnclaveClient) Close() error {
+	if m.CloseFunc != nil {
+		return m.CloseFunc()
+	}
+	return nil
+}
 
 type mockKeystore struct {
 	core.UnimplementedKeystore
@@ -299,6 +307,9 @@ func getMockCapabilitiesRegistry(t *testing.T, mockVaultDON framework.VaultDON) 
 
 // MockMetrics is a stub implementation of types.Emitter for testing.
 type MockMetrics struct {
+	// mu guards the maps so Emit is safe under concurrent Execute calls.
+	mu sync.Mutex
+
 	// CallCounts tracks how many times each event was emitted
 	CallCounts map[string]int
 
@@ -316,6 +327,8 @@ func NewMockMetrics() *MockMetrics {
 
 // Emit implements the types.Emitter interface.
 func (m *MockMetrics) Emit(event string, details map[string]any) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.CallCounts[event] += 1
 	m.EmitRecords[event] = append(m.EmitRecords[event], details)
 }
@@ -1787,6 +1800,128 @@ func TestExecutor_ExecuteWithSecretsCache(t *testing.T) {
 		AssertCalledNTimes(t, mockMetrics, "vault_don_cache_miss", 3)
 		AssertCalledNTimes(t, mockMetrics, "vault_don_cache_hit", 2)
 	})
+}
+
+// TestExecutor_ConcurrentRefreshAndExecute_NoDataRace is a regression test for the
+// executor data race: the background refresh loop (EnsureFreshEnclaves) and
+// getLocalNodeAndCapConfig rewrite nodeID, enclaves, and vaultDON.CryptographyThreshold
+// while Execute and GetEnclaves read them concurrently. It only fails under -race.
+func TestExecutor_ConcurrentRefreshAndExecute_NoDataRace(t *testing.T) {
+	mockVaultDONCapability := &MockVaultDONCapability{}
+	mockVaultDONCapability.ExecuteFunc = func(ctx context.Context, req capabilities.CapabilityRequest) (capabilities.CapabilityResponse, error) {
+		respAny, _ := anypb.New(getValidGetSecretsResponse())
+		return capabilities.CapabilityResponse{Payload: respAny}, nil
+	}
+	mockVaultDON := framework.VaultDON{CryptographyThreshold: 1, Capability: mockVaultDONCapability}
+
+	mockEnclaveClient := &MockEnclaveClient{}
+	mockEnclaveClient.ExecuteBatchFunc = func(ctx context.Context, reqs []enclavetypes.SignedComputeRequest, enclaveIDs [][32]byte) ([]enclavetypes.ExecuteResponse, error) {
+		return mockEnclaveClient.commonExecuteBatchReturn(t)
+	}
+
+	// The registry flips the local PeerID (source of nodeID) and the enclave config
+	// (source of e.enclaves) on every call, so the guarded fields actually change value
+	// under concurrency. WorkflowDON membership and F stay constant so
+	// validateEnclaveSigners keeps passing and Execute stays on the happy path.
+	var flip atomic.Uint64
+	mockRegistry := &MockCapabilitiesRegistry{
+		LocalNodeFunc: func(ctx context.Context) (capabilities.Node, error) {
+			pid := mockPeerID1
+			if flip.Add(1)%2 == 0 {
+				pid = mockPeerID2
+			}
+			return capabilities.Node{
+				WorkflowDON: capabilities.DON{ID: 1, F: 0, Members: []p2ptypes.PeerID{mockPeerID1, mockPeerID2}},
+				PeerID:      &pid,
+			}, nil
+		},
+		ConfigForCapabilityFunc: func(ctx context.Context, capabilityID string, donID uint32) (capabilities.CapabilityConfiguration, error) {
+			id, url := [32]byte{1}, "https://enclave-a.example.com"
+			if flip.Load()%2 == 0 {
+				id, url = [32]byte{2}, "https://enclave-b.example.com"
+			}
+			enclavesList := enclavetypes.EnclavesList{
+				Enclaves: []enclavetypes.Enclave{{
+					EnclaveID: id, EnclaveURL: url, EnclaveType: "nitro",
+					TrustedValues: [][]byte{[]byte("{}")}, Region: "us-west-2",
+				}},
+			}
+			wrappedConfig, err := values.WrapMap(enclavesList)
+			require.NoError(t, err)
+			return capabilities.CapabilityConfiguration{DefaultConfig: wrappedConfig}, nil
+		},
+		GetExecutableFunc: func(ctx context.Context, ID string) (capabilities.ExecutableCapability, error) {
+			if ID == vault.CapabilityID {
+				return mockVaultDONCapability, nil
+			}
+			return nil, fmt.Errorf("unknown capability ID: %s", ID)
+		},
+	}
+
+	executor := framework.NewTestExecutor(
+		logger.Test(t), getMockKeystore(), mockEnclaveClient, mockVaultDON,
+		NewMockMetrics(), getDefaultRateLimiter(),
+		1, 0, "test-capability-id", false, TEST_NODE_ID, mockRegistry,
+	)
+
+	actionInput := getTestExecutorInput()
+	protoBytes, err := proto.Marshal(actionInput.GetInput())
+	require.NoError(t, err)
+
+	const goroutines = 8
+	const iterations = 40
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	worker := func(fn func(i int)) {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			fn(i)
+		}
+	}
+
+	for g := 0; g < goroutines; g++ {
+		g := g
+		wg.Add(3)
+		// Reader and writer: Execute refreshes enclaves and reads the vault threshold.
+		go worker(func(i int) {
+			md := capabilities.RequestMetadata{
+				WorkflowID:          WORKFLOW_ID,
+				WorkflowExecutionID: fmt.Sprintf("exec-%d-%d", g, i),
+				WorkflowName:        WORKFLOW_NAME,
+				WorkflowOwner:       WORKFLOW_OWNER,
+			}
+			_, _ = executor.Execute(context.Background(), protoBytes, actionInput.GetVaultDonSecrets(), md)
+		})
+		// Writer: refresh rewrites nodeID, enclaves, and the vault threshold.
+		go worker(func(i int) {
+			_ = executor.EnsureFreshEnclaves(context.Background())
+		})
+		// Reader: GetEnclaves reads the enclaves slice header.
+		go worker(func(i int) {
+			_ = executor.GetEnclaves()
+		})
+	}
+
+	close(start)
+	wg.Wait()
+}
+
+func TestExecutor_CloseClosesEnclaveClient(t *testing.T) {
+	closeCalls := 0
+	mockEnclaveClient := &MockEnclaveClient{CloseFunc: func() error {
+		closeCalls++
+		return nil
+	}}
+	executor := framework.NewTestExecutor(
+		logger.Test(t), getMockKeystore(), mockEnclaveClient, framework.VaultDON{},
+		NewMockMetrics(), getDefaultRateLimiter(),
+		1, 0, "test-capability-id", false, TEST_NODE_ID, getMockCapabilitiesRegistry(t, framework.VaultDON{}),
+	)
+
+	require.NoError(t, executor.Close())
+	assert.Equal(t, 1, closeCalls)
 }
 
 func TestEnsureFreshEnclaves_ConfigurationChange(t *testing.T) {
