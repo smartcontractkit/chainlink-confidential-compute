@@ -8,6 +8,7 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
+	"golang.org/x/sync/semaphore"
 )
 
 // executeWasm creates a chainlink-common WASM host module from the binary
@@ -17,12 +18,13 @@ import (
 // limiterSettings is the settings snapshot for this execution. The logger is
 // also passed to host.ModuleConfig for WASM host diagnostics.
 //
-// timeout bounds the module run: the WASM host turns it into a wasmtime epoch
-// deadline, which is the only thing that interrupts a guest spinning in pure
-// compute (the ctx deadline alone unblocks host calls but not the guest). It
-// surfaces as context.DeadlineExceeded. Non-positive leaves the host's own
-// default (10 minutes) in place.
-func executeWasm(ctx context.Context, lggr logger.Logger, limiterSettings *limiterSettingsSnapshot, binary []byte, execReq *sdkpb.ExecuteRequest, isCompressed bool, helper host.ExecutionHelper, timeout time.Duration) (*sdkpb.ExecutionResult, error) {
+// compileSlot serializes compilation; waiting for it is excluded from timeout.
+// The WASM host turns the timeout into a wasmtime epoch deadline, which is the
+// only thing that interrupts a guest spinning in pure compute (the ctx deadline
+// alone unblocks host calls but not the guest). It surfaces as
+// context.DeadlineExceeded. Non-positive leaves the host's own default
+// (10 minutes) in place.
+func executeWasm(ctx context.Context, lggr logger.Logger, compileSlot *semaphore.Weighted, limiterSettings *limiterSettingsSnapshot, binary []byte, execReq *sdkpb.ExecuteRequest, isCompressed bool, helper host.ExecutionHelper, timeout time.Duration) (*sdkpb.ExecutionResult, error) {
 	moduleLimiters := newWASMModuleLimiters(ctx, lggr, limiterSettings)
 	defer func() {
 		if err := moduleLimiters.Close(); err != nil && lggr != nil {
@@ -35,11 +37,31 @@ func executeWasm(ctx context.Context, lggr logger.Logger, limiterSettings *limit
 		IsUncompressed: !isCompressed,
 	}
 	moduleLimiters.apply(modCfg)
-	if timeout > 0 {
-		modCfg.Timeout = &timeout
-	}
-
-	mod, err := host.NewModule(ctx, modCfg, binary)
+	var mod host.ModuleV2
+	var cancel context.CancelFunc
+	defer func() {
+		if cancel != nil {
+			cancel()
+		}
+	}()
+	queued := time.Now()
+	err := func() error {
+		if err := compileSlot.Acquire(ctx, 1); err != nil {
+			return err
+		}
+		defer compileSlot.Release(1)
+		started := time.Now()
+		if timeout > 0 {
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			modCfg.Timeout = &timeout
+		}
+		var err error
+		mod, err = host.NewModule(ctx, modCfg, binary)
+		if lggr != nil {
+			lggr.Infow("workflow compilation completed", "queueDuration", started.Sub(queued), "duration", time.Since(started), "error", err)
+		}
+		return err
+	}()
 	if err != nil {
 		return nil, fmt.Errorf("creating wasm module: %w", err)
 	}
