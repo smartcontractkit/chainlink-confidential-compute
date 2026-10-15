@@ -1,6 +1,15 @@
 package nitro
 
-import "testing"
+import (
+	"errors"
+	"io"
+	"io/fs"
+	"log"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 func TestValidateClockSource(t *testing.T) {
 	tests := []struct {
@@ -27,4 +36,66 @@ func TestValidateClockSource(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVerifyEnvironment_RetriesTransientFailures(t *testing.T) {
+	calls := 0
+	checks := []environmentCheck{{"chrony", func() error {
+		calls++
+		if calls < 3 {
+			return errors.New("not synced yet")
+		}
+		return nil
+	}}}
+
+	require.NoError(t, verifyEnvironment(log.New(io.Discard, "", 0), checks, 5, 0))
+	assert.Equal(t, 3, calls)
+}
+
+func TestVerifyEnvironment_FailsAfterBoundedAttempts(t *testing.T) {
+	calls, laterCalls := 0, 0
+	checks := []environmentCheck{
+		{"clock source", func() error {
+			calls++
+			return errors.New("invalid clock source: tsc")
+		}},
+		{"later", func() error {
+			laterCalls++
+			return nil
+		}},
+	}
+
+	err := verifyEnvironment(log.New(io.Discard, "", 0), checks, 4, 0)
+	require.ErrorContains(t, err, "clock source check failed after 4 attempts: invalid clock source: tsc")
+	assert.Equal(t, 4, calls)
+	assert.Zero(t, laterCalls, "checks after a failed gate must not run")
+}
+
+// A failure to read the parent-instance state must be distinguishable from
+// the state being wrong.
+func TestCheckClockSource(t *testing.T) {
+	read := func(data string, err error) func(string) ([]byte, error) {
+		return func(string) ([]byte, error) { return []byte(data), err }
+	}
+	require.NoError(t, checkClockSource("amd64", read("kvm-clock\n", nil)))
+	require.EqualError(t, checkClockSource("amd64", read("tsc\n", nil)), "invalid clock source for amd64: tsc, want kvm-clock")
+
+	err := checkClockSource("amd64", read("", fs.ErrNotExist))
+	require.ErrorIs(t, err, fs.ErrNotExist)
+	require.ErrorContains(t, err, "reading clock source")
+}
+
+func TestCheckChronySources(t *testing.T) {
+	const synced = "MS Name/IP address         Stratum Poll Reach LastRx Last sample\n#* PHC0                          0   2   377     5    +12ns[  +15ns] +/-  110ns\n"
+	const unsynced = "MS Name/IP address         Stratum Poll Reach LastRx Last sample\n#? PHC0                          0   2     1     5    +12ns[  +15ns] +/-  110ns\n"
+	sources := func(output string, err error) func() ([]byte, error) {
+		return func() ([]byte, error) { return []byte(output), err }
+	}
+	require.NoError(t, checkChronySources(sources(synced, nil)))
+	require.ErrorContains(t, checkChronySources(sources(unsynced, nil)), "invalid PTP time synchronization source")
+
+	errChronyd := errors.New("506 Cannot talk to daemon")
+	err := checkChronySources(sources("", errChronyd))
+	require.ErrorIs(t, err, errChronyd)
+	require.ErrorContains(t, err, "running chronyc sources")
 }
