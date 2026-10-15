@@ -19,26 +19,17 @@ import (
 // without changing the attestation; they are supplied at runtime instead,
 // keeping one EIF usable across environments.
 //
-// Every injection carries the complete configuration: StorageKey,
-// StorageServiceURL and GatewayURL are required and a payload missing any of
-// them is rejected whole, rather than leaving the app half-configured. The
-// remaining fields are tunables that fall back to their built-in defaults when
-// omitted. Unknown fields are ignored, so a payload written for a newer app can
-// still be injected into an older one.
+// Every injection carries the complete configuration: GatewayURL is required
+// and a payload missing it is rejected whole, rather than leaving the app
+// half-configured. The remaining fields are tunables that fall back to their
+// built-in defaults when omitted. Unknown fields are ignored, so a payload
+// written for a newer app can still be injected into an older one -- including
+// the storage fields, which the host (not the enclave) reads to fetch workflow
+// binaries itself.
 //
-//   - StorageKey: hex ed25519 key (32-byte seed or 64-byte full) the enclave
-//     uses to authenticate CRE storage-service DownloadArtifact calls.
-//   - StorageServiceURL / StorageServiceTLS: the storage-service gRPC endpoint
-//     the enclave fetches workflow binaries from.
 //   - GatewayURL: the Gateway endpoint(s) for remote dispatch (dynamic secrets +
 //     capability calls). Accepts a comma-separated list; the enclave round-robins
 //     across them and fails over to the next on a transport/proxy error.
-//   - MaxBinarySize: max still-compressed workflow-binary size accepted from
-//     storage, in bytes. Zero falls back to the enclave's built-in default.
-//   - BinaryFetchTimeout: per-fetch timeout for downloading a workflow binary.
-//     Zero falls back to the enclave's built-in default.
-//   - MaxCacheBytes: size bound of the verified-binary LRU cache, in bytes.
-//     Zero falls back to the enclave's built-in default.
 //   - RequestTimeout: global request timeout inside the enclave, used as the
 //     default deadline for outbound HTTP a workflow makes while being served.
 //     HTTP actions cap this default at PerWorkflow.HTTPAction.ConnectionTimeout.
@@ -66,13 +57,7 @@ import (
 //     to whole megabytes by the WASM host. Missing required scope metadata or
 //     invalid values fall back to the corresponding CRE defaults.
 type WorkflowSettings struct {
-	StorageKey            string   `json:"storageKey"`
-	StorageServiceURL     string   `json:"storageServiceUrl"`
-	StorageServiceTLS     bool     `json:"storageServiceTls,omitempty"`
 	GatewayURL            string   `json:"gatewayUrl"`
-	MaxBinarySize         int64    `json:"maxBinarySize,omitempty"`
-	BinaryFetchTimeout    Duration `json:"binaryFetchTimeout,omitempty"`
-	MaxCacheBytes         int64    `json:"maxCacheBytes,omitempty"`
 	RequestTimeout        Duration `json:"requestTimeout,omitempty"`
 	GatewayRequestTimeout Duration `json:"gatewayRequestTimeout,omitempty"`
 	// GatewayRetryBackoff paces successive gateway round-trips when the enclave
@@ -142,12 +127,6 @@ func resolveSetting[T any](ctx context.Context, lggr logger.Logger, snapshot *li
 // injection time instead of surfacing as a failed execution later.
 func (s *WorkflowSettings) validate() error {
 	var missing []string
-	if s.StorageKey == "" {
-		missing = append(missing, "storageKey")
-	}
-	if s.StorageServiceURL == "" {
-		missing = append(missing, "storageServiceUrl")
-	}
 	if s.GatewayURL == "" {
 		missing = append(missing, "gatewayUrl")
 	}
