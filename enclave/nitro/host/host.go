@@ -118,6 +118,13 @@ type batchResponse struct {
 	err      error
 }
 
+// enclaveError keeps the enclave's decoded error response so handleExecute can
+// relay its metric events.
+type enclaveError struct {
+	error
+	response types.EnclaveErrorResponse
+}
+
 func NewHostServer(ctx context.Context, clientOverride *http.Client) *hostServer {
 	var client *http.Client
 	if clientOverride == nil {
@@ -672,7 +679,18 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 				"event", "RESPONSE_ERR",
 				"waitDuration", waitDuration.String(),
 				"error", batchResp.err)
-			http.Error(w, fmt.Sprintf("error for request ID %x: %s", execReq.RequestID, batchResp.err), http.StatusInternalServerError)
+			msg := fmt.Sprintf("error for request ID %x: %s", execReq.RequestID, batchResp.err)
+			var enclaveErr *enclaveError
+			if errors.As(batchResp.err, &enclaveErr) {
+				// Relay the enclave's JSON error so callers can still emit its metric events.
+				errResp := enclaveErr.response
+				errResp.Error = msg
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(errResp)
+				return
+			}
+			http.Error(w, msg, http.StatusInternalServerError)
 			return
 		}
 		reqLog.Infow("response sent",
@@ -722,6 +740,12 @@ func (h *hostServer) processBatch(reqs []types.SignedComputeRequest) (*types.Exe
 		var enclaveErrResp types.EnclaveErrorResponse
 		if json.Unmarshal(body, &enclaveErrResp) == nil {
 			h.recordSubCapabilityFailures(reqs, enclaveErrResp.MetricEvents)
+			// Relay the decoded response with the enclave's message: quoting the raw
+			// body too would send its events twice and can exceed the client's limit.
+			if enclaveErrResp.Error != "" {
+				err = fmt.Errorf("enclave returned error: %s - %s", resp.Status, enclaveErrResp.Error)
+				return nil, failureReason, &enclaveError{error: err, response: enclaveErrResp}
+			}
 		}
 		return nil, failureReason, fmt.Errorf("enclave returned error: %s - %s", resp.Status, string(body))
 	}
