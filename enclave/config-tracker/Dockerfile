@@ -1,6 +1,8 @@
 # Build stage
 FROM golang:1.26-alpine AS builder
 
+ENV GOTOOLCHAIN=auto
+
 WORKDIR /app
 
 # Copy the entire repository to the build stage
