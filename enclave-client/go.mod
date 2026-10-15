@@ -1,12 +1,12 @@
 module github.com/smartcontractkit/chainlink-confidential-compute/enclave-client
 
-go 1.26.6
+go 1.27.1
 
 replace github.com/smartcontractkit/chainlink-confidential-compute => ../
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.0
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260914191328-10cc2b41997e
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20261014172120-daa34bb8a999
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-00010101000000-000000000000
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel/metric v1.46.0
@@ -35,7 +35,7 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/mr-tron/base58 v1.2.0 // indirect
-	github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260724142814-45996a1bcb72 // indirect
+	github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20261005132539-b7d63d5fd549 // indirect
 	github.com/smartcontractkit/libocr v0.0.0-20260810200708-618b5bf7f342 // indirect
 	github.com/smartcontractkit/tdh2/go/tdh2 v0.0.0-20241009175230-e6634ab1b071 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
