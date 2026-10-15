@@ -16,9 +16,11 @@ import (
 
 type networkPolicyBlockedError interface{ NetworkPolicyBlocked() bool }
 
+var errHTTPRedirectNotAllowed = errors.New(types.ErrHTTPRedirectNotAllowed)
+
 // disableRedirects prevents the HTTP client from following any redirects.
 func disableRedirects(*http.Request, []*http.Request) error {
-	return errors.New(types.ErrHTTPRedirectNotAllowed)
+	return errHTTPRedirectNotAllowed
 }
 
 // newSafeurlClient builds a safeurl-based HTTP client that enforces:

@@ -309,15 +309,13 @@ func (a *httpEnclaveApp) executeHTTPRequest(request *enclavetypes.Request, templ
 				Body:       []byte(he.Body),
 			}, nil
 		}
-		// The error returned by http.DefaultClient.Do call should not leak headers or the request body.
-		// Developers passing in custom HTTP clients to this application should ensure the same behavior.
-		return enclavetypes.Response{}, fmt.Errorf("error making http request: %v", err)
+		return enclavetypes.Response{}, fmt.Errorf("error making http request: %w", util.SanitizeOutboundHTTPError(err))
 	}
 	defer util.SafeClose(httpResp)
 	limitedReader := io.LimitReader(httpResp.Body, maxResponseBytes+1)
 	respBody, err := io.ReadAll(limitedReader)
 	if err != nil {
-		return enclavetypes.Response{}, fmt.Errorf("error reading http response: %v", err)
+		return enclavetypes.Response{}, fmt.Errorf("error reading http response")
 	}
 	if len(respBody) > maxResponseBytes {
 		return enclavetypes.Response{}, fmt.Errorf("%s of %d bytes", types.ErrResponseBodyTooLarge, maxResponseBytes)
