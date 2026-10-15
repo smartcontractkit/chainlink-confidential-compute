@@ -9,7 +9,7 @@ Nitro allocator; do not run this against a shared or production host.
 one 2048 MiB confidential-workflows enclave (4096 MiB allocator pool). No
 Chainlink node images or DON deployment are needed. It reads guest RAM over
 VSOCK and uses the production `memlimit` constants:
-`max(1, (guest RAM MiB - 1024) / 128)`. The 1024 MiB value is the reserve, not
+`max(1, (guest RAM MiB - 1024) / 100)`. The 1024 MiB value is the reserve, not
 the divisor. Guest RAM is smaller than the Nitro allocation; the test permits
 the one-slot boundary ambiguity introduced by `/memory` rounding to MiB.
 
