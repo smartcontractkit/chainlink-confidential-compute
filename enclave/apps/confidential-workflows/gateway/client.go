@@ -76,6 +76,16 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithStartOffset distributes the first request of short-lived clients while
+// retaining round-robin selection and failover within each client.
+func WithStartOffset(offset uint64) Option {
+	return func(c *GatewayClient) {
+		if len(c.gatewayURLs) > 0 {
+			c.cursor.Store(offset % uint64(len(c.gatewayURLs)))
+		}
+	}
+}
+
 // NewGatewayClient builds a client over one or more gateway endpoints.
 // gatewayURLs is a comma-separated list; SendRequest round-robins across the
 // entries and fails over to the next on a transport/proxy error. A single URL
