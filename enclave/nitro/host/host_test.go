@@ -484,6 +484,36 @@ func TestHandleExecuteRecordsEnclaveError(t *testing.T) {
 	assert.Equal(t, 1, transport.callCount())
 }
 
+func TestHandleExecuteRelaysEnclaveErrorResponse(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	events := []types.MetricEvent{{
+		Event:   "app_execution_completed",
+		Details: map[string]any{"duration_seconds": 0.5},
+	}}
+	enclaveBody := util.MustMarshal(t, types.EnclaveErrorResponse{Error: "execution failed", MetricEvents: events})
+	host := NewHostServer(context.Background(), &http.Client{Transport: &mockRoundTripper{response: &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Status:     "500 Internal Server Error",
+		Body:       io.NopCloser(bytes.NewReader(enclaveBody)),
+	}}})
+	host.config = types.EnclaveConfig{Signers: [][]byte{publicKey}, T: 1, F: 0}
+	request := types.ComputeRequest{
+		RequestID: sha256.Sum256([]byte("enclave-error-response")),
+		AppID:     types.AppIDConfidentialWorkflows,
+	}
+
+	w := httptest.NewRecorder()
+	host.handleExecute(w, signedExecuteRequest(t, request, privateKey))
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	var got types.EnclaveErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, fmt.Sprintf("error for request ID %x: enclave returned error: 500 Internal Server Error - execution failed", request.RequestID), got.Error)
+	assert.Equal(t, events, got.MetricEvents)
+}
+
 func TestExecutionFailureReasonForStatus(t *testing.T) {
 	tests := map[int]string{
 		http.StatusBadRequest:         executionFailureInvalid,
@@ -574,7 +604,7 @@ func TestProcessBatchRecordsSubCapabilityFailures(t *testing.T) {
 		require.Error(t, err)
 		assert.Nil(t, resp)
 		assert.Equal(t, executionFailureInternal, failureReason)
-		assert.Equal(t, fmt.Sprintf("enclave returned error: 500 Internal Server Error - %s", responseBody), err.Error())
+		assert.Equal(t, "enclave returned error: 500 Internal Server Error - execution failed", err.Error())
 		assert.Equal(t, []string{"capability"}, recordedMetrics.subCapabilityFailuresSnapshot())
 	})
 
