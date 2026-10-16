@@ -267,8 +267,18 @@ func TestRPCError_Retryable(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "gateway request expired before quorum",
+			err:  RPCError{Code: jsonrpc2.ErrServerOverloaded, Message: "request expired: 3 signed relay responses, need at least 4 to reach quorum (collected=3 nodes=10 unanswered=7 errors=0 undecodable=0)"},
+			want: true,
+		},
+		{
 			name: "relay answered that quorum was unreachable",
 			err:  RPCError{Code: jsonrpc2.ErrInternal, Message: "relay quorum unreachable: 1 signed responses"},
+			want: false,
+		},
+		{
+			name: "unrelated overloaded error is not retried",
+			err:  RPCError{Code: jsonrpc2.ErrServerOverloaded, Message: "some other overload condition"},
 			want: false,
 		},
 		{
