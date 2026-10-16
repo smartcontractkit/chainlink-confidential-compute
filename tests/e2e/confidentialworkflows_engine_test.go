@@ -718,12 +718,12 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	waitForWorkflowExecutionFailure(t, testEnv, testLogger, workflowID,
 		"compressed binary size exceeds the maximum allowed size", 3*time.Minute)
 
-	successBaseline := countSuccessfulWorkflowExecutions(t, testEnv, workflowID)
+	restoredAt := time.Now()
 	testLogger.Info().Msg("CRE-settings phase: re-injecting settings without creSettings to restore defaults")
 	for _, configURL := range configURLs {
 		postEnclaveSettings(t, configURL, makeSettings(""))
 	}
-	waitForAdditionalWorkflowExecution(t, testEnv, testLogger, workflowID, successBaseline, 3*time.Minute)
+	waitForAdditionalWorkflowExecution(t, testEnv, testLogger, workflowID, restoredAt, 3*time.Minute)
 
 	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write + gateway-outage resilience + injected CRE limiter settings enforced and cleared validated")
 }
@@ -917,27 +917,6 @@ func postEnclaveSettings(t *testing.T, configURL, payload string) {
 	require.Equalf(t, http.StatusNoContent, resp.StatusCode, "settings injection rejected by %s: %s", configURL, body)
 }
 
-// countSuccessfulWorkflowExecutions returns the highest per-container count of
-// successful-execution log lines for workflowID, matching the per-container
-// semantics of waitForWorkflowExecutions.
-func countSuccessfulWorkflowExecutions(t *testing.T, testEnv *ttypes.TestEnvironment, workflowID string) int {
-	t.Helper()
-	successMsg := []byte(`"msg":"Workflow execution finished successfully"`)
-	needleID := []byte(workflowID)
-	maxCount := 0
-	for _, name := range workflowDONContainerNames(testEnv) {
-		out, _ := exec.Command("docker", "logs", "--tail", "10000", name).CombinedOutput()
-		count := 0
-		for _, line := range bytes.Split(out, []byte{'\n'}) {
-			if bytes.Contains(line, needleID) && bytes.Contains(line, successMsg) {
-				count++
-			}
-		}
-		maxCount = max(maxCount, count)
-	}
-	return maxCount
-}
-
 // waitForWorkflowExecutionFailure waits for a failed-execution log line for
 // workflowID whose error carries the given cause, proving the injected
 // override was enforced rather than silently ignored.
@@ -976,27 +955,40 @@ func waitForWorkflowExecutionFailure(
 	}
 }
 
-// waitForAdditionalWorkflowExecution waits for one successful-execution log
-// line beyond the baseline count. Failure lines are deliberately not fatal
-// here: an execution that was already in flight when settings were restored
-// can still fail on the old override, and recovery is proven by the new
-// success, not by the absence of stragglers.
+// waitForAdditionalWorkflowExecution waits for a successful-execution log line
+// for workflowID logged after since. It reads logs since that moment rather
+// than counting within a fixed tail: under heavy node logging (e.g. telemetry
+// retransmit warnings) a tail window shrinks to seconds, so a count compared
+// against an earlier baseline can stop growing. Failure lines are deliberately
+// not fatal here: an execution that was already in flight when settings were
+// restored can still fail on the old override, and recovery is proven by the
+// new success, not by the absence of stragglers.
 func waitForAdditionalWorkflowExecution(
 	t *testing.T,
 	testEnv *ttypes.TestEnvironment,
 	testLogger zerolog.Logger,
 	workflowID string,
-	baseline int,
+	since time.Time,
 	timeout time.Duration,
 ) {
 	t.Helper()
-	testLogger.Info().Msgf("Waiting for a new successful-trigger log for workflowID %s (baseline %d)", workflowID, baseline)
+	containers := workflowDONContainerNames(testEnv)
+	require.NotEmpty(t, containers, "no workflow-DON containers found to scrape")
+	successMsg := []byte(`"msg":"Workflow execution finished successfully"`)
+	needleID := []byte(workflowID)
+	sinceArg := since.UTC().Format(time.RFC3339Nano)
+	testLogger.Info().Msgf("Waiting for a new successful-trigger log for workflowID %s since %s", workflowID, sinceArg)
 
 	deadline := time.Now().Add(timeout)
 	for {
-		if countSuccessfulWorkflowExecutions(t, testEnv, workflowID) > baseline {
-			testLogger.Info().Msgf("New successful-trigger log found for workflowID %s", workflowID)
-			return
+		for _, name := range containers {
+			out, _ := exec.Command("docker", "logs", "--since", sinceArg, name).CombinedOutput()
+			for _, line := range bytes.Split(out, []byte{'\n'}) {
+				if bytes.Contains(line, needleID) && bytes.Contains(line, successMsg) {
+					testLogger.Info().Msgf("New successful-trigger log found in container %s for workflowID %s", name, workflowID)
+					return
+				}
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out after %s waiting for a new successful execution for workflowID %s after restoring defaults", timeout, workflowID)

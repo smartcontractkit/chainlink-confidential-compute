@@ -1,11 +1,11 @@
 module github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/host
 
-go 1.26.6
+go 1.27.1
 
 require (
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260914191328-10cc2b41997e
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20261014172120-daa34bb8a999
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0
-	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20260804191526-b7a850ae7648
+	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20261013212015-e622e8b83b6b
 	github.com/stretchr/testify v1.12.1
 	github.com/things-go/go-socks5 v0.1.1
 	go.opentelemetry.io/otel v1.46.0

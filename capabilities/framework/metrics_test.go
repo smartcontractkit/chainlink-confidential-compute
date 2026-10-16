@@ -23,6 +23,8 @@ func TestAllowedAttribute(t *testing.T) {
 		"request_id", "message", "error", "name", "value",
 		"execution_id", "label.foo", "label.tx_hash",
 		"output_bytes",
+		// Collides with Beholder's node_id resource attribute (INCIDENT-2677).
+		"node.id", "node_id",
 	}
 	for _, k := range dropped {
 		assert.False(t, allowedAttribute(k), "expected %q to be dropped", k)

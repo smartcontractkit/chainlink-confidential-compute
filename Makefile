@@ -16,8 +16,9 @@
 # Real-enclave runs clear stale Nitro state automatically before starting;
 # `make clean-e2e-nitro` runs the same cleanup on demand.
 #
-# All pins (chainlink commit, job-distributor version, chip-router CTF commit)
-# are read from .github/workflows/go-tests.yaml so local runs match CI exactly.
+# All pins (chainlink commit, job-distributor version, chip-router CTF commit,
+# atlas commit) are read from .github/workflows/go-tests.yaml so local runs
+# match CI exactly.
 #
 # Prerequisites:
 #   - Docker running, >= 24 GB memory allocated, root disk < 85% full.
@@ -43,10 +44,13 @@ WORKFLOW_YAML := $(REPO_ROOT)/.github/workflows/go-tests.yaml
 CHAINLINK_COMMIT_SHA := $(shell awk '/^[[:space:]]*CHAINLINK_COMMIT_SHA:/{print $$2; exit}' $(WORKFLOW_YAML))
 JD_VERSION := $(shell awk '/^[[:space:]]*JD_VERSION:/{print $$2; exit}' $(WORKFLOW_YAML))
 CTF_SHA := $(shell awk '/^[[:space:]]*CTF_SHA:/{print $$2; exit}' $(WORKFLOW_YAML))
+ATLAS_SHA := $(shell awk '/^[[:space:]]*ATLAS_SHA:/{print $$2; exit}' $(WORKFLOW_YAML))
 
 CHAINLINK_IMAGE := chainlink:$(CHAINLINK_COMMIT_SHA)
 JD_IMAGE := job-distributor:$(JD_VERSION)
 CHIP_ROUTER_IMAGE := local-cre-chip-router:v1.0.1
+CHIP_INGRESS_IMAGE := chip-ingress:local-cre
+CHIP_CONFIG_IMAGE := chip-config:local-cre
 
 # Enclave environment for the e2e suites. Defaults to FAKE (no hardware);
 # override with ENCLAVE_TYPE=NITRO on a Nitro-capable host to run real enclaves.
@@ -56,10 +60,22 @@ WORK_DIR ?= /tmp/cc-e2e
 CHAINLINK_DIR := $(WORK_DIR)/chainlink
 JD_DIR := $(WORK_DIR)/job-distributor
 CTF_DIR := $(WORK_DIR)/chainlink-testing-framework
+ATLAS_DIR := $(WORK_DIR)/atlas
 
-# The CRE chiprouter resolves the env state file four dirs above tests/e2e, i.e.
-# one level above the repo root. Point `core` there at the pinned checkout.
-CORE_LINK := $(abspath $(REPO_ROOT)/..)/core
+# The suites read the pinned chainlink checkout from CHAINLINK_REPO_ROOT (a
+# sibling checkout in CI). chainlink's chiprouter reads its state at
+# ../../../../core from tests/e2e, which CI provides with a symlink next to the
+# workspace. Locally the suites run from $(LAYOUT_DIR)/confidential-compute, a
+# symlink to this repo, so that path resolves to $(WORK_DIR)/core instead:
+# chiprouter resolves it with filepath.Abs, which follows the logical working
+# directory. Nothing is linked or written outside WORK_DIR.
+LAYOUT_DIR := $(WORK_DIR)/layout
+LAYOUT_E2E_DIR := $(LAYOUT_DIR)/confidential-compute/tests/e2e
+
+# CTF points containers at the host through host.docker.internal, which Docker
+# Desktop resolves and Linux Docker does not. With CI=true it uses the docker0
+# gateway (172.17.0.1) instead, which only Linux reaches.
+E2E_CI := $(if $(filter Darwin,$(shell uname -s)),1,true)
 
 .DEFAULT_GOAL := help
 
@@ -68,8 +84,9 @@ help:
 	echo "Local E2E targets (default: fake enclaves; add ENCLAVE_TYPE=NITRO for real):"
 	echo "  make e2e-local-conf-http        Run TestConfidentialHTTPE2E"
 	echo "  make e2e-local-conf-workflows   Run TestConfidentialWorkflowsEngineE2E"
+	echo "  make e2e-local-workflow-capacity  Run the Nitro workflow overload test (dedicated host)"
 	echo "  make e2e-images                 Build/cache all required Docker images (no tests)"
-	echo "  make clean-e2e                  Remove scratch clones, plugin binaries, and the core symlink"
+	echo "  make clean-e2e                  Remove scratch clones, the e2e layout, and plugin binaries"
 	echo "  make clean-e2e-nitro            Clear stale Nitro state (enclaves, wg-vsock orphans, EIF/PCR)"
 	echo ""
 	echo "  Environment: ENCLAVE_TYPE=$(ENCLAVE_TYPE) (override with ENCLAVE_TYPE=NITRO on a Nitro host)"
@@ -81,10 +98,11 @@ help:
 	echo "  chainlink        $(CHAINLINK_COMMIT_SHA)"
 	echo "  job-distributor  v$(JD_VERSION)"
 	echo "  chip-router CTF  $(CTF_SHA)"
+	echo "  atlas            $(ATLAS_SHA)"
 	echo "  work dir         $(WORK_DIR)"
 
 .PHONY: e2e-images
-e2e-images: chainlink-image jd-image chip-router-image
+e2e-images: chainlink-image jd-image chip-router-image atlas-images
 
 # chainlink node image: shallow-fetch the pinned commit, strip the
 # confidential-http and confidential-workflows plugins (the e2e supplies them as
@@ -190,6 +208,43 @@ export CHIP_ROUTER_IMAGE_SH
 chip-router-image:
 	bash -c "$$CHIP_ROUTER_IMAGE_SH"
 
+# chip-ingress and chip-config images, built from the pinned atlas commit as CI
+# builds them. Without them the CRE setup falls back to pulling from AWS ECR.
+define ATLAS_IMAGES_SH
+set -euo pipefail
+if docker image inspect $(CHIP_INGRESS_IMAGE) >/dev/null 2>&1 && docker image inspect $(CHIP_CONFIG_IMAGE) >/dev/null 2>&1; then
+  echo "OK atlas images present: $(CHIP_INGRESS_IMAGE), $(CHIP_CONFIG_IMAGE)"
+  exit 0
+fi
+echo "Preparing atlas checkout ($(ATLAS_SHA))..."
+dir="$(ATLAS_DIR)"
+if ! git -C "$$dir" rev-parse --git-dir >/dev/null 2>&1; then
+  rm -rf "$$dir"
+  mkdir -p "$$dir"
+  git -C "$$dir" init -q
+  git -C "$$dir" remote add origin "https://github.com/smartcontractkit/atlas.git"
+fi
+if ! git -C "$$dir" rev-parse -q --verify HEAD >/dev/null 2>&1 || [ "$$(git -C "$$dir" rev-parse HEAD)" != "$(ATLAS_SHA)" ]; then
+  echo "  fetching atlas@$(ATLAS_SHA)"
+  git -c credential."https://github.com".helper='!gh auth git-credential' -C "$$dir" fetch -q --depth 1 origin "$(ATLAS_SHA)"
+  # The images need no LFS content, and git-lfs may not be installed.
+  git -c filter.lfs.smudge= -c filter.lfs.process= -c filter.lfs.required=false -C "$$dir" checkout -q -f FETCH_HEAD
+fi
+# Vendoring fetches private smartcontractkit modules with the gh credentials.
+export GOPRIVATE='github.com/smartcontractkit/*' GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0='credential.https://github.com.helper' GIT_CONFIG_VALUE_0='!gh auth git-credential'
+for svc in chip-ingress chip-config; do
+  echo "Building $$svc:local-cre..."
+  ( cd "$$dir/$$svc" && go mod vendor )
+  docker build -f "$$dir/$$svc/Dockerfile" -t "$$svc:local-cre" "$$dir/$$svc"
+done
+echo "OK built $(CHIP_INGRESS_IMAGE) and $(CHIP_CONFIG_IMAGE)"
+endef
+export ATLAS_IMAGES_SH
+
+.PHONY: atlas-images
+atlas-images:
+	bash -c "$$ATLAS_IMAGES_SH"
+
 define PLUGIN_BINARIES_SH
 set -euo pipefail
 arch="$$(docker info --format '{{.Architecture}}')"
@@ -211,37 +266,49 @@ export PLUGIN_BINARIES_SH
 plugin-binaries:
 	bash -c "$$PLUGIN_BINARIES_SH"
 
-.PHONY: core-symlink
-core-symlink:
-	ln -sfn "$(CHAINLINK_DIR)/core" "$(CORE_LINK)"
-	echo "OK core symlink: $(CORE_LINK) -> $(CHAINLINK_DIR)/core"
+.PHONY: e2e-layout
+e2e-layout:
+	mkdir -p "$(LAYOUT_DIR)"
+	ln -sfn "$(REPO_ROOT)" "$(LAYOUT_DIR)/confidential-compute"
+	ln -sfn "$(CHAINLINK_DIR)/core" "$(WORK_DIR)/core"
+	echo "OK e2e layout in $(LAYOUT_DIR)"
 
 .PHONY: e2e-local-conf-http
-e2e-local-conf-http: chainlink-image jd-image plugin-binaries core-symlink
+e2e-local-conf-http: chainlink-image jd-image chip-router-image atlas-images plugin-binaries e2e-layout
 	if [ "$(ENCLAVE_TYPE)" = "NITRO" ]; then $(MAKE) --no-print-directory clean-e2e-nitro; fi
-	cd "$(E2E_DIR)" && \
-	CI=1 ENCLAVE_TYPE=$(ENCLAVE_TYPE) GOTOOLCHAIN=auto GOSUMDB=sum.golang.org \
+	cd "$(LAYOUT_E2E_DIR)" && \
+	CI=$(E2E_CI) ENCLAVE_TYPE=$(ENCLAVE_TYPE) GOTOOLCHAIN=auto GOSUMDB=sum.golang.org \
+	  CHAINLINK_REPO_ROOT="$(CHAINLINK_DIR)" \
 	  CTF_CONFIGS=configs/workflow-don.toml \
 	  CTF_CHAINLINK_IMAGE=$(CHAINLINK_IMAGE) \
 	  CTF_JD_IMAGE=$(JD_IMAGE) \
 	  go test -tags e2e -v -timeout 60m -run '^TestConfidentialHTTPE2E$$' .
 
 .PHONY: e2e-local-conf-workflows
-e2e-local-conf-workflows: chainlink-image jd-image chip-router-image plugin-binaries core-symlink
+e2e-local-conf-workflows: chainlink-image jd-image chip-router-image atlas-images plugin-binaries e2e-layout
 	if [ "$(ENCLAVE_TYPE)" = "NITRO" ]; then $(MAKE) --no-print-directory clean-e2e-nitro; fi
-	cd "$(E2E_DIR)" && \
-	CI=1 ENCLAVE_TYPE=$(ENCLAVE_TYPE) GOTOOLCHAIN=auto GOSUMDB=sum.golang.org \
+	cd "$(LAYOUT_E2E_DIR)" && \
+	CI=$(E2E_CI) ENCLAVE_TYPE=$(ENCLAVE_TYPE) GOTOOLCHAIN=auto GOSUMDB=sum.golang.org \
+	  CHAINLINK_REPO_ROOT="$(CHAINLINK_DIR)" \
 	  CTF_CONFIGS=configs/workflow-don-engine.toml \
 	  CTF_CHAINLINK_IMAGE=$(CHAINLINK_IMAGE) \
 	  CTF_JD_IMAGE=$(JD_IMAGE) \
 	  go test -tags e2e -v -timeout 60m -run '^TestConfidentialWorkflowsEngineE2E$$' .
 
+.PHONY: e2e-local-workflow-capacity
+e2e-local-workflow-capacity:
+	command -v nitro-cli >/dev/null && test -c /dev/nitro_enclaves || \
+	  { echo "Requires a dedicated Nitro-capable host; fake enclaves do not enforce this limit."; exit 1; }
+	$(MAKE) --no-print-directory clean-e2e-nitro
+	cd "$(REPO_ROOT)/tests" && \
+	  ENCLAVE_TYPE=NITRO GOMAXPROCS=1 GOFLAGS=-p=1 \
+	  go test -p 1 -v -count=1 -timeout 60m -run '^TestConfidentialWorkflowsCapacityE2E$$' .
+
 .PHONY: clean-e2e
 clean-e2e:
 	rm -rf "$(WORK_DIR)"
-	rm -f "$(CORE_LINK)"
 	rm -rf "$(E2E_DIR)/binaries"
-	echo "OK removed $(WORK_DIR), core symlink, and plugin binaries"
+	echo "OK removed $(WORK_DIR) and plugin binaries"
 
 # Clear stale Nitro runtime state between real-enclave runs. Leftover enclaves
 # block the allocator restart, and cached EIF/PCR artifacts can mask code changes. The ENCLAVE_TYPE=NITRO
