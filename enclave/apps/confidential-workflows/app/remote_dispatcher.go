@@ -48,8 +48,11 @@ const defaultSecretsNamespace = "main"
 // well-formed JSON-RPC error from the relay, a bundle that does not decode, or
 // a quorum-not-reached verdict — the relay answered, and an immediate retry
 // won't change which signatures arrived. A JSON-RPC error reporting that the
-// gateway could not reach the relay DON is the exception: no quorum result can
-// exist yet, and the condition clears once the DON reconnects, so it is retried.
+// gateway could not reach the relay DON is an exception: no quorum result can
+// exist yet, and the condition clears once the DON reconnects, so it is
+// retried. So is the gateway's request-expiry error: the relay nodes
+// memoize in-flight and completed responses, so a retry can still collect the
+// signatures the expired attempt was still waiting on.
 //
 // Transient failures across attempts are gathered with errors.Join so the
 // final error carries the full history, not just the last failure.

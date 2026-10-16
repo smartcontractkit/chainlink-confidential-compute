@@ -44,11 +44,23 @@ func (e *RPCError) Error() string {
 // after it or the gateway restarts.
 const gatewayFanOutFailure = "failed to forward user request to nodes"
 
+// gatewayQuorumExpiry is the message the gateway returns when its request deadline
+// elapsed before enough relay nodes returned signed responses. A retry can succeed
+// against it: the relay nodes' pending-request and response memoization return the
+// still-in-flight or completed result without re-executing the capability.
+const gatewayQuorumExpiry = "request expired"
+
 // Retryable reports whether the relay answered with a condition that clears on its own,
 // so the caller should try again rather than surface the error. Every other JSON-RPC
 // error is a real answer about this request: an immediate retry cannot change it.
 func (e *RPCError) Retryable() bool {
-	return e.Code == jsonrpc2.ErrInternal && strings.Contains(e.Message, gatewayFanOutFailure)
+	if e.Code == jsonrpc2.ErrInternal && strings.Contains(e.Message, gatewayFanOutFailure) {
+		return true
+	}
+	if e.Code == jsonrpc2.ErrServerOverloaded && strings.Contains(e.Message, gatewayQuorumExpiry) {
+		return true
+	}
+	return false
 }
 
 type GatewayClient struct {
