@@ -1,6 +1,6 @@
 module github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-http/capability
 
-go 1.27.1
+go 1.27.3
 
 require (
 	github.com/smartcontractkit/capabilities/libs v0.0.0-20260928161313-2aaae97ddf69

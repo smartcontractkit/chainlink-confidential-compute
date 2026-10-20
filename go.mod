@@ -2,7 +2,7 @@
 // Dependencies should seldom be added here.
 module github.com/smartcontractkit/chainlink-confidential-compute
 
-go 1.26.4
+go 1.26.10
 
 require (
 	github.com/doyensec/safeurl v0.2.4

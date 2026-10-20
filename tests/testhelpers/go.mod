@@ -3,7 +3,7 @@
 // module plus testify so it stays cheap to consume.
 module github.com/smartcontractkit/chainlink-confidential-compute/tests/testhelpers
 
-go 1.26.4
+go 1.26.10
 
 // The root module is required at a real pseudo-version, not v0.0.0, so that
 // external repositories can consume this module without adding their own

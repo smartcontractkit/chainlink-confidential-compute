@@ -168,7 +168,7 @@ jobs:
           echo "GOSUMDB=sum.golang.org" >> $GITHUB_ENV
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.3'
           cache: false
 
       # Explicit cache (not setup-go's built-in) so restore-keys gives a partial
@@ -216,7 +216,7 @@ jobs:
             fi
             cd "$dir"
             # Build each module under its own declared go directive. setup-go
-            # installs the newest toolchain we need (1.27.1, for the
+            # installs the newest toolchain we need (1.27.3, for the
             # framework/capability modules on chainlink-common 390b2a), but the
             # nitro-built enclave/app modules are pinned to go 1.26.x and ship
             # in golang:1.26 images; building them with a newer toolchain than
@@ -346,7 +346,7 @@ jobs:
       - uses: actions/setup-go@v6
         if: steps.cache.outputs.chip_ingress_hit != 'true' || steps.cache.outputs.chip_config_hit != 'true'
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.3'
           cache: false
 
       # ---- chainlink ----
@@ -583,7 +583,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.3'
           cache: false
 
       # Only cache on the ephemeral hosted (fake-enclave) runners. The self-hosted

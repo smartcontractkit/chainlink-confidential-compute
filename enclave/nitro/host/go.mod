@@ -1,6 +1,6 @@
 module github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/host
 
-go 1.27.1
+go 1.27.3
 
 require (
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20261014172120-daa34bb8a999
