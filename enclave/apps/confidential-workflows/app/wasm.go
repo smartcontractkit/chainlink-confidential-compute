@@ -26,10 +26,10 @@ import (
 // surfaces as context.DeadlineExceeded. Non-positive leaves the host's own
 // default (10 minutes) in place.
 //
-// compileSlot serializes compilation while guests run concurrently. The
-// timeout starts once this execution acquires it, so waiting doesn't consume
-// the timeout, and a compilation that outlives it fails without starting the
-// guest.
+// compileSlot bounds simultaneous compilations while guests run concurrently
+// (WorkflowSettings.MaxConcurrentCompilations slots). The timeout starts once
+// this execution acquires a slot, so waiting doesn't consume the timeout, and
+// a compilation that outlives it fails without starting the guest.
 //
 // emitter receives the compilation queue wait, compilation, and guest execution
 // durations.

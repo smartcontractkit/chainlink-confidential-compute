@@ -56,6 +56,11 @@ import (
 //   - WorkflowGracePeriod: how long each validated execution waits before it
 //     starts running. Zero falls back to types.DefaultWorkflowGracePeriod; a
 //     negative value disables the wait.
+//   - MaxConcurrentCompilations: how many executions may hold a WASM module
+//     under compilation simultaneously. Capping this bounds peak compilation
+//     memory; raising it bounds queue wait when many workflows compile at
+//     once. Zero falls back to defaultMaxConcurrentCompilations; negative
+//     values are rejected so a typo can't fully stall execution.
 //   - CRESettings: standard CRE scoped settings used by the WASM module and
 //     HTTP action limiters. The object may contain global, org, owner and workflow
 //     overrides and is replaced as a unit on every injection, including runtime
@@ -87,8 +92,15 @@ type WorkflowSettings struct {
 	GatewayRetryTimeout Duration        `json:"gatewayRetryTimeout,omitempty"`
 	ExecutionTimeout    Duration        `json:"executionTimeout,omitempty"`
 	WorkflowGracePeriod Duration        `json:"workflowGracePeriod,omitempty"`
-	CRESettings         json.RawMessage `json:"creSettings,omitempty"`
+	// MaxConcurrentCompilations caps simultaneous WASM compilations; zero means
+	// defaultMaxConcurrentCompilations.
+	MaxConcurrentCompilations int64           `json:"maxConcurrentCompilations,omitempty"`
+	CRESettings               json.RawMessage `json:"creSettings,omitempty"`
 }
+
+// defaultMaxConcurrentCompilations is the compile-slot count applied when the
+// injected settings omit MaxConcurrentCompilations.
+const defaultMaxConcurrentCompilations = 4
 
 type mutableSettings struct {
 	mu      sync.RWMutex
@@ -150,6 +162,9 @@ func (s *WorkflowSettings) validate() error {
 	}
 	if s.GatewayURL == "" {
 		missing = append(missing, "gatewayUrl")
+	}
+	if s.MaxConcurrentCompilations < 0 {
+		return fmt.Errorf("maxConcurrentCompilations must be non-negative; 0 means the default of %d (got %d)", defaultMaxConcurrentCompilations, s.MaxConcurrentCompilations)
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required settings: %s", strings.Join(missing, ", "))
