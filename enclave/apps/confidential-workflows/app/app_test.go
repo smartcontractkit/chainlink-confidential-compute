@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zapcore"
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/protobuf/proto"
 
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
@@ -672,6 +673,64 @@ func TestInjectSettings_Timeouts(t *testing.T) {
 		a, got := newApp()
 		inject(t, a, func(*WorkflowSettings) {})
 		assert.Zero(t, *got)
+	})
+}
+
+// The compile gate follows MaxConcurrentCompilations: omitted keeps the
+// default width, a positive value replaces the gate, and a negative payload is
+// rejected before any of it is applied.
+func TestInjectSettings_MaxConcurrentCompilations(t *testing.T) {
+	newApp := func() *confidentialWorkflowsApp {
+		return NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t),
+			WithRemoteDispatcherFactory(func(GatewayConfig) (RemoteDispatcher, error) {
+				return &testRemoteDispatcher{}, nil
+			}),
+		).(*confidentialWorkflowsApp)
+	}
+	inject := func(t *testing.T, a *confidentialWorkflowsApp, mutate func(*WorkflowSettings)) error {
+		t.Helper()
+		s := testSettings("127.0.0.1:1")
+		mutate(&s)
+		raw, err := json.Marshal(s)
+		require.NoError(t, err)
+		return a.InjectSettings(raw)
+	}
+	// gateCapacity acquires until the gate refuses, then releases everything.
+	gateCapacity := func(t *testing.T, gate *semaphore.Weighted) int64 {
+		t.Helper()
+		var n int64
+		for gate.TryAcquire(1) {
+			n++
+		}
+		for i := int64(0); i < n; i++ {
+			gate.Release(1)
+		}
+		return n
+	}
+
+	t.Run("default gate", func(t *testing.T) {
+		a := newApp()
+		assert.Equal(t, int64(defaultMaxConcurrentCompilations), gateCapacity(t, a.compileSlots.Load()))
+	})
+
+	t.Run("injected value replaces the gate", func(t *testing.T) {
+		a := newApp()
+		require.NoError(t, inject(t, a, func(s *WorkflowSettings) { s.MaxConcurrentCompilations = 9 }))
+		assert.Equal(t, int64(9), gateCapacity(t, a.compileSlots.Load()))
+	})
+
+	t.Run("omitted keeps the existing gate", func(t *testing.T) {
+		a := newApp()
+		require.NoError(t, inject(t, a, func(s *WorkflowSettings) { s.MaxConcurrentCompilations = 2 }))
+		require.NoError(t, inject(t, a, func(*WorkflowSettings) {}))
+		assert.Equal(t, int64(2), gateCapacity(t, a.compileSlots.Load()))
+	})
+
+	t.Run("negative rejected", func(t *testing.T) {
+		a := newApp()
+		err := inject(t, a, func(s *WorkflowSettings) { s.MaxConcurrentCompilations = -1 })
+		require.ErrorContains(t, err, "maxConcurrentCompilations")
+		assert.Equal(t, int64(defaultMaxConcurrentCompilations), gateCapacity(t, a.compileSlots.Load()))
 	})
 }
 
