@@ -741,8 +741,9 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	//     again. This exercises the same runtime settings path as phase 9,
 	//     through the enclave's outbound TLS handshake.
 	testLogger.Info().Msg("Denylist phase: fetching the echo target's certificate chain")
-	echoHost := strings.TrimPrefix(echoURL, "https://")
-	deniedHashes, err := util.GetPublicKeyHashes(echoHost)
+	echoParsed, err := url.Parse(echoURL)
+	require.NoError(t, err, "failed to parse the echo target URL")
+	deniedHashes, err := util.GetPublicKeyHashes(echoParsed.Hostname())
 	require.NoError(t, err, "failed to read the echo target's certificate chain")
 	require.NotEmpty(t, deniedHashes)
 
