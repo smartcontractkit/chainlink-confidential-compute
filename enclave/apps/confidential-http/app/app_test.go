@@ -398,7 +398,7 @@ func TestHTTPEnclaveApp_Execute(t *testing.T) {
 
 			var requestID [32]byte
 			copy(requestID[:], "request_id")
-			output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, tt.secretsMap, testEmit)
+			output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, tt.secretsMap, testEmit)
 
 			if tt.expectedError {
 				require.NotNil(t, execError)
@@ -490,7 +490,7 @@ func TestHTTPEnclave_InvalidAppID(t *testing.T) {
 
 	var requestID [32]byte
 	copy(requestID[:], "request_id")
-	output, execError := app.Execute(requestID, "invalid-app-id", inputDataBytes, nil, emitter.NewNoOpEmitter())
+	output, execError := app.Execute(requestID, "invalid-app-id", inputDataBytes, nil, nil, emitter.NewNoOpEmitter())
 	require.NotNil(t, execError)
 	require.Nil(t, output)
 	assert.Equal(t, http.StatusBadRequest, execError.Code)
@@ -625,7 +625,7 @@ func TestHTTPEnclaveApp_Execute_WithHTTPErrors(t *testing.T) {
 
 			var requestID [32]byte
 			copy(requestID[:], "request_id")
-			output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, secretsMap, emitter.NewNoOpEmitter())
+			output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, secretsMap, emitter.NewNoOpEmitter())
 			require.Nil(t, execError)
 			require.NotNil(t, output)
 
@@ -761,7 +761,7 @@ func TestHTTPEnclaveApp_Execute_BytesBody(t *testing.T) {
 
 	var requestID [32]byte
 	copy(requestID[:], "request_id")
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, secretsMap, emitter.NewNoOpEmitter())
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, secretsMap, emitter.NewNoOpEmitter())
 
 	require.Nil(t, execError)
 	require.NotNil(t, output)
@@ -813,7 +813,7 @@ func TestHTTPEnclaveApp_Execute_StringBodyWithTemplating(t *testing.T) {
 
 	var requestID [32]byte
 	copy(requestID[:], "request_id")
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, secretsMap, emitter.NewNoOpEmitter())
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, secretsMap, emitter.NewNoOpEmitter())
 
 	require.Nil(t, execError)
 	require.NotNil(t, output)
@@ -856,10 +856,9 @@ func TestHTTPEnclaveApp_Execute_DoesNotReuseConnectionsAcrossExecutions(t *testi
 		_, execErr := enclaveApp.Execute(
 			requestID,
 			types.AppIDConfidentialHTTP,
-			requestBytes,
+			requestBytes, nil,
 			nil,
-			&testEmitter{},
-		)
+			&testEmitter{})
 		require.Nil(t, execErr)
 	}
 
@@ -987,7 +986,7 @@ func TestHTTPEnclaveApp_Execute_RedirectRejected(t *testing.T) {
 			input, err := proto.Marshal(&enclavetypes.Request{Method: http.MethodGet, Url: server.URL})
 			require.NoError(t, err)
 
-			output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialHTTP, input, nil, &testEmitter{})
+			output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialHTTP, input, nil, nil, &testEmitter{})
 			require.NotNil(t, execErr)
 			assert.Nil(t, output)
 			assert.Equal(t, http.StatusBadRequest, execErr.Code)
@@ -1015,7 +1014,7 @@ func TestHTTPEnclaveApp_Execute_ResponseBodyTooLarge(t *testing.T) {
 	input, err := proto.Marshal(&enclavetypes.Request{Method: http.MethodGet, Url: server.URL})
 	require.NoError(t, err)
 
-	output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialHTTP, input, nil, &testEmitter{})
+	output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialHTTP, input, nil, nil, &testEmitter{})
 	require.NotNil(t, execErr)
 	assert.Nil(t, output)
 	assert.Equal(t, http.StatusBadRequest, execErr.Code)
@@ -1054,7 +1053,7 @@ func TestHTTPEnclaveApp_Execute_Timeout(t *testing.T) {
 	var requestID [32]byte
 	copy(requestID[:], "request_id")
 
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, testEmit)
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, nil, testEmit)
 
 	// Should return a 504 Gateway Timeout response, not an error
 	require.Nil(t, execError)
@@ -1087,7 +1086,7 @@ func TestHTTPEnclaveApp_Execute_Timeout_RealServer(t *testing.T) {
 	require.NoError(t, err)
 
 	var requestID [32]byte
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, &testEmitter{})
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, nil, &testEmitter{})
 
 	// Should return a 504 Gateway Timeout response, not an error
 	require.Nil(t, execError)
@@ -1120,7 +1119,7 @@ func TestHTTPEnclaveApp_Execute_SSRFBlockedReturns400(t *testing.T) {
 	require.NoError(t, err)
 
 	var requestID [32]byte
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, &testEmitter{})
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, nil, &testEmitter{})
 
 	// Should return a 400 Bad Request response, not an error.
 	require.Nil(t, execError)
@@ -1167,7 +1166,7 @@ func TestHTTPEnclaveApp_Execute_TLSHandshakeRejectedReturns502(t *testing.T) {
 	require.NoError(t, err)
 
 	var requestID [32]byte
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, &testEmitter{})
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, nil, &testEmitter{})
 
 	require.Nil(t, execError)
 	require.NotNil(t, output)
@@ -1205,7 +1204,7 @@ func TestHTTPEnclaveApp_Execute_TimeoutNotReached(t *testing.T) {
 	var requestID [32]byte
 	copy(requestID[:], "request_id")
 
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, testEmit)
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, nil, testEmit)
 
 	// Should succeed without timeout
 	require.Nil(t, execError)
@@ -1241,7 +1240,7 @@ func TestHTTPEnclaveApp_Execute_DefaultTimeoutApplied(t *testing.T) {
 	require.NoError(t, err)
 
 	var requestID [32]byte
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, &testEmitter{})
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, nil, &testEmitter{})
 	require.Nil(t, execError)
 	require.NotNil(t, output)
 
@@ -1278,7 +1277,7 @@ func TestHTTPEnclaveApp_Execute_CustomTimeoutApplied(t *testing.T) {
 	require.NoError(t, err)
 
 	var requestID [32]byte
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, &testEmitter{})
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, nil, &testEmitter{})
 	require.Nil(t, execError)
 	require.NotNil(t, output)
 
@@ -1394,7 +1393,7 @@ func TestHTTPEnclaveApp_Execute_CustomRootCACert(t *testing.T) {
 		var requestID [32]byte
 		copy(requestID[:], "request_id")
 
-		output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, testEmit)
+		output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, nil, testEmit)
 
 		require.Nil(t, execError, "expected no error when using correct custom root CA")
 		require.NotNil(t, output)
@@ -1432,7 +1431,7 @@ func TestHTTPEnclaveApp_Execute_CustomRootCACert(t *testing.T) {
 		var requestID [32]byte
 		copy(requestID[:], "request_id")
 
-		_, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, testEmit)
+		_, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, nil, testEmit)
 
 		require.NotNil(t, execError, "expected error when custom root CA is not provided")
 		assert.Contains(t, execError.Error, "error making http request")
@@ -1467,7 +1466,7 @@ func TestHTTPEnclaveApp_Execute_CustomRootCACert(t *testing.T) {
 		var requestID [32]byte
 		copy(requestID[:], "request_id")
 
-		_, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, testEmit)
+		_, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, nil, testEmit)
 
 		require.NotNil(t, execError, "expected error when using wrong custom root CA")
 		assert.Contains(t, execError.Error, "error making http request")
@@ -1489,7 +1488,7 @@ func TestHTTPEnclaveApp_Execute_CustomRootCACert(t *testing.T) {
 		var requestID [32]byte
 		copy(requestID[:], "request_id")
 
-		_, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, testEmit)
+		_, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, nil, testEmit)
 
 		require.NotNil(t, execError, "expected error when custom root CA PEM is invalid")
 		assert.Contains(t, execError.Error, "error parsing custom root CA certificate")
@@ -1528,7 +1527,7 @@ func TestHTTPEnclaveApp_Execute_AESGCMBodyEncryption(t *testing.T) {
 
 	var requestID [32]byte
 	copy(requestID[:], "request_id")
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, secretsMap, emitter.NewNoOpEmitter())
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, secretsMap, emitter.NewNoOpEmitter())
 	require.Nil(t, execError)
 	require.NotNil(t, output)
 
@@ -1576,7 +1575,7 @@ func TestHTTPEnclaveApp_Execute_NoEncryptionWithoutKey(t *testing.T) {
 
 	var requestID [32]byte
 	copy(requestID[:], "request_id")
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, secretsMap, emitter.NewNoOpEmitter())
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, secretsMap, emitter.NewNoOpEmitter())
 	require.Nil(t, execError)
 	require.NotNil(t, output)
 
@@ -1625,7 +1624,7 @@ func TestHTTPEnclaveApp_Execute_AESGCMRoundTrip(t *testing.T) {
 
 	var requestID [32]byte
 	copy(requestID[:], "request_id")
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, secretsMap, emitter.NewNoOpEmitter())
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, secretsMap, emitter.NewNoOpEmitter())
 	require.Nil(t, execError)
 	require.NotNil(t, output)
 
@@ -1668,7 +1667,7 @@ func TestHTTPEnclaveApp_Execute_EncryptOutputTrueWithoutKey(t *testing.T) {
 
 	var requestID [32]byte
 	copy(requestID[:], "request_id")
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, secretsMap, emitter.NewNoOpEmitter())
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, secretsMap, emitter.NewNoOpEmitter())
 
 	require.NotNil(t, execError)
 	assert.Nil(t, output)
@@ -1699,7 +1698,7 @@ func TestHTTPEnclaveApp_Execute_EncryptOutputFalseWithKey(t *testing.T) {
 
 	var requestID [32]byte
 	copy(requestID[:], "request_id")
-	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, secretsMap, emitter.NewNoOpEmitter())
+	output, execError := app.Execute(requestID, types.AppIDConfidentialHTTP, inputDataBytes, nil, secretsMap, emitter.NewNoOpEmitter())
 
 	require.NotNil(t, execError)
 	assert.Nil(t, output)

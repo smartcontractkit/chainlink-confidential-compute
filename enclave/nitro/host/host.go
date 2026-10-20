@@ -23,7 +23,7 @@ import (
 	"time"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
-	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/host/proxy-server"
+	proxyserver "github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/host/proxy-server"
 	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/vsock"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -85,6 +85,10 @@ type hostServer struct {
 	verifier             signatureverifier.SignatureVerifier
 	logger               cllogger.SugaredLogger
 	metrics              executionMetrics
+	// binaries fetches workflow binaries for the enclave and caches them on a
+	// node-local volume. nil disables host-side fetching, leaving the enclave
+	// to fetch binaries itself.
+	binaries *binaryProvider
 }
 
 type batchRequest struct {
@@ -486,7 +490,6 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		"ephemeralPK", ephemeralPKHex,
 		"bodyLen", len(body),
 		"arrivalTime", arrivalTime.Format(time.RFC3339Nano))
-	metadata := inspectPublicData(reqLog, execReq.AppID, execReq.PublicData)
 
 	// Log hash input components for debugging hash divergence
 	reqLog.Debugw("hash inputs",
@@ -637,6 +640,18 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		h.processRequestMutex.Unlock()
 
 		if shouldProcess {
+			metadata, binary, err := h.publicDataPrehook(reqLog, execReq.AppID, execReq.PublicData)
+			if err != nil {
+				reqLog.Errorw("rejecting batch: prehook failed",
+					"event", "REJECT",
+					"reason", "prehook_failed",
+					"signers", signers,
+					"error", err)
+				h.completeBatch(requestHash, nil, err)
+				http.Error(w, fmt.Sprintf("error processing request: %v", err), http.StatusBadGateway)
+				return
+			}
+
 			quorumWait := time.Since(br.createdAt)
 			finishExecution := h.metrics.startExecution(metadata, quorumWait)
 			reqLog.Infow("quorum reached, dispatching to enclave",
@@ -645,7 +660,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 				"signatureCount", len(requests))
 			go func() {
 				enclaveStart := time.Now()
-				resp, failureReason, err := h.processBatch(requests)
+				resp, failureReason, err := h.processBatch(requests, binary)
 				enclaveDuration := time.Since(enclaveStart)
 				outcome := executionOutcomeSuccess
 				if err != nil {
@@ -712,8 +727,13 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 }
 
 // processBatch sends a batch of requests to the host's enclave for execution.
-func (h *hostServer) processBatch(reqs []types.SignedComputeRequest) (*types.ExecuteResponse, string, error) {
-	body, err := json.Marshal(reqs)
+// binary is the workflow binary the publicDataPrehook fetched; it rides
+// alongside the signed requests as unauthenticatedData, and the enclave
+// verifies it against the signed binary_hash.
+func (h *hostServer) processBatch(reqs []types.SignedComputeRequest, binary []byte) (*types.ExecuteResponse, string, error) {
+	batch := types.ExecuteBatch{Requests: reqs, UnauthenticatedData: binary}
+
+	body, err := types.MarshalExecuteBatch(batch)
 	if err != nil {
 		return nil, executionFailureInternal, fmt.Errorf("failed to marshal batch of requests: %w", err)
 	}
@@ -1029,6 +1049,21 @@ func main() {
 		mainMux.HandleFunc("POST "+types.SetConfigPath, host.handleSetConfig)
 		mainMux.HandleFunc("POST "+types.SettingsPath, host.handleInjectSettings)
 	}
+
+	// Fetch workflow binaries here rather than inside the enclave, caching them
+	// on a node-local volume so they survive a container restart and don't have
+	// to sit in the enclave's fixed memory. The enclave has no fetch path of its
+	// own, so a misconfiguration here fails startup rather than every execution.
+	binaries, err := newBinaryProvider(*settingsJSON, lggr)
+	if err != nil {
+		log.Fatalf("binary fetching misconfigured: %v", err)
+	}
+	host.binaries = binaries
+	defer func() {
+		if cerr := host.binaries.Close(); cerr != nil {
+			lggr.Warnw("closing binary provider", "error", cerr)
+		}
+	}()
 
 	mainMux.HandleFunc("PATCH "+types.SetConfigPath, host.handleUpdateConfig)
 	mainMux.HandleFunc(types.PublicKeyPath, host.handleGetPublicKeys)
