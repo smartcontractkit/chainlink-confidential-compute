@@ -96,6 +96,10 @@ type WorkflowSettings struct {
 	// defaultMaxConcurrentCompilations.
 	MaxConcurrentCompilations int64           `json:"maxConcurrentCompilations,omitempty"`
 	CRESettings               json.RawMessage `json:"creSettings,omitempty"`
+	// DeniedPublicKeyHashes are hex SHA-256 hashes of certificate
+	// SubjectPublicKeyInfos that outbound TLS connections reject anywhere in the
+	// peer's chain. Replaced as a unit on every injection; omitted clears it.
+	DeniedPublicKeyHashes []string `json:"deniedPublicKeyHashes,omitempty"`
 }
 
 // defaultMaxConcurrentCompilations is the compile-slot count applied when the

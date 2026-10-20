@@ -111,6 +111,7 @@ func NewGatewayClient(gatewayURLs string, att attestor.Attestor, opts ...Option)
 func newTransport() *http.Transport {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.DisableKeepAlives = true
+	tr.TLSClientConfig = util.DefaultCertificateDenylist().TLSConfig(nil)
 	return tr
 }
 

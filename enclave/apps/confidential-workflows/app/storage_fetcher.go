@@ -19,6 +19,7 @@ import (
 	nodeauthjwt "github.com/smartcontractkit/chainlink-common/pkg/nodeauth/jwt"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	storage_service "github.com/smartcontractkit/chainlink-protos/storage-service/go"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -119,7 +120,7 @@ func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes 
 
 	var creds credentials.TransportCredentials
 	if tls {
-		creds = credentials.NewTLS(nil)
+		creds = credentials.NewTLS(util.DefaultCertificateDenylist().TLSConfig(nil))
 	} else {
 		creds = insecure.NewCredentials()
 	}

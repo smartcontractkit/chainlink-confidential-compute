@@ -25,14 +25,13 @@ func disableRedirects(*http.Request, []*http.Request) error {
 // - HTTPS only on ports 80 and 443
 // - No redirects
 // - Private-network blocking (loopback, RFC 1918, CGNAT, link-local, etc.)
+// - The default certificate denylist
 // An optional tls.Config can be supplied for custom CA certificates.
 func newSafeurlClient(tlsConfig *tls.Config, dialContext func(context.Context, string, string) (net.Conn, error)) *safeurl.WrappedClient {
 	builder := safeurl.GetConfigBuilder().
 		SetAllowedSchemes("https").
-		SetCheckRedirect(disableRedirects)
-	if tlsConfig != nil {
-		builder = builder.SetTlsConfig(tlsConfig)
-	}
+		SetCheckRedirect(disableRedirects).
+		SetTlsConfig(DefaultCertificateDenylist().TLSConfig(tlsConfig))
 	client := safeurl.Client(builder.Build())
 	transport, ok := client.Client.Transport.(*http.Transport)
 	if !ok {

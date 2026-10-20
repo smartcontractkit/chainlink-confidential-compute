@@ -145,5 +145,6 @@ func tunnelTransport(dialer *proxyclient.Dialer, disableKeepAlives bool) *http.T
 		DialContext:       dialer.DialContext,
 		DisableKeepAlives: disableKeepAlives,
 		ForceAttemptHTTP2: true,
+		TLSClientConfig:   util.DefaultCertificateDenylist().TLSConfig(nil),
 	}
 }
