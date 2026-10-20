@@ -44,10 +44,15 @@ type confidentialWorkflowsApp struct {
 	// is set (the nitro entrypoint derives a limit from enclave memory).
 	limiter *executionLimiter
 
-	// compileSlot lets one admitted execution compile at a time, bounding peak
-	// compilation memory while guests run concurrently. Waiting executions keep
-	// their limiter slot; the wait doesn't count against executionTimeout.
-	compileSlot *semaphore.Weighted
+	// compileSlots bounds how many admitted executions compile simultaneously,
+	// capping peak compilation memory while guests run concurrently. Waiting
+	// executions keep their limiter slot; the wait doesn't count against
+	// executionTimeout. Sized by WorkflowSettings.MaxConcurrentCompilations
+	// (default defaultMaxConcurrentCompilations) and swapped whole on
+	// reinjection: executions already holding a slot release it back to the
+	// gate they acquired, so a shrink takes effect as in-flight compilations
+	// finish rather than preempting them.
+	compileSlots atomic.Pointer[semaphore.Weighted]
 
 	// executionTimeout bounds a single WASM run (nanoseconds; 0 = the WASM
 	// host's own default). Injected via InjectSettings, read on every Execute,
@@ -208,6 +213,9 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	if req.ExecutionTimeout > 0 {
 		a.executionTimeout.Store(int64(req.ExecutionTimeout))
 	}
+	if req.MaxConcurrentCompilations > 0 {
+		a.compileSlots.Store(semaphore.NewWeighted(req.MaxConcurrentCompilations))
+	}
 	if req.WorkflowGracePeriod != 0 {
 		a.gracePeriod.Store(int64(req.WorkflowGracePeriod))
 	}
@@ -293,12 +301,12 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 		fetcher:           NewBinaryFetcher(lggr),
 		httpFetcher:       config.HTTPFetcher,
 		tpe:               tpe,
-		limiter:           newExecutionLimiter(config.MaxConcurrentExecutions),
-		compileSlot:       semaphore.NewWeighted(1),
-		limiterSettings:   &mutableSettings{},
-		storageFactory:    config.StorageFetcherFactory,
+		limiter:         newExecutionLimiter(config.MaxConcurrentExecutions),
+		limiterSettings: &mutableSettings{},
+		storageFactory:  config.StorageFetcherFactory,
 		dispatcherFactory: config.RemoteDispatcherFactory,
 	}
+	a.compileSlots.Store(semaphore.NewWeighted(defaultMaxConcurrentCompilations))
 	a.gracePeriod.Store(int64(types.DefaultWorkflowGracePeriod))
 	a.requirementsHandler.Tee = a.validTee
 	return a, nil
@@ -312,12 +320,12 @@ func NewTestConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, opts
 		httpFetcher:     httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
 		tpe:             tpe,
 		limiter:         newExecutionLimiter(0),
-		compileSlot:     semaphore.NewWeighted(1),
 		limiterSettings: &mutableSettings{},
 		storageFactory: storageFetcherFactory(func() types.HTTPClient {
 			return util.NewRestrictedHTTPClient()
 		}),
 	}
+	a.compileSlots.Store(semaphore.NewWeighted(defaultMaxConcurrentCompilations))
 	a.gracePeriod.Store(int64(types.DefaultWorkflowGracePeriod))
 	a.requirementsHandler.Tee = a.validTee
 	for _, opt := range opts {
@@ -447,7 +455,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	}
 	snapshot := a.limiterSettings.Snapshot()
 	helper.httpLimits = newHTTPActionLimits(execCtx, executionLogger, snapshot)
-	result, err := executeWasm(execCtx, executionLogger, emitter, a.compileSlot, snapshot, binary, execution.SdkExecuteRequest, true, restrictedHelper, execTimeout)
+	result, err := executeWasm(execCtx, executionLogger, emitter, a.compileSlots.Load(), snapshot, binary, execution.SdkExecuteRequest, true, restrictedHelper, execTimeout)
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to

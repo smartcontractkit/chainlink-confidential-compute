@@ -69,14 +69,16 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 	hash := sha256.Sum256(binary)
 	enclave, locator := newStorageBackedAppWithSettings(t, binary, func(s *WorkflowSettings) {
 		s.WorkflowGracePeriod = Duration(-time.Second)
+		s.MaxConcurrentCompilations = 1
 	}, WithMaxConcurrentExecutions(2))
 	a := enclave.(*confidentialWorkflowsApp)
 	lggr, logs := logger.TestObserved(t, zapcore.DebugLevel)
 	a.logger = lggr
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	require.NoError(t, a.compileSlot.Acquire(ctx, 1))
-	release := sync.OnceFunc(func() { a.compileSlot.Release(1) })
+	compileSlot := a.compileSlots.Load()
+	require.NoError(t, compileSlot.Acquire(ctx, 1))
+	release := sync.OnceFunc(func() { compileSlot.Release(1) })
 	results := make(chan *types.ExecuteError, 2)
 	var wg sync.WaitGroup
 	defer func() { release(); wg.Wait() }()
@@ -111,5 +113,5 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 		}
 	}
 	require.Empty(t, a.limiter.slots)
-	require.True(t, a.compileSlot.TryAcquire(1))
+	require.True(t, compileSlot.TryAcquire(1))
 }
