@@ -1,6 +1,6 @@
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 
-# Match root go.mod (currently go 1.26.x) and allow minor toolchain bumps
+# Match root go.mod (currently go 1.26.10) and allow minor toolchain bumps
 # without another Dockerfile edit when chainlink-common moves forward.
 ENV GOTOOLCHAIN=auto
 
