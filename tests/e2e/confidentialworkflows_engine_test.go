@@ -46,6 +46,7 @@ import (
 	"github.com/smartcontractkit/chainlink-confidential-compute/tests"
 	creJob "github.com/smartcontractkit/chainlink-confidential-compute/tests/e2e/job"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 
 	"github.com/stretchr/testify/require"
 )
@@ -161,7 +162,7 @@ func enclaveHostAddr() string {
 }
 
 func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger, bootCRESettings string) (
-	[]types.Enclave, []string, *deferredGatewayProxy, *deferredGatewayProxy, *fakeStorageService, func(string) string, func(),
+	[]types.Enclave, []string, *deferredGatewayProxy, *deferredGatewayProxy, *fakeStorageService, func(string, []string) string, func(),
 ) {
 	t.Helper()
 	// Two gateway front-proxies to exercise the enclave's round-robin failover.
@@ -192,16 +193,23 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger, bootCRESet
 	// inside the 3m retry window; the defaults would also work but pinning them
 	// keeps the test's assumptions local to the test.
 	host := enclaveHostAddr()
-	makeSettings := func(creSettings string) string {
+	makeSettings := func(creSettings string, deniedHashes []string) string {
 		payload := fmt.Sprintf(
 			`{"storageKey":%q,"storageServiceUrl":%q,"storageServiceTls":false,"gatewayUrl":%q,"gatewayRetryBackoff":"5s","gatewayRetryTimeout":"3m"`,
 			engineTestStorageKeyHex, storageAddr, fmt.Sprintf("http://%s:9998,http://%s:9999", host, host))
 		if creSettings != "" {
 			payload += fmt.Sprintf(`,"creSettings":%s`, creSettings)
 		}
+		if len(deniedHashes) > 0 {
+			quoted := make([]string, len(deniedHashes))
+			for i, h := range deniedHashes {
+				quoted[i] = fmt.Sprintf("%q", h)
+			}
+			payload += fmt.Sprintf(`,"deniedPublicKeyHashes":[%s]`, strings.Join(quoted, ","))
+		}
 		return payload + "}"
 	}
-	t.Setenv("ENCLAVE_SETTINGS", makeSettings(bootCRESettings))
+	t.Setenv("ENCLAVE_SETTINGS", makeSettings(bootCRESettings, nil))
 	if !tests.UseFakeEnclave() {
 		// confidential-workflows EIF is larger than confidential-http (wasmtime/CGO),
 		// so it needs more memory per enclave (~1148 MiB minimum).
@@ -713,7 +721,7 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	//    reboot.
 	testLogger.Info().Msg("CRE-settings phase: re-injecting settings with a 1-byte compressed-binary limit")
 	for _, configURL := range configURLs {
-		postEnclaveSettings(t, configURL, makeSettings(`{"global":{"PerWorkflow":{"WASMCompressedBinarySizeLimit":"1b"}}}`))
+		postEnclaveSettings(t, configURL, makeSettings(`{"global":{"PerWorkflow":{"WASMCompressedBinarySizeLimit":"1b"}}}`, nil))
 	}
 	waitForWorkflowExecutionFailure(t, testEnv, testLogger, workflowID,
 		"compressed binary size exceeds the maximum allowed size", 3*time.Minute)
@@ -721,11 +729,39 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	restoredAt := time.Now()
 	testLogger.Info().Msg("CRE-settings phase: re-injecting settings without creSettings to restore defaults")
 	for _, configURL := range configURLs {
-		postEnclaveSettings(t, configURL, makeSettings(""))
+		postEnclaveSettings(t, configURL, makeSettings("", nil))
 	}
 	waitForAdditionalWorkflowExecution(t, testEnv, testLogger, workflowID, restoredAt, 3*time.Minute)
 
-	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write + gateway-outage resilience + injected CRE limiter settings enforced and cleared validated")
+	// 10. Injected certificate public-key denylist is enforced on the enclave's
+	//     outbound TLS connections. Re-inject settings denying every public key
+	//     in the echo target's certificate chain; the next trigger's HTTP action
+	//     must fail the execution at the TLS handshake on a denied key. Then
+	//     re-inject without the denylist and the next trigger must succeed
+	//     again. This exercises the same runtime settings path as phase 9,
+	//     through the enclave's outbound TLS handshake.
+	testLogger.Info().Msg("Denylist phase: fetching the echo target's certificate chain")
+	echoParsed, err := url.Parse(echoURL)
+	require.NoError(t, err, "failed to parse the echo target URL")
+	deniedHashes, err := util.GetPublicKeyHashes(echoParsed.Hostname())
+	require.NoError(t, err, "failed to read the echo target's certificate chain")
+	require.NotEmpty(t, deniedHashes)
+
+	testLogger.Info().Msg("Denylist phase: re-injecting settings denying the echo target's public keys")
+	for _, configURL := range configURLs {
+		postEnclaveSettings(t, configURL, makeSettings("", deniedHashes))
+	}
+	waitForWorkflowExecutionFailure(t, testEnv, testLogger, workflowID,
+		"denied public key", 3*time.Minute)
+
+	clearedAt := time.Now()
+	testLogger.Info().Msg("Denylist phase: re-injecting settings without the denylist to restore")
+	for _, configURL := range configURLs {
+		postEnclaveSettings(t, configURL, makeSettings("", nil))
+	}
+	waitForAdditionalWorkflowExecution(t, testEnv, testLogger, workflowID, clearedAt, 3*time.Minute)
+
+	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write + gateway-outage resilience + injected CRE limiter settings and certificate denylist enforced and cleared validated")
 }
 
 // engineTestFeedID / engineTestPrice are the feed the confidential workflow reports

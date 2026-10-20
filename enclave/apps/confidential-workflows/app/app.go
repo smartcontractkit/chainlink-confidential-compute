@@ -205,6 +205,9 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 			return fmt.Errorf("parsing CRE settings: %w", err)
 		}
 	}
+	if err := util.DefaultCertificateDenylist().Set(req.DeniedPublicKeyHashes); err != nil {
+		return fmt.Errorf("parsing denied public key hashes: %w", err)
+	}
 
 	a.fetcher.SetMaxCacheBytes(int(req.MaxCacheBytes))
 	if a.httpFetcher != nil {
