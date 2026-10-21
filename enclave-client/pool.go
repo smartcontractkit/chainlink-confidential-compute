@@ -406,9 +406,9 @@ func (c *enclavePool) ExecuteBatch(ctx context.Context, reqs []types.SignedCompu
 					"error", err)
 				if c.metrics != nil {
 					c.metrics.Emit("attestation_validation_failed", map[string]any{
-						"enclave.id": util.EncodeToString(enclave.EnclaveID[:]),
-						"endpoint":   "execute",
-						"error":      err.Error(),
+						"enclave.id":        util.EncodeToString(enclave.EnclaveID[:]),
+						"endpoint":          "execute",
+						"attestation.error": err.Error(),
 					})
 				}
 				return fmt.Errorf("attestation validation failed for ExecuteBatch: %w", err)
