@@ -3,13 +3,83 @@ package util
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"syscall"
+
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
+
+// SanitizeOutboundHTTPError returns a fixed diagnostic for a hard HTTP failure.
+// Neither the message nor the error chain retains the original error: URLs,
+// certificate names, headers and response data may contain confidential values.
+// ClassifyOutboundHTTPError is applied first by callers; sanitizing a hard
+// failure does not turn it into a synthetic HTTP response.
+func SanitizeOutboundHTTPError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errHTTPRedirectNotAllowed) {
+		return errors.New(types.ErrHTTPRedirectNotAllowed)
+	}
+	var (
+		verificationErr *tls.CertificateVerificationError
+		authorityErr    x509.UnknownAuthorityError
+		hostnameErr     x509.HostnameError
+		certificateErr  x509.CertificateInvalidError
+	)
+	if errors.As(err, &hostnameErr) {
+		return errors.New("TLS certificate hostname mismatch")
+	}
+	if errors.As(err, &authorityErr) {
+		return errors.New("TLS certificate authority not trusted")
+	}
+	if errors.As(err, &certificateErr) {
+		if certificateErr.Reason == x509.Expired {
+			return errors.New("TLS certificate expired or not yet valid")
+		}
+		return errors.New("TLS certificate verification failed")
+	}
+	if errors.As(err, &verificationErr) {
+		return errors.New("TLS certificate verification failed")
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Err != nil {
+		if detail, ok := tlsAlertDiagnostics[opErr.Err.Error()]; ok {
+			switch opErr.Op {
+			case "remote error":
+				return errors.New("TLS peer reported " + detail)
+			case "local error":
+				return errors.New("TLS local error: " + detail)
+			}
+		}
+	}
+	return errors.New("transport failure")
+}
+
+// Like handshakeRejectionAlerts, this allowlist matches crypto/tls's unexported
+// alert type by exact text. Only these fixed diagnostics are returned; unknown
+// alerts and arbitrary error text remain redacted. These alerts stay hard errors.
+var tlsAlertDiagnostics = map[string]string{
+	tls.AlertError(10).Error(): "unexpected message",
+	tls.AlertError(20).Error(): "bad record MAC",
+	tls.AlertError(22).Error(): "record overflow",
+	tls.AlertError(42).Error(): "bad certificate",
+	tls.AlertError(43).Error(): "unsupported certificate",
+	tls.AlertError(44).Error(): "revoked certificate",
+	tls.AlertError(45).Error(): "expired certificate",
+	tls.AlertError(46).Error(): "unknown certificate",
+	tls.AlertError(47).Error(): "illegal parameter",
+	tls.AlertError(48).Error(): "unknown certificate authority",
+	tls.AlertError(49).Error(): "access denied",
+	tls.AlertError(50).Error(): "decode error",
+	tls.AlertError(51).Error(): "decrypt error",
+	tls.AlertError(80).Error(): "internal error",
+}
 
 // OutboundHTTPError is a synthetic HTTP response returned for an outbound
 // request failure that should surface to the caller as an HTTP status rather
