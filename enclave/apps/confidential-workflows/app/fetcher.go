@@ -31,6 +31,26 @@ type cacheEntry struct {
 	value []byte
 }
 
+// cacheLookupEvent is the observability event emitted once per binary cache
+// lookup, broken down by the hit/miss outcome. Both outcomes are emitted so the
+// miss count can be read as a rate against total lookups.
+const cacheLookupEvent = "workflow_binary_cache"
+
+const (
+	cacheOutcomeHit  = "hit"
+	cacheOutcomeMiss = "miss"
+)
+
+// emitCacheOutcome records one cache lookup. The host re-emits it as an OTel
+// counter tagged with the enclave metadata; "outcome" is an allowlisted
+// low-cardinality attribute. Nil-safe so emitter-less callers still work.
+func emitCacheOutcome(emitter types.Emitter, outcome string) {
+	if emitter == nil {
+		return
+	}
+	emitter.Emit(cacheLookupEvent, map[string]any{"outcome": outcome})
+}
+
 func NewBinaryFetcher(lggr logger.Logger) *BinaryFetcher {
 	return newBinaryFetcher(lggr, types.DefaultMaxBinaryCacheBytes)
 }
@@ -47,8 +67,9 @@ func newBinaryFetcher(lggr logger.Logger, maxCacheBytes int) *BinaryFetcher {
 // Fetch returns the workflow binary for locator, verified against binaryHash. On
 // a cache miss it fetches the raw bytes via raw (the storage fetcher), verifies
 // the SHA-256, and caches. The bytes returned by raw are the exact bytes
-// binary_hash covers (no transport encoding).
-func (f *BinaryFetcher) Fetch(ctx context.Context, locator string, binaryHash []byte, raw RawFetcher) ([]byte, error) {
+// binary_hash covers (no transport encoding). Every lookup emits a hit/miss
+// event on emitter, which may be nil.
+func (f *BinaryFetcher) Fetch(ctx context.Context, locator string, binaryHash []byte, raw RawFetcher, emitter types.Emitter) ([]byte, error) {
 	if len(binaryHash) == 0 {
 		return nil, fmt.Errorf("binary_hash is required for integrity verification")
 	}
@@ -58,8 +79,10 @@ func (f *BinaryFetcher) Fetch(ctx context.Context, locator string, binaryHash []
 
 	cacheKey := fmt.Sprintf("%x", binaryHash)
 	if cached, ok := f.cacheGet(cacheKey); ok {
+		emitCacheOutcome(emitter, cacheOutcomeHit)
 		return cached, nil
 	}
+	emitCacheOutcome(emitter, cacheOutcomeMiss)
 
 	binary, err := raw.FetchBinary(ctx, locator)
 	if err != nil {
