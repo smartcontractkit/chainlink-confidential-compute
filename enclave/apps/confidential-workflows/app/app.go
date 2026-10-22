@@ -453,7 +453,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	if execution.GetOrgId() == "" {
 		executionLogger.Warnw("Workflow execution is missing org ID")
 	}
-	result, err := executeWasm(execCtx, executionLogger, emitter, a.compileSlots.Load(), snapshot, binary, execution.SdkExecuteRequest, true, helper, execTimeout)
+	result, err := executeWasm(execCtx, executionLogger, emitter, a.compileSlots.Load(), a.limiterSettings.Snapshot(), binary, execution.SdkExecuteRequest, true, helper, execTimeout)
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to
