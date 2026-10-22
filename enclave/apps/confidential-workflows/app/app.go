@@ -14,7 +14,6 @@ import (
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
-	"github.com/smartcontractkit/chainlink-common/pkg/settings"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/host"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -62,8 +61,7 @@ type confidentialWorkflowsApp struct {
 	// gracePeriod is how long a validated execution waits before it starts
 	// running (nanoseconds; non-positive = no wait). Same reasoning as above for
 	// the atomic.
-	gracePeriod     atomic.Int64
-	limiterSettings *mutableSettings
+	gracePeriod atomic.Int64
 
 	// Runtime config + secrets injected via InjectSettings (host over vsock). A
 	// Nitro EIF is measured (PCR), so environment-specific endpoints can't be
@@ -194,17 +192,6 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	if err := req.validate(); err != nil {
 		return err
 	}
-	var limiterSettings settings.Getter
-	if len(req.CRESettings) > 0 {
-		var err error
-		// Use the Nop logger to avoid an empty-orgId error on every scoped
-		// lookup. Execution logs report missing org IDs and setting fallbacks.
-		// ref: https://github.com/smartcontractkit/chainlink/blob/2b6b3d42d648cf66c205006a0fb305373dd54f42/core/services/chainlink/application.go#L312
-		limiterSettings, err = (settings.GetterConfig{}).NewJSONGetter(req.CRESettings)
-		if err != nil {
-			return fmt.Errorf("parsing CRE settings: %w", err)
-		}
-	}
 
 	a.fetcher.SetMaxCacheBytes(int(req.MaxCacheBytes))
 	if a.httpFetcher != nil {
@@ -264,7 +251,6 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 		a.logger.Infof("[app] remote dispatch enabled (gateway=%s)", req.GatewayURL)
 	}
 	a.mu.Unlock()
-	a.limiterSettings.SetGetter(limiterSettings)
 	return nil
 }
 
@@ -302,7 +288,6 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 		httpFetcher:       config.HTTPFetcher,
 		tpe:               tpe,
 		limiter:           newExecutionLimiter(config.MaxConcurrentExecutions),
-		limiterSettings:   &mutableSettings{},
 		storageFactory:    config.StorageFetcherFactory,
 		dispatcherFactory: config.RemoteDispatcherFactory,
 	}
@@ -315,12 +300,11 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 // NewTestConfidentialWorkflowsApp supplies direct clients for tests and fake environments.
 func NewTestConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, opts ...Option) types.EnclaveApp {
 	a := &confidentialWorkflowsApp{
-		logger:          lggr,
-		fetcher:         NewBinaryFetcher(lggr),
-		httpFetcher:     httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
-		tpe:             tpe,
-		limiter:         newExecutionLimiter(0),
-		limiterSettings: &mutableSettings{},
+		logger:      lggr,
+		fetcher:     NewBinaryFetcher(lggr),
+		httpFetcher: httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
+		tpe:         tpe,
+		limiter:     newExecutionLimiter(0),
 		storageFactory: storageFetcherFactory(func() types.HTTPClient {
 			return util.NewRestrictedHTTPClient()
 		}),
@@ -449,11 +433,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		Workflow: execution.WorkflowId,
 	})
 	execTimeout := time.Duration(a.executionTimeout.Load())
-	executionLogger := logger.With(a.logger, append(contexts.CREValue(execCtx).LoggerKVs(), "execution_id", execution.GetExecutionId())...)
-	if execution.GetOrgId() == "" {
-		executionLogger.Warnw("Workflow execution is missing org ID")
-	}
-	result, err := executeWasm(execCtx, executionLogger, emitter, a.compileSlots.Load(), a.limiterSettings.Snapshot(), binary, execution.SdkExecuteRequest, true, helper, execTimeout)
+	result, err := executeWasm(execCtx, a.logger, emitter, a.compileSlots.Load(), binary, execution.SdkExecuteRequest, true, helper, execTimeout)
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to
