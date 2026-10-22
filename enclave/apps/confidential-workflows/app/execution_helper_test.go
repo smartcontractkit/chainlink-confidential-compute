@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -335,6 +337,91 @@ func permissiveFetcher() *httpfetch.Fetcher {
 	}, util.NewUnrestrictedClient())
 }
 
+type httpDoerFunc func(*http.Request) (*http.Response, error)
+
+func (f httpDoerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestCallCapability_HTTPCallLimitConcurrent(t *testing.T) {
+	var dispatched atomic.Int64
+	fetcher := httpfetch.NewFetcherWithClient(httpfetch.DefaultPolicy(), httpDoerFunc(func(*http.Request) (*http.Response, error) {
+		dispatched.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	}))
+	payload, err := anypb.New(&httpcap.Request{Url: "https://example.com/", Method: "GET"})
+	require.NoError(t, err)
+	req := &sdkpb.CapabilityRequest{Id: httpserver.ClientID, Method: "SendRequest", Payload: payload}
+	for _, callLimit := range []int{5, 2, 0} {
+		t.Run(fmt.Sprint(callLimit), func(t *testing.T) {
+			helper := &enclaveExecutionHelper{httpFetcher: fetcher, httpLimits: newHTTPActionLimits(t.Context(), nil, nil)}
+			helper.httpLimits.callLimit = callLimit
+			before := dispatched.Load()
+			var allowed atomic.Int64
+			var wg sync.WaitGroup
+			for range 30 {
+				wg.Go(func() {
+					resp, err := helper.CallCapability(t.Context(), req)
+					assert.NoError(t, err)
+					if resp.GetError() == "" {
+						allowed.Add(1)
+					} else {
+						assert.Contains(t, resp.GetError(), "capability call limit exceeded")
+					}
+				})
+			}
+			wg.Wait()
+			assert.Equal(t, int64(callLimit), allowed.Load())
+			assert.Equal(t, int64(callLimit), dispatched.Load()-before, "each execution gets its own budget on the shared fetcher")
+		})
+	}
+}
+
+func TestCallCapability_HTTPFailuresConsumeCallLimit(t *testing.T) {
+	valid, err := anypb.New(&httpcap.Request{Url: "https://example.com/", Method: "GET"})
+	require.NoError(t, err)
+	invalidMethod, err := anypb.New(&httpcap.Request{Url: "https://example.com/", Method: "TRACE"})
+	require.NoError(t, err)
+	for _, tt := range []struct {
+		name    string
+		payload *anypb.Any
+		wantErr string
+	}{
+		{"malformed payload", &anypb.Any{}, "unmarshalling request"},
+		{"policy rejection", invalidMethod, "not allowed"},
+		{"transport failure", valid, "test transport failure"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			fetcher := httpfetch.NewFetcherWithClient(httpfetch.DefaultPolicy(), httpDoerFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				return nil, fmt.Errorf("test transport failure")
+			}))
+			em := &recordingEmitter{}
+			helper := &enclaveExecutionHelper{httpFetcher: fetcher, emitter: em, httpLimits: newHTTPActionLimits(t.Context(), nil, nil)}
+			helper.httpLimits.callLimit = 1
+			for _, req := range []*sdkpb.CapabilityRequest{
+				{Id: "other@1.0.0", Method: "SendRequest"},
+				{Id: httpserver.ClientID, Method: "Other"},
+				{Id: consensusserver.ConsensusID, Method: "Simple"},
+			} {
+				_, err := helper.CallCapability(t.Context(), req)
+				require.NoError(t, err)
+			}
+			req := &sdkpb.CapabilityRequest{Id: httpserver.ClientID, Method: "SendRequest", Payload: tt.payload}
+			resp, err := helper.CallCapability(t.Context(), req)
+			require.NoError(t, err)
+			require.Contains(t, resp.GetError(), tt.wantErr)
+			before := calls
+			req.Payload = valid
+			resp, err = helper.CallCapability(t.Context(), req)
+			require.NoError(t, err)
+			require.Contains(t, resp.GetError(), "capability call limit exceeded")
+			assert.Equal(t, before, calls, "denied calls never reach the transport")
+			assert.Equal(t, false, em.lastDetails("capability_finished")["success"])
+			assert.Equal(t, "capability", em.lastDetails("capability_finished")["error_type"])
+		})
+	}
+}
+
 func TestCallCapability_InterceptsHTTPAction(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -348,6 +435,7 @@ func TestCallCapability_InterceptsHTTPAction(t *testing.T) {
 	helper := &enclaveExecutionHelper{
 		logger:      logger.Test(t),
 		httpFetcher: permissiveFetcher(),
+		httpLimits:  newHTTPActionLimits(t.Context(), nil, nil),
 	}
 
 	input := &httpcap.Request{
@@ -377,6 +465,7 @@ func TestCallCapability_InterceptsHTTPAction_SSRFBlockReturns400(t *testing.T) {
 	helper := &enclaveExecutionHelper{
 		logger:      logger.Test(t),
 		httpFetcher: httpfetch.NewFetcher(httpfetch.DefaultPolicy()), // https-only, blocks loopback
+		httpLimits:  newHTTPActionLimits(t.Context(), nil, nil),
 	}
 
 	input := &httpcap.Request{Url: "http://127.0.0.1:80/", Method: "GET"}
