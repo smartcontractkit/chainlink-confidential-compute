@@ -1,10 +1,15 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/settings"
 )
 
 // WorkflowSettings is the runtime config + secrets contract of this app. The
@@ -28,7 +33,7 @@ import (
 //   - GatewayURL: the Gateway endpoint(s) for remote dispatch (dynamic secrets +
 //     capability calls). Accepts a comma-separated list; the enclave round-robins
 //     across them and fails over to the next on a transport/proxy error.
-//   - MaxBinarySize: max decompressed workflow-binary size accepted from
+//   - MaxBinarySize: max still-compressed workflow-binary size accepted from
 //     storage, in bytes. Zero falls back to the enclave's built-in default.
 //   - BinaryFetchTimeout: per-fetch timeout for downloading a workflow binary.
 //     Zero falls back to the enclave's built-in default.
@@ -36,6 +41,7 @@ import (
 //     Zero falls back to the enclave's built-in default.
 //   - RequestTimeout: global request timeout inside the enclave, used as the
 //     default deadline for outbound HTTP a workflow makes while being served.
+//     HTTP actions cap this default at PerWorkflow.HTTPAction.ConnectionTimeout.
 //     Should track the caller's enclave request timeout, since work outliving
 //     that deadline is work nobody is waiting for. Zero falls back to the
 //     enclave's built-in default.
@@ -55,6 +61,15 @@ import (
 //     memory; raising it bounds queue wait when many workflows compile at
 //     once. Zero falls back to defaultMaxConcurrentCompilations; negative
 //     values are rejected so a typo can't fully stall execution.
+//   - CRESettings: standard CRE scoped settings used by the WASM module and
+//     HTTP action limiters. The object may contain global, org, owner and workflow
+//     overrides and is replaced as a unit on every injection, including runtime
+//     reinjection via POST /settings. Each execution snapshots these settings;
+//     they are not automatically synchronized with the CRE backend. Raising
+//     WASMCompressedBinarySizeLimit also requires raising MaxBinarySize because
+//     the storage download cap is enforced first. WASMMemoryLimit is truncated
+//     to whole megabytes by the WASM host. Missing required scope metadata or
+//     invalid values fall back to the corresponding CRE defaults.
 type WorkflowSettings struct {
 	StorageKey            string   `json:"storageKey"`
 	StorageServiceURL     string   `json:"storageServiceUrl"`
@@ -74,17 +89,63 @@ type WorkflowSettings struct {
 	// call or secret fetch (all attempts, including backoffs), independent of the
 	// per-attempt GatewayRequestTimeout. Zero falls back to the enclave's
 	// built-in default.
-	GatewayRetryTimeout Duration `json:"gatewayRetryTimeout,omitempty"`
-	ExecutionTimeout    Duration `json:"executionTimeout,omitempty"`
-	WorkflowGracePeriod Duration `json:"workflowGracePeriod,omitempty"`
+	GatewayRetryTimeout Duration        `json:"gatewayRetryTimeout,omitempty"`
+	ExecutionTimeout    Duration        `json:"executionTimeout,omitempty"`
+	WorkflowGracePeriod Duration        `json:"workflowGracePeriod,omitempty"`
 	// MaxConcurrentCompilations caps simultaneous WASM compilations; zero means
 	// defaultMaxConcurrentCompilations.
-	MaxConcurrentCompilations int64 `json:"maxConcurrentCompilations,omitempty"`
+	MaxConcurrentCompilations int64           `json:"maxConcurrentCompilations,omitempty"`
+	CRESettings               json.RawMessage `json:"creSettings,omitempty"`
 }
 
 // defaultMaxConcurrentCompilations is the compile-slot count applied when the
 // injected settings omit MaxConcurrentCompilations.
 const defaultMaxConcurrentCompilations = 4
+
+type mutableSettings struct {
+	mu      sync.RWMutex
+	current *limiterSettingsSnapshot
+}
+
+type limiterSettingsSnapshot struct {
+	getter settings.Getter
+	logged sync.Map
+}
+
+func (s *mutableSettings) SetGetter(getter settings.Getter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.current = &limiterSettingsSnapshot{getter: getter}
+}
+
+func (s *mutableSettings) Snapshot() *limiterSettingsSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.current
+}
+
+// Limit fallback warnings to once per setting per injected document.
+func (s *limiterSettingsSnapshot) logFallback(lggr logger.Logger, key string, err error) {
+	if s == nil || lggr == nil {
+		return
+	}
+	if _, loaded := s.logged.LoadOrStore(key, struct{}{}); !loaded {
+		lggr.Warnw("Failed to resolve CRE setting. Using default value", "key", key, "err", err)
+	}
+}
+
+func resolveSetting[T any](ctx context.Context, lggr logger.Logger, snapshot *limiterSettingsSnapshot, setting settings.Setting[T]) T {
+	if snapshot == nil {
+		return setting.DefaultValue
+	}
+	value, err := setting.GetOrDefault(ctx, snapshot.getter)
+	if err != nil {
+		// GetOrDefault returns the default alongside the error. Settings
+		// failures remain non-fatal for the execution.
+		snapshot.logFallback(lggr, setting.Key, err)
+	}
+	return value
+}
 
 // validate reports the required settings the payload left empty. The enclave
 // cannot fetch a workflow binary without the storage endpoint and key, and

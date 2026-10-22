@@ -254,7 +254,7 @@ func TestWorkflowCapacityBounds(t *testing.T) {
 	for _, tc := range []struct {
 		total    uint64
 		min, max int
-	}{{0, 1, 1}, {512, 1, 1}, {1024, 1, 1}, {1152, 1, 1}, {1950, 7, 7}, {2024, 7, 7}, {2048, 7, 8}, {2049, 8, 8}} {
+	}{{0, 1, 1}, {512, 1, 1}, {1024, 1, 1}, {1152, 1, 1}, {1950, 9, 9}, {2024, 9, 10}, {2048, 10, 10}, {2049, 10, 10}} {
 		t.Run(fmt.Sprint(tc.total), func(t *testing.T) {
 			minCapacity, maxCapacity := workflowCapacityBounds(tc.total)
 			require.Equal(t, tc.min, minCapacity)

@@ -2,17 +2,23 @@ package httpfetch
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	httpcap "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http"
+	"github.com/smartcontractkit/chainlink-common/pkg/config"
+	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -21,11 +27,197 @@ type doerFunc func(*http.Request) (*http.Response, error)
 
 func (d doerFunc) Do(req *http.Request) (*http.Response, error) { return d(req) }
 
+func defaultLimits() Limits {
+	cfg := cresettings.Default.PerWorkflow.HTTPAction
+	return Limits{
+		ConnectionTimeout: cfg.ConnectionTimeout.DefaultValue,
+		RequestSizeLimit:  cfg.RequestSizeLimit.DefaultValue,
+		ResponseSizeLimit: cfg.ResponseSizeLimit.DefaultValue,
+	}
+}
+
 func TestFetch_MethodNotAllowed(t *testing.T) {
 	f := NewFetcher(DefaultPolicy())
-	_, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://example.com/", Method: "TRACE"})
+	_, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://example.com/", Method: "TRACE"}, defaultLimits())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `method "TRACE" not allowed`)
+}
+
+func TestFetch_RequestSizeLimit(t *testing.T) {
+	for _, field := range []string{"body", "headers", "multi headers", "url", "mtls key", "mtls certificate"} {
+		t.Run(field, func(t *testing.T) {
+			in := &httpcap.Request{Url: "https://example.com/", Method: "POST"}
+			large := strings.Repeat("x", 10_000)
+			switch field {
+			case "body":
+				// Base64 alone exceeds 10 KB while the raw body fits.
+				in.Body = []byte(large[:7_503])
+			case "headers":
+				in.Headers = map[string]string{"X-Test": large} //nolint:staticcheck // deprecated headers remain size-limited
+			case "multi headers":
+				in.MultiHeaders = map[string]*httpcap.HeaderValues{"X-Test": {Values: []string{large}}}
+			case "url":
+				in.Url += large
+			case "mtls key":
+				in.Mtls = &httpcap.MtlsAuth{PrivateKey: []byte(large)}
+			case "mtls certificate":
+				in.Mtls = &httpcap.MtlsAuth{Certificate: []byte(large)}
+			}
+			original := proto.Clone(in)
+			limits := defaultLimits()
+			assert.Greater(t, requestSizeLowerBound(in), limits.RequestSizeLimit)
+			calls := 0
+			f := NewFetcherWithClient(DefaultPolicy(), doerFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+			}))
+			_, err := f.Fetch(t.Context(), in, limits)
+			require.ErrorContains(t, err, "RequestSizeLimit")
+			assert.Zero(t, calls)
+
+			normalized := proto.Clone(in).(*httpcap.Request)
+			normalized.Timeout = durationpb.New(limits.ConnectionTimeout)
+			encoded, err := json.Marshal(normalized)
+			require.NoError(t, err)
+			limits.RequestSizeLimit = config.Size(len(encoded))
+			_, err = f.Fetch(t.Context(), in, limits)
+			require.NoError(t, err, "exact JSON boundary is allowed")
+			assert.Equal(t, 1, calls)
+			limits.RequestSizeLimit--
+			_, err = f.Fetch(t.Context(), in, limits)
+			require.ErrorContains(t, err, "RequestSizeLimit")
+			assert.Equal(t, 1, calls)
+			assert.True(t, proto.Equal(original, in), "the caller's request is not mutated")
+		})
+	}
+}
+
+func BenchmarkFetch_OversizedRequest(b *testing.B) {
+	in := &httpcap.Request{Url: "https://example.com/", Method: "POST", Body: make([]byte, 32<<20)}
+	f := NewFetcher(DefaultPolicy())
+	limits := defaultLimits()
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := f.Fetch(b.Context(), in, limits); err == nil {
+			b.Fatal("expected request size rejection")
+		}
+	}
+}
+
+func TestFetch_ZeroConnectionTimeout(t *testing.T) {
+	f := NewFetcherWithClient(DefaultPolicy(), doerFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("zero timeout limit must reject before dispatch")
+		return nil, nil
+	}))
+	limits := defaultLimits()
+	limits.ConnectionTimeout = 0
+	for _, timeout := range []*durationpb.Duration{nil, durationpb.New(0), durationpb.New(time.Second)} {
+		_, err := f.Fetch(t.Context(), &httpcap.Request{Url: "https://example.com/", Method: "GET", Timeout: timeout}, limits)
+		require.ErrorContains(t, err, "ConnectionTimeout")
+	}
+}
+
+func TestFetch_ConnectionTimeout(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		timeout *durationpb.Duration
+		want    time.Duration
+		wantErr string
+	}{
+		{"omitted", nil, 2 * time.Second, ""},
+		{"zero", durationpb.New(0), 2 * time.Second, ""},
+		{"shorter", durationpb.New(time.Second), time.Second, ""},
+		{"boundary", durationpb.New(2 * time.Second), 2 * time.Second, ""},
+		{"exceeded", durationpb.New(2*time.Second + time.Nanosecond), 0, "ConnectionTimeout"},
+		{"negative", durationpb.New(-time.Second), 0, "negative"},
+		{"invalid", &durationpb.Duration{Nanos: 1_000_000_000}, 0, "invalid timeout"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			f := NewFetcherWithClient(DefaultPolicy(), doerFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				deadline, ok := req.Context().Deadline()
+				require.True(t, ok)
+				assert.InDelta(t, tt.want.Seconds(), time.Until(deadline).Seconds(), 0.5)
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+			}))
+			limits := defaultLimits()
+			limits.ConnectionTimeout = 2 * time.Second
+			_, err := f.Fetch(t.Context(), &httpcap.Request{Url: "https://example.com/", Method: "GET", Timeout: tt.timeout}, limits)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				assert.Zero(t, calls)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, 1, calls)
+			}
+		})
+	}
+}
+
+type trackedBody struct {
+	io.Reader
+	read   int
+	closed bool
+}
+
+func (b *trackedBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	b.read += n
+	return n, err
+}
+
+func (b *trackedBody) Close() error { b.closed = true; return nil }
+
+func TestFetch_ResponseSizeLimit(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		limit    config.Size
+		bodySize int
+		wantRead int
+		wantErr  bool
+	}{
+		{"default boundary", 100_000, 100_000, 100_000, false},
+		{"default exceeded", 100_000, 200_000, 100_001, true},
+		{"lower override", 3, 10, 4, true},
+		{"higher override", 200_000, 200_000, 200_000, false},
+		{"policy cap remains", 2_000_000, 2_000_000, int(DefaultPolicy().MaxResponseBodyBytes) + 1, true},
+		{"zero allows empty", 0, 0, 0, false},
+		{"zero rejects body", 0, 1, 1, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := &trackedBody{Reader: strings.NewReader(strings.Repeat("x", tt.bodySize))}
+			f := NewFetcherWithClient(DefaultPolicy(), doerFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: body}, nil
+			}))
+			limits := defaultLimits()
+			limits.ResponseSizeLimit = tt.limit
+			resp, err := f.Fetch(t.Context(), &httpcap.Request{Url: "https://example.com/", Method: "GET"}, limits)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "response body exceeds limit")
+				assert.Nil(t, resp)
+			} else {
+				require.NoError(t, err)
+				assert.Len(t, resp.Body, tt.bodySize)
+			}
+			assert.Equal(t, tt.wantRead, body.read)
+			assert.True(t, body.closed)
+		})
+	}
+}
+
+func TestFetch_ParentDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	want, _ := ctx.Deadline()
+	f := NewFetcherWithClient(DefaultPolicy(), doerFunc(func(req *http.Request) (*http.Response, error) {
+		got, ok := req.Context().Deadline()
+		require.True(t, ok)
+		assert.Equal(t, want, got)
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	}))
+	_, err := f.Fetch(ctx, &httpcap.Request{Url: "https://example.com/", Method: "GET"}, defaultLimits())
+	require.NoError(t, err)
 }
 
 func TestSetDefaultTimeout(t *testing.T) {
@@ -43,7 +235,7 @@ func TestSetDefaultTimeout(t *testing.T) {
 	f := NewFetcherWithClient(policy, stub)
 
 	get := func(timeout *durationpb.Duration) {
-		_, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://example.com/", Method: "GET", Timeout: timeout})
+		_, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://example.com/", Method: "GET", Timeout: timeout}, defaultLimits())
 		require.NoError(t, err)
 	}
 
@@ -52,11 +244,11 @@ func TestSetDefaultTimeout(t *testing.T) {
 
 	f.SetDefaultTimeout(80 * time.Second)
 	get(nil)
-	assert.InDelta(t, 80, remaining.Seconds(), 1, "injected timeout applies")
+	assert.InDelta(t, 10, remaining.Seconds(), 1, "CRE ceiling bounds the injected timeout")
 
 	f.SetDefaultTimeout(0)
 	get(nil)
-	assert.InDelta(t, 80, remaining.Seconds(), 1, "non-positive injection is ignored")
+	assert.InDelta(t, 10, remaining.Seconds(), 1, "non-positive injection is ignored")
 
 	get(durationpb.New(2 * time.Second))
 	assert.InDelta(t, 2, remaining.Seconds(), 1, "caller-supplied timeout still wins")
@@ -69,7 +261,7 @@ func TestDefaultPolicy_RejectsHTTPLoopback(t *testing.T) {
 	f := NewFetcher(DefaultPolicy())
 
 	// http scheme is not in the restricted client's allowlist.
-	resp, err := f.Fetch(context.Background(), &httpcap.Request{Url: "http://127.0.0.1:80/", Method: "GET"})
+	resp, err := f.Fetch(context.Background(), &httpcap.Request{Url: "http://127.0.0.1:80/", Method: "GET"}, defaultLimits())
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, uint32(http.StatusBadRequest), resp.StatusCode)
@@ -77,7 +269,7 @@ func TestDefaultPolicy_RejectsHTTPLoopback(t *testing.T) {
 
 	// Https to a loopback literal is rejected by safeurl's baked-in privateNetworks.
 	u := &url.URL{Scheme: "https", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(443))}
-	resp, err = f.Fetch(context.Background(), &httpcap.Request{Url: u.String(), Method: "GET"})
+	resp, err = f.Fetch(context.Background(), &httpcap.Request{Url: u.String(), Method: "GET"}, defaultLimits())
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, uint32(http.StatusBadRequest), resp.StatusCode)
@@ -90,7 +282,7 @@ func TestFetch_UpstreamRejectsTLSHandshakeReturns502(t *testing.T) {
 	addr := serveFatalTLSAlert(t)
 	f := NewFetcherWithClient(DefaultPolicy(), util.NewUnrestrictedClient())
 
-	resp, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://" + addr, Method: "GET"})
+	resp, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://" + addr, Method: "GET"}, defaultLimits())
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, uint32(http.StatusBadGateway), resp.StatusCode)

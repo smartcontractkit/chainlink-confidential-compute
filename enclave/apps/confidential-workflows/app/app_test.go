@@ -9,10 +9,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
 	"github.com/smartcontractkit/cre-sdk-go/internal_testing/capabilities/basictrigger"
 	"google.golang.org/protobuf/types/known/anypb"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/smartcontractkit/cre-sdk-go/internal_testing/capabilities/basicaction"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/semaphore"
 	"google.golang.org/protobuf/proto"
 
@@ -108,6 +111,82 @@ func TestExecute_HelloWasm(t *testing.T) {
 	assert.Equal(t, "hello from enclave wasm", errResult.Value.GetStringValue())
 }
 
+func TestExecute_LimiterSettingsFallBackWithoutOwner(t *testing.T) {
+	raw := buildTestWasm(t, "hello")
+	var compressed bytes.Buffer
+	w := brotli.NewWriter(&compressed)
+	_, err := w.Write(raw)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	binary := compressed.Bytes()
+	hash := sha256.Sum256(binary)
+	app, locator := newStorageBackedAppWithSettings(t, binary, func(s *WorkflowSettings) {
+		s.CRESettings = json.RawMessage(`{"global": {}}`)
+	})
+	execution := makeExecution(t, "wf-hello", locator, hash[:])
+	data, err := proto.Marshal(execution)
+	require.NoError(t, err)
+
+	output, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+	require.Nil(t, execErr, "expected limiter defaults, got: %+v", execErr)
+	require.NotEmpty(t, output)
+}
+
+func TestExecute_LimiterDiagnostics(t *testing.T) {
+	raw := buildTestWasm(t, "hello")
+	var compressed bytes.Buffer
+	w := brotli.NewWriter(&compressed)
+	_, err := w.Write(raw)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	binary := compressed.Bytes()
+	hash := sha256.Sum256(binary)
+
+	for _, org := range []string{"org", ""} {
+		t.Run("org="+org, func(t *testing.T) {
+			app, locator := newStorageBackedAppWithSettings(t, binary, func(s *WorkflowSettings) {
+				s.CRESettings = json.RawMessage(`{"global":{"PerWorkflow":{
+					"WASMMemoryLimit":"256mb", "LogLineLimit":"banana"
+				}}}`)
+			})
+			lggr, logs := logger.TestObserved(t, zapcore.DebugLevel)
+			app.(*confidentialWorkflowsApp).logger = lggr
+			execution := makeExecution(t, "wf-hello", locator, hash[:])
+			execution.OrgId = org
+			execution.Owner = "owner"
+			execution.ExecutionId = "execution"
+			data, err := proto.Marshal(execution)
+			require.NoError(t, err)
+			_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+			require.Nil(t, execErr)
+
+			resolved := logs.FilterMessage("Applied CRE WASM limits").All()
+			require.Len(t, resolved, 1)
+			fields := resolved[0].ContextMap()
+			assert.Len(t, fields, 16) // 12 settings and four execution identifiers.
+			assert.Equal(t, "256mb", fields[cresettings.Default.PerWorkflow.WASMMemoryLimit.Key])
+			assert.Equal(t, cresettings.Default.PerWorkflow.LogLineLimit.DefaultValue.String(), fields[cresettings.Default.PerWorkflow.LogLineLimit.Key])
+
+			fallback := logs.FilterMessage("Failed to resolve CRE setting. Using default value").All()
+			require.Len(t, fallback, 1)
+			missingOrg := logs.FilterMessage("Workflow execution is missing org ID").All()
+			if org == "" {
+				require.Len(t, missingOrg, 1)
+			} else {
+				assert.Empty(t, missingOrg)
+			}
+			for _, entry := range append(append(resolved, fallback...), missingOrg...) {
+				fields := entry.ContextMap()
+				assert.Equal(t, org, fields["org"])
+				assert.Equal(t, "owner", fields["owner"])
+				assert.Equal(t, "wf-hello", fields["workflow"])
+				assert.Equal(t, "execution", fields["execution_id"])
+			}
+		})
+	}
+}
+
 // TestExecute_HttpCallWasm is the WASM-level integration test for the
 // in-enclave http-actions shortcircuit (tier 2 of execution_helper.go).
 // It compiles the http-call WASM, runs it through cwapp.Execute, and asserts
@@ -146,6 +225,8 @@ func TestExecute_HttpCallWasm(t *testing.T) {
 
 	execution := &confworkflowtypes.WorkflowExecution{
 		WorkflowId:        "wf-http-call",
+		Owner:             "owner",
+		OrgId:             "org",
 		BinaryUrl:         testLocator,
 		BinaryHash:        hash[:],
 		SdkExecuteRequest: execReq,
@@ -159,11 +240,17 @@ func TestExecute_HttpCallWasm(t *testing.T) {
 	//    shortcircuit handles SendRequest entirely in-process.
 	// Inject an unrestricted client so the fetcher can reach the loopback echo
 	// server the restricted client would block.
+	var observedTimeout atomic.Int64
+	client := util.NewUnrestrictedClient()
 	fetcher := httpfetch.NewFetcherWithClient(httpfetch.Policy{
 		AllowedMethods:       []string{"GET", "POST", "PUT", "DELETE", "PATCH"},
 		DefaultTimeout:       5 * time.Second,
 		MaxResponseBodyBytes: 10 << 20,
-	}, util.NewUnrestrictedClient())
+	}, httpDoerFunc(func(req *http.Request) (*http.Response, error) {
+		deadline, _ := req.Context().Deadline()
+		observedTimeout.Store(int64(time.Until(deadline)))
+		return client.Do(req)
+	}))
 
 	app, _ := newStorageBackedApp(t, binary, WithHTTPFetcher(fetcher))
 	output, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
@@ -194,6 +281,46 @@ func TestExecute_HttpCallWasm(t *testing.T) {
 	var echoResp map[string]string
 	require.NoError(t, json.Unmarshal([]byte(bodyStr), &echoResp), fmt.Sprintf("echo response: %s", bodyStr))
 	assert.Equal(t, "hello from wasm", echoResp["body"])
+
+	cwApp := app.(*confidentialWorkflowsApp)
+	for _, tt := range []struct {
+		name        string
+		cre         string
+		wantError   string
+		wantTimeout time.Duration
+	}{
+		{"global call limit", `{"global":{"PerWorkflow":{"HTTPAction":{"CallLimit":"0"}}}}`, "capability call limit exceeded", 0},
+		{"org call limit", `{"org":{"org":{"PerWorkflow":{"HTTPAction":{"CallLimit":"0"}}}}}`, "capability call limit exceeded", 0},
+		{"owner call limit", `{"owner":{"owner":{"PerWorkflow":{"HTTPAction":{"CallLimit":"0"}}}}}`, "capability call limit exceeded", 0},
+		{"workflow wins", `{"global":{"PerWorkflow":{"HTTPAction":{"CallLimit":"0"}}},"workflow":{"wf-http-call":{"PerWorkflow":{"HTTPAction":{"CallLimit":"1"}}}}}`, "", 5 * time.Second},
+		{"request size", `{"global":{"PerWorkflow":{"HTTPAction":{"RequestSizeLimit":"1b"}}}}`, "RequestSizeLimit", 0},
+		{"response size", `{"global":{"PerWorkflow":{"HTTPAction":{"ResponseSizeLimit":"1b"}}}}`, "response body exceeds limit", 0},
+		{"timeout", `{"workflow":{"wf-http-call":{"PerWorkflow":{"HTTPAction":{"ConnectionTimeout":"1s"}}}}}`, "", time.Second},
+		{"invalid override", `{"global":{"PerWorkflow":{"HTTPAction":{"CallLimit":"banana"}}}}`, "", 5 * time.Second},
+		{"omitted clears overrides", "", "", 5 * time.Second},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			settings := testSettings(cwApp.storageServiceURL)
+			settings.WorkflowGracePeriod = -1
+			settings.CRESettings = json.RawMessage(tt.cre)
+			raw, err := json.Marshal(settings)
+			require.NoError(t, err)
+			require.NoError(t, cwApp.InjectSettings(raw))
+			for range 2 {
+				output, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+				require.Nil(t, execErr, "expected workflow result, got: %+v", execErr)
+				var response confworkflowtypes.ConfidentialWorkflowResponse
+				require.NoError(t, proto.Unmarshal(output, &response))
+				if tt.wantError != "" {
+					assert.Contains(t, response.SdkExecutionResult.GetError(), tt.wantError)
+				} else {
+					require.Empty(t, response.SdkExecutionResult.GetError())
+					require.NotNil(t, response.SdkExecutionResult.GetValue())
+					assert.InDelta(t, tt.wantTimeout.Seconds(), time.Duration(observedTimeout.Load()).Seconds(), 0.5)
+				}
+			}
+		})
+	}
 }
 
 // End-to-end proof that a per-capability metric flows all the way through:
