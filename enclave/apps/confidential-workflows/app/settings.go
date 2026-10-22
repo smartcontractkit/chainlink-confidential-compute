@@ -4,11 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
-
-	"github.com/smartcontractkit/chainlink-common/pkg/logger"
-	"github.com/smartcontractkit/chainlink-common/pkg/settings"
 )
 
 // WorkflowSettings is the runtime config + secrets contract of this app. The
@@ -32,7 +28,7 @@ import (
 //   - GatewayURL: the Gateway endpoint(s) for remote dispatch (dynamic secrets +
 //     capability calls). Accepts a comma-separated list; the enclave round-robins
 //     across them and fails over to the next on a transport/proxy error.
-//   - MaxBinarySize: max still-compressed workflow-binary size accepted from
+//   - MaxBinarySize: max decompressed workflow-binary size accepted from
 //     storage, in bytes. Zero falls back to the enclave's built-in default.
 //   - BinaryFetchTimeout: per-fetch timeout for downloading a workflow binary.
 //     Zero falls back to the enclave's built-in default.
@@ -59,15 +55,6 @@ import (
 //     memory; raising it bounds queue wait when many workflows compile at
 //     once. Zero falls back to defaultMaxConcurrentCompilations; negative
 //     values are rejected so a typo can't fully stall execution.
-//   - CRESettings: standard CRE scoped settings used by the WASM module
-//     limiters. The object may contain global, org, owner and workflow
-//     overrides and is replaced as a unit on every injection, including runtime
-//     reinjection via POST /settings. Each execution snapshots these settings;
-//     they are not automatically synchronized with the CRE backend. Raising
-//     WASMCompressedBinarySizeLimit also requires raising MaxBinarySize because
-//     the storage download cap is enforced first. WASMMemoryLimit is truncated
-//     to whole megabytes by the WASM host. Missing required scope metadata or
-//     invalid values fall back to the corresponding CRE defaults.
 type WorkflowSettings struct {
 	StorageKey            string   `json:"storageKey"`
 	StorageServiceURL     string   `json:"storageServiceUrl"`
@@ -92,45 +79,12 @@ type WorkflowSettings struct {
 	WorkflowGracePeriod Duration `json:"workflowGracePeriod,omitempty"`
 	// MaxConcurrentCompilations caps simultaneous WASM compilations; zero means
 	// defaultMaxConcurrentCompilations.
-	MaxConcurrentCompilations int64           `json:"maxConcurrentCompilations,omitempty"`
-	CRESettings               json.RawMessage `json:"creSettings,omitempty"`
+	MaxConcurrentCompilations int64 `json:"maxConcurrentCompilations,omitempty"`
 }
 
 // defaultMaxConcurrentCompilations is the compile-slot count applied when the
 // injected settings omit MaxConcurrentCompilations.
 const defaultMaxConcurrentCompilations = 4
-
-type mutableSettings struct {
-	mu      sync.RWMutex
-	current *limiterSettingsSnapshot
-}
-
-type limiterSettingsSnapshot struct {
-	getter settings.Getter
-	logged sync.Map
-}
-
-func (s *mutableSettings) SetGetter(getter settings.Getter) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.current = &limiterSettingsSnapshot{getter: getter}
-}
-
-func (s *mutableSettings) Snapshot() *limiterSettingsSnapshot {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.current
-}
-
-// Limit fallback warnings to once per setting per injected document.
-func (s *limiterSettingsSnapshot) logFallback(lggr logger.Logger, key string, err error) {
-	if s == nil || lggr == nil {
-		return
-	}
-	if _, loaded := s.logged.LoadOrStore(key, struct{}{}); !loaded {
-		lggr.Warnw("Failed to resolve CRE WASM setting. Using default value", "key", key, "err", err)
-	}
-}
 
 // validate reports the required settings the payload left empty. The enclave
 // cannot fetch a workflow binary without the storage endpoint and key, and

@@ -40,7 +40,7 @@ func TestExecuteWasm_CompilationQueueOverlappingGuests(t *testing.T) {
 		// The WASM host writes to the request, so each guest needs its own.
 		req := makeExecution(t, "workflow", "unused", nil).SdkExecuteRequest
 		wg.Go(func() {
-			_, err := executeWasm(ctx, logger.Test(t), emitter.NewNoOpEmitter(), slot, nil, binary, req, false, helper, time.Minute)
+			_, err := executeWasm(ctx, logger.Test(t), emitter.NewNoOpEmitter(), slot, binary, req, false, helper, time.Minute)
 			done <- err
 		})
 	}
@@ -72,7 +72,7 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 		s.MaxConcurrentCompilations = 1
 	}, WithMaxConcurrentExecutions(2))
 	a := enclave.(*confidentialWorkflowsApp)
-	lggr, logs := logger.TestObserved(t, zapcore.DebugLevel)
+	lggr, _ := logger.TestObserved(t, zapcore.DebugLevel)
 	a.logger = lggr
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
@@ -91,16 +91,13 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 		})
 	}
 	require.Eventually(t, func() bool { return len(a.limiter.slots) == 2 }, 5*time.Second, time.Millisecond)
-	require.Eventually(t, func() bool {
-		return logs.FilterMessage("Applied CRE WASM limits").Len() == 2
-	}, 5*time.Second, time.Millisecond)
 	_, rejected := a.Execute([32]byte{3}, types.AppIDConfidentialWorkflows, nil, nil, emitter.NewNoOpEmitter())
 	require.NotNil(t, rejected)
 	require.Equal(t, http.StatusTooManyRequests, rejected.Code)
 	select {
 	case result := <-results:
 		t.Fatalf("execution bypassed occupied compilation queue: %+v", result)
-	default:
+	case <-time.After(100 * time.Millisecond):
 	}
 	release()
 	for range 2 {
