@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -41,7 +40,6 @@ import (
 //     Zero falls back to the enclave's built-in default.
 //   - RequestTimeout: global request timeout inside the enclave, used as the
 //     default deadline for outbound HTTP a workflow makes while being served.
-//     HTTP actions cap this default at PerWorkflow.HTTPAction.ConnectionTimeout.
 //     Should track the caller's enclave request timeout, since work outliving
 //     that deadline is work nobody is waiting for. Zero falls back to the
 //     enclave's built-in default.
@@ -61,8 +59,8 @@ import (
 //     memory; raising it bounds queue wait when many workflows compile at
 //     once. Zero falls back to defaultMaxConcurrentCompilations; negative
 //     values are rejected so a typo can't fully stall execution.
-//   - CRESettings: standard CRE scoped settings used by the WASM module and
-//     HTTP action limiters. The object may contain global, org, owner and workflow
+//   - CRESettings: standard CRE scoped settings used by the WASM module
+//     limiters. The object may contain global, org, owner and workflow
 //     overrides and is replaced as a unit on every injection, including runtime
 //     reinjection via POST /settings. Each execution snapshots these settings;
 //     they are not automatically synchronized with the CRE backend. Raising
@@ -89,9 +87,9 @@ type WorkflowSettings struct {
 	// call or secret fetch (all attempts, including backoffs), independent of the
 	// per-attempt GatewayRequestTimeout. Zero falls back to the enclave's
 	// built-in default.
-	GatewayRetryTimeout Duration        `json:"gatewayRetryTimeout,omitempty"`
-	ExecutionTimeout    Duration        `json:"executionTimeout,omitempty"`
-	WorkflowGracePeriod Duration        `json:"workflowGracePeriod,omitempty"`
+	GatewayRetryTimeout Duration `json:"gatewayRetryTimeout,omitempty"`
+	ExecutionTimeout    Duration `json:"executionTimeout,omitempty"`
+	WorkflowGracePeriod Duration `json:"workflowGracePeriod,omitempty"`
 	// MaxConcurrentCompilations caps simultaneous WASM compilations; zero means
 	// defaultMaxConcurrentCompilations.
 	MaxConcurrentCompilations int64           `json:"maxConcurrentCompilations,omitempty"`
@@ -130,21 +128,8 @@ func (s *limiterSettingsSnapshot) logFallback(lggr logger.Logger, key string, er
 		return
 	}
 	if _, loaded := s.logged.LoadOrStore(key, struct{}{}); !loaded {
-		lggr.Warnw("Failed to resolve CRE setting. Using default value", "key", key, "err", err)
+		lggr.Warnw("Failed to resolve CRE WASM setting. Using default value", "key", key, "err", err)
 	}
-}
-
-func resolveSetting[T any](ctx context.Context, lggr logger.Logger, snapshot *limiterSettingsSnapshot, setting settings.Setting[T]) T {
-	if snapshot == nil {
-		return setting.DefaultValue
-	}
-	value, err := setting.GetOrDefault(ctx, snapshot.getter)
-	if err != nil {
-		// GetOrDefault returns the default alongside the error. Settings
-		// failures remain non-fatal for the execution.
-		snapshot.logFallback(lggr, setting.Key, err)
-	}
-	return value
 }
 
 // validate reports the required settings the payload left empty. The enclave
