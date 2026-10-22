@@ -10,8 +10,6 @@ package httpfetch
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,8 +20,6 @@ import (
 	"time"
 
 	httpcap "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http"
-	"github.com/smartcontractkit/chainlink-common/pkg/config"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -32,8 +28,8 @@ import (
 
 // Policy holds the knobs owned by this package: the method allowlist, the
 // default request timeout, and the response body cap. Scheme/IP/redirect
-// enforcement is handled by the shared restricted client in util. Per-execution
-// CRE limits further restrict the request size, timeout, and response body.
+// enforcement is handled by the shared restricted client in util; request-body
+// and timeout ceilings are enforced upstream by the capability validator.
 type Policy struct {
 	AllowedMethods       []string // uppercase
 	DefaultTimeout       time.Duration
@@ -42,7 +38,7 @@ type Policy struct {
 
 // DefaultPolicy returns the production policy, mirroring the standalone
 // confidential-http capability: the CRE SDK method set, a 30s default timeout
-// subject to the CRE timeout ceiling, and a ~1 MB response cap.
+// honouring any caller-supplied request timeout, and a ~1 MB response cap.
 // Transport restrictions (HTTPS only, private-network blocking) come from the
 // shared restricted client in util.
 func DefaultPolicy() Policy {
@@ -51,13 +47,6 @@ func DefaultPolicy() Policy {
 		DefaultTimeout:       types.DefaultEnclaveRequestTimeout,
 		MaxResponseBodyBytes: types.MaxHTTPResponseBodyBytes,
 	}
-}
-
-// Limits holds the resolved HTTPAction settings for one workflow execution.
-type Limits struct {
-	ConnectionTimeout time.Duration
-	RequestSizeLimit  config.Size
-	ResponseSizeLimit config.Size
 }
 
 // httpDoer is the subset of *http.Client that Fetcher depends on. It lets tests
@@ -96,9 +85,9 @@ func NewFetcherWithClient(policy Policy, client httpDoer) *Fetcher {
 	return f
 }
 
-// SetDefaultTimeout updates the default for requests without a caller-supplied
-// timeout, capped by the CRE HTTPAction.ConnectionTimeout. A non-positive value
-// is ignored, leaving the current default in place.
+// SetDefaultTimeout updates the deadline applied to requests that carry no
+// caller-supplied timeout. A non-positive value is ignored, leaving the policy
+// default in place.
 func (f *Fetcher) SetDefaultTimeout(d time.Duration) {
 	if d <= 0 {
 		return
@@ -109,7 +98,7 @@ func (f *Fetcher) SetDefaultTimeout(d time.Duration) {
 // Fetch executes a single HTTP request. On success the returned Response has
 // StatusCode, Headers, and Body populated. Errors are policy violations
 // (method/scheme/IP/port), transport failures, or body-size overruns.
-func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request, limits Limits) (*httpcap.Response, error) {
+func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request) (*httpcap.Response, error) {
 	if in == nil {
 		return nil, errors.New("request is nil")
 	}
@@ -123,36 +112,7 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request, limits Limits)
 		return nil, errors.New("url is empty")
 	}
 
-	var timeout time.Duration
-	if requestedTimeout := in.GetTimeout(); requestedTimeout != nil {
-		if err := requestedTimeout.CheckValid(); err != nil {
-			return nil, fmt.Errorf("invalid timeout: %w", err)
-		}
-		timeout = requestedTimeout.AsDuration()
-		if timeout < 0 {
-			return nil, errors.New("timeout cannot be negative")
-		}
-	}
-	if timeout == 0 {
-		timeout = min(time.Duration(f.defaultTimeout.Load()), limits.ConnectionTimeout)
-	}
-	if limits.ConnectionTimeout <= 0 || timeout > limits.ConnectionTimeout {
-		return nil, fmt.Errorf("timeout exceeds PerWorkflow.HTTPAction.ConnectionTimeout limit %s", limits.ConnectionTimeout)
-	}
-	if requestSizeLowerBound(in) > limits.RequestSizeLimit {
-		return nil, fmt.Errorf("request exceeds PerWorkflow.HTTPAction.RequestSizeLimit limit %d bytes", limits.RequestSizeLimit)
-	}
-	// The HTTP action validator measures encoding/json after defaulting timeout,
-	// including headers, URL, and the base64-encoded body, not just body bytes.
-	in = proto.Clone(in).(*httpcap.Request)
-	in.Timeout = durationpb.New(timeout)
-	encoded, err := json.Marshal(in)
-	if err != nil {
-		return nil, fmt.Errorf("encoding request: %w", err)
-	}
-	if config.Size(len(encoded)) > limits.RequestSizeLimit {
-		return nil, fmt.Errorf("request exceeds PerWorkflow.HTTPAction.RequestSizeLimit limit %d bytes", limits.RequestSizeLimit)
-	}
+	timeout := resolveTimeout(in.GetTimeout(), time.Duration(f.defaultTimeout.Load()))
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -178,14 +138,13 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request, limits Limits)
 	}
 	defer util.SafeClose(resp)
 
-	maxResponseBodyBytes := min(f.policy.MaxResponseBodyBytes, int64(limits.ResponseSizeLimit))
-	limited := io.LimitReader(resp.Body, maxResponseBodyBytes+1)
+	limited := io.LimitReader(resp.Body, f.policy.MaxResponseBodyBytes+1)
 	body, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
-	if int64(len(body)) > maxResponseBodyBytes {
-		return nil, fmt.Errorf("response body exceeds limit %d bytes", maxResponseBodyBytes)
+	if int64(len(body)) > f.policy.MaxResponseBodyBytes {
+		return nil, fmt.Errorf("response body exceeds limit %d bytes", f.policy.MaxResponseBodyBytes)
 	}
 
 	return &httpcap.Response{
@@ -198,22 +157,14 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request, limits Limits)
 	}, nil
 }
 
-// requestSizeLowerBound excludes JSON syntax and escaping, which only add bytes.
-func requestSizeLowerBound(in *httpcap.Request) config.Size {
-	size := config.Size(len(in.GetUrl()) + len(in.GetMethod()))
-	size += config.Size(base64.StdEncoding.EncodedLen(len(in.GetBody())))
-	size += config.Size(base64.StdEncoding.EncodedLen(len(in.GetMtls().GetPrivateKey())))
-	size += config.Size(base64.StdEncoding.EncodedLen(len(in.GetMtls().GetCertificate())))
-	for key, value := range in.GetHeaders() { //nolint:staticcheck // deprecated headers remain size-limited
-		size += config.Size(len(key) + len(value))
+// resolveTimeout honours a positive caller-supplied timeout, falling back to
+// the policy default otherwise. Any upper bound is enforced upstream by the
+// capability validator, matching the standalone confidential-http capability.
+func resolveTimeout(in *durationpb.Duration, def time.Duration) time.Duration {
+	if in == nil || in.AsDuration() <= 0 {
+		return def
 	}
-	for key, values := range in.GetMultiHeaders() {
-		size += config.Size(len(key))
-		for _, value := range values.GetValues() {
-			size += config.Size(len(value))
-		}
-	}
-	return size
+	return in.AsDuration()
 }
 
 func applyHeaders(req *http.Request, in *httpcap.Request) {

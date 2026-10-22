@@ -301,9 +301,9 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 		fetcher:           NewBinaryFetcher(lggr),
 		httpFetcher:       config.HTTPFetcher,
 		tpe:               tpe,
-		limiter:         newExecutionLimiter(config.MaxConcurrentExecutions),
-		limiterSettings: &mutableSettings{},
-		storageFactory:  config.StorageFetcherFactory,
+		limiter:           newExecutionLimiter(config.MaxConcurrentExecutions),
+		limiterSettings:   &mutableSettings{},
+		storageFactory:    config.StorageFetcherFactory,
 		dispatcherFactory: config.RemoteDispatcherFactory,
 	}
 	a.compileSlots.Store(semaphore.NewWeighted(defaultMaxConcurrentCompilations))
@@ -416,7 +416,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		}
 	}
 
-	helper := &enclaveExecutionHelper{
+	var helper host.ExecutionHelper = &enclaveExecutionHelper{
 		requestID:        requestID,
 		workflowID:       execution.WorkflowId,
 		owner:            execution.GetOwner(),
@@ -437,7 +437,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		}
 	}
 
-	restrictedHelper := host.NewRestrictedExecutionHelper(helper, execution.Restrictions)
+	helper = host.NewRestrictedExecutionHelper(helper, execution.Restrictions)
 
 	// Execute the WASM binary with the deserialized ExecuteRequest.
 	// The fetched binary is brotli-compressed.
@@ -453,9 +453,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	if execution.GetOrgId() == "" {
 		executionLogger.Warnw("Workflow execution is missing org ID")
 	}
-	snapshot := a.limiterSettings.Snapshot()
-	helper.httpLimits = newHTTPActionLimits(execCtx, executionLogger, snapshot)
-	result, err := executeWasm(execCtx, executionLogger, emitter, a.compileSlots.Load(), snapshot, binary, execution.SdkExecuteRequest, true, restrictedHelper, execTimeout)
+	result, err := executeWasm(execCtx, executionLogger, emitter, a.compileSlots.Load(), snapshot, binary, execution.SdkExecuteRequest, true, helper, execTimeout)
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to
