@@ -94,6 +94,11 @@ help:
 	echo "Module maintenance:"
 	echo "  make gomodtidy                  Run go mod tidy in every module"
 	echo ""
+	echo "Staging validation (required on every PR, see staging-validation/README.md):"
+	echo "  make staging-validation         Create staging-validation/<random>.md from the template"
+	echo "  make check-staging-validation   Run the CI check against BASE (default origin/main)"
+	echo "  make staging-validation-notes PREV=<ref> [REF=HEAD]  Print the release-notes section"
+	echo ""
 	echo "Pins (from .github/workflows/go-tests.yaml):"
 	echo "  chainlink        $(CHAINLINK_COMMIT_SHA)"
 	echo "  job-distributor  v$(JD_VERSION)"
@@ -335,3 +340,31 @@ gomodtidy:
 	  echo ">> go mod tidy: $$rel"; \
 	  ( cd "$$dir" && go mod tidy ); \
 	done < <(find "$(REPO_ROOT)" -name go.mod -not -path '*/.git/*' -print0)
+
+BASE ?= origin/main
+
+# Create staging-validation/<random>.md from the template, unless this branch
+# already has one (committed since BASE or untracked).
+.PHONY: staging-validation
+staging-validation:
+	set -euo pipefail; \
+	cd "$(REPO_ROOT)"; \
+	branch="$$(git rev-parse --abbrev-ref HEAD)"; \
+	case "$$branch" in main|release/*|HEAD) echo "Create a feature branch first (on $$branch)"; exit 1;; esac; \
+	existing="$$( { git diff --name-only --diff-filter=A "$(BASE)...HEAD" -- 'staging-validation/*.md'; \
+	  git ls-files --others --exclude-standard -- 'staging-validation/*.md'; } | grep -vE '/(TEMPLATE|README)\.md$$' || true)"; \
+	if [ -n "$$existing" ]; then echo "Already exists: $$existing"; exit 0; fi; \
+	f="staging-validation/$$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n').md"; \
+	sed "s|^# Staging validation: TITLE|# Staging validation: $$branch|" staging-validation/TEMPLATE.md > "$$f"; \
+	echo "Created $$f; fill it in and commit it with your PR."
+
+.PHONY: check-staging-validation
+check-staging-validation:
+	cd "$(REPO_ROOT)" && .github/scripts/check-staging-validation.sh "$(BASE)"
+
+REF ?= HEAD
+
+.PHONY: staging-validation-notes
+staging-validation-notes:
+	test -n "$(PREV)" || { echo "usage: make staging-validation-notes PREV=<previous release ref> [REF=<ref>]"; exit 1; }
+	cd "$(REPO_ROOT)" && .github/scripts/staging-validation-notes.sh "$(PREV)" "$(REF)"

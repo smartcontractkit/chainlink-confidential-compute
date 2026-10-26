@@ -1,0 +1,32 @@
+name: staging-validation
+
+on:
+  pull_request:
+    branches:
+      - main
+      - "release/**"
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: staging-validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip for bots and exempt PRs
+        id: skip
+        if: >-
+          github.event.pull_request.user.type == 'Bot' ||
+          contains(github.event.pull_request.labels.*.name, 'no-staging-validation')
+        run: echo "Staging validation not required for this PR."
+
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        if: steps.skip.outcome == 'skipped'
+        with:
+          fetch-depth: 0
+
+      - name: Check staging validation file
+        if: steps.skip.outcome == 'skipped'
+        run: .github/scripts/check-staging-validation.sh "origin/${{ github.base_ref }}"
