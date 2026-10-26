@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -43,16 +47,22 @@ func TestConfidentialWorkflowsCapacityE2E(t *testing.T) {
 	}
 	require.False(t, vsock.IsFake(), "capacity test must use real VSOCK")
 	root := findProjectRoot(t)
-	binary := buildCapacityWorkflow(t, root)
-	hash := sha256.Sum256(binary)
+	raw := buildCapacityWorkflow(t, root)
 
 	// Holding downloads keeps admitted slots occupied independently of CPU speed.
-	// Releasing them together exercises the compilation queue and concurrent guests.
+	// Each execution gets its own artifact, so releasing them together starts
+	// every admitted cold compilation at once (see maxConcurrentCompilations).
 	entered := make(chan struct{}, 64)
 	release := make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(release) })
 	defer unblock()
+	var binaries [][]byte // written before release, read only after it
 	artifact := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		index, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/"))
+		if err != nil {
+			http.Error(w, "invalid artifact", http.StatusNotFound)
+			return
+		}
 		select {
 		case entered <- struct{}{}:
 		case <-r.Context().Done():
@@ -60,7 +70,11 @@ func TestConfidentialWorkflowsCapacityE2E(t *testing.T) {
 		}
 		select {
 		case <-release:
-			_, _ = io.WriteString(w, base64.StdEncoding.EncodeToString(binary))
+			if index < 0 || index >= len(binaries) {
+				http.Error(w, "invalid artifact", http.StatusNotFound)
+				return
+			}
+			_, _ = io.WriteString(w, base64.StdEncoding.EncodeToString(binaries[index]))
 		case <-r.Context().Done():
 		}
 	}))
@@ -81,7 +95,8 @@ func TestConfidentialWorkflowsCapacityE2E(t *testing.T) {
 	t.Setenv("ENCLAVE_MEMORY_MIB", "2048")
 	t.Setenv("TOTAL_MEMORY_MIB", "4096")
 	t.Setenv("ENCLAVE_SETTINGS", fmt.Sprintf(
-		`{"storageKey":%q,"storageServiceUrl":%q,"gatewayUrl":%q,"binaryFetchTimeout":"2m","executionTimeout":"2m","workflowGracePeriod":"-1s"}`,
+		// 64 exceeds admission, so every admitted execution may compile at once.
+		`{"storageKey":%q,"storageServiceUrl":%q,"gatewayUrl":%q,"binaryFetchTimeout":"2m","executionTimeout":"2m","workflowGracePeriod":"-1s","maxConcurrentCompilations":64}`,
 		fmt.Sprintf("%064x", 1),
 		fmt.Sprintf("127.0.0.1:%d", storageListener.Addr().(*net.TCPAddr).Port), artifactURL))
 	local := testhelpers.SetupLocalEnclaves(t, testhelpers.LocalEnclaveSetupConfig{
@@ -108,6 +123,12 @@ func TestConfidentialWorkflowsCapacityE2E(t *testing.T) {
 	require.LessOrEqual(t, burst, cap(entered), "unexpected capacity for the test enclave")
 	t.Logf("guest RAM=%d MiB; reserve=%d MiB; per execution=%d MiB; capacity=%d..%d; burst=%d distinct workflows",
 		memory.TotalMB, memlimit.ReserveMB, memlimit.PerExecMB, minCapacity, maxCapacity, burst)
+	binaries = make([][]byte, burst+1)
+	hashes := make([][32]byte, len(binaries))
+	for i := range binaries {
+		binaries[i] = capacityArtifact(t, raw, i)
+		hashes[i] = sha256.Sum256(binaries[i])
+	}
 
 	keys := mustGenerateEd25519Keys(t, 1)
 	tdh2Keys := mustGenerateTDH2Keys(t, 1, 1)
@@ -132,7 +153,7 @@ func TestConfidentialWorkflowsCapacityE2E(t *testing.T) {
 		id := sha256.Sum256([]byte(fmt.Sprintf("capacity-workflow-%d", index)))
 		data, err := proto.Marshal(&confworkflowtypes.WorkflowExecution{
 			WorkflowId: fmt.Sprintf("%x", id), ExecutionId: fmt.Sprintf("%x", id),
-			BinaryUrl: "capacity-workflow", BinaryHash: hash[:],
+			BinaryUrl: strconv.Itoa(index), BinaryHash: hashes[index][:],
 			SdkExecuteRequest: &sdkpb.ExecuteRequest{Request: &sdkpb.ExecuteRequest_Trigger{
 				Trigger: &sdkpb.Trigger{Id: 0, Payload: &anypb.Any{
 					TypeUrl: "type.googleapis.com/capabilities.internal.basictrigger.v1.Outputs",
@@ -214,8 +235,8 @@ type capacityStorageService struct {
 	url string
 }
 
-func (s *capacityStorageService) DownloadArtifact(context.Context, *storagepb.DownloadArtifactRequest) (*storagepb.DownloadArtifactResponse, error) {
-	return &storagepb.DownloadArtifactResponse{Url: s.url}, nil
+func (s *capacityStorageService) DownloadArtifact(_ context.Context, req *storagepb.DownloadArtifactRequest) (*storagepb.DownloadArtifactResponse, error) {
+	return &storagepb.DownloadArtifactResponse{Url: s.url + "/" + req.GetId()}, nil
 }
 
 func buildCapacityWorkflow(t *testing.T, root string) []byte {
@@ -228,9 +249,24 @@ func buildCapacityWorkflow(t *testing.T, root string) []byte {
 	require.NoError(t, err, "build workflow: %s", output)
 	raw, err := os.ReadFile(out)
 	require.NoError(t, err)
+	return raw
+}
+
+// capacityArtifact appends a WASM custom section naming the variant, then
+// brotli-compresses the module like production artifacts. The section leaves
+// the guest unchanged but gives each variant its own hash, so it compiles cold
+// instead of hitting the compiled-module cache.
+func capacityArtifact(t *testing.T, raw []byte, variant int) []byte {
+	t.Helper()
+	name, payload := "capacity-variant", strconv.Itoa(variant)
+	section := binary.AppendUvarint(nil, uint64(len(name)))
+	section = append(append(section, name...), payload...)
+	module := append(slices.Clone(raw), 0) // custom section id
+	module = binary.AppendUvarint(module, uint64(len(section)))
+	module = append(module, section...)
 	var compressed bytes.Buffer
 	writer := brotli.NewWriter(&compressed)
-	_, err = writer.Write(raw)
+	_, err := writer.Write(module)
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
 	return compressed.Bytes()
