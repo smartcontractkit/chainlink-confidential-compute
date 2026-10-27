@@ -75,6 +75,15 @@ func allowedAttribute(k string) bool {
 	return ok
 }
 
+// durationBucketBoundaries are the histogram buckets, in seconds, for every
+// duration_seconds event. They span sub-10ms in-enclave steps through workflow
+// executions of several minutes. The first bucket sits at half the enclave's
+// 10ms rounding step, so durations the enclave rounds to 0 land in it.
+var durationBucketBoundaries = []float64{
+	0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
+	7.5, 10, 15, 20, 30, 45, 60, 90, 120, 300,
+}
+
 // droppedMetricEvents are events whose entire payload is high-cardinality and
 // therefore must never become an OTel metric. "request_id" carries only the
 // per-request ID, which would mint one series per request.
@@ -211,7 +220,7 @@ func (m *MetricsEmitter) getOrCreateHistogramAndRecord(ctx context.Context, name
 	}
 
 	// Create new histogram
-	histogram, err := m.meter.Float64Histogram(key)
+	histogram, err := m.meter.Float64Histogram(key, metric.WithExplicitBucketBoundaries(durationBucketBoundaries...))
 	if err != nil {
 		m.lggr.Errorw("failed to create histogram", "key", key, "error", err)
 		return

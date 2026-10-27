@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"go.opentelemetry.io/otel"
@@ -22,10 +23,15 @@ const (
 	defaultHostServiceName   = "confidential-compute-enclave-host"
 
 	envOTLPEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	// envMemoryPollInterval overrides how often the host polls the enclave's
+	// memory, as a Go duration (e.g. "10s").
+	envMemoryPollInterval = "ENCLAVE_MEMORY_POLL_INTERVAL"
 )
 
 type hostTelemetryConfig struct {
 	Endpoint string
+	// MemoryPollInterval is the delay between enclave memory polls.
+	MemoryPollInterval time.Duration
 }
 
 func (c hostTelemetryConfig) enabled() bool {
@@ -41,10 +47,22 @@ type metricExporterFactory func(context.Context, string) (sdkmetric.Exporter, er
 
 // An explicitly configured OTLP endpoint enables telemetry; without one the
 // host stays no-op for local development and tests.
-func loadHostTelemetryConfig(getenv func(string) string) hostTelemetryConfig {
-	return hostTelemetryConfig{
-		Endpoint: strings.TrimSpace(getenv(envOTLPEndpoint)),
+func loadHostTelemetryConfig(getenv func(string) string) (hostTelemetryConfig, error) {
+	cfg := hostTelemetryConfig{
+		Endpoint:           strings.TrimSpace(getenv(envOTLPEndpoint)),
+		MemoryPollInterval: enclaveMemoryPollInterval,
 	}
+	if raw := strings.TrimSpace(getenv(envMemoryPollInterval)); raw != "" {
+		interval, err := time.ParseDuration(raw)
+		if err != nil {
+			return hostTelemetryConfig{}, fmt.Errorf("parse %s: %w", envMemoryPollInterval, err)
+		}
+		if interval <= 0 {
+			return hostTelemetryConfig{}, fmt.Errorf("%s must be positive, got %v", envMemoryPollInterval, interval)
+		}
+		cfg.MemoryPollInterval = interval
+	}
+	return cfg, nil
 }
 
 func newOTLPMetricExporter(ctx context.Context, endpoint string) (sdkmetric.Exporter, error) {
