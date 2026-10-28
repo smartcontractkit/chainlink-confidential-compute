@@ -17,9 +17,11 @@ const eventDomain = "platform"
 
 // creInfoFromMeta builds the v2 CreInfo carried on every workflow-engine event
 // from the host's request metadata.
-func creInfoFromMeta(meta capabilities.RequestMetadata) *eventsv2.CreInfo {
+func creInfoFromMeta(meta capabilities.RequestMetadata, shardIndex uint32) *eventsv2.CreInfo {
 	return &eventsv2.CreInfo{
 		DonID:                   int32(meta.WorkflowDonID),
+		WorkflowDonID:           int32(meta.WorkflowDonID),
+		ShardIndex:              shardIndex,
 		WorkflowRegistryAddress: meta.WorkflowRegistryAddress,
 		WorkflowRegistryChain:   meta.WorkflowRegistryChainSelector,
 		EngineVersion:           meta.EngineVersion,
