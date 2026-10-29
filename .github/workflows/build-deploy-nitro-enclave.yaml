@@ -8,6 +8,8 @@ on:
   push:
     branches:
       - 'release/**'
+  release:
+    types: [published]
 
 jobs:
   check-label:
@@ -367,7 +369,8 @@ jobs:
 
       # Secure (pcr_measurements.json) and insecure (pcr_measurements_insecure.json)
       # measurements, published as release assets by the publish-measurements job so
-      # go-tests can fetch them by tag instead of scraping build logs.
+      # go-tests can fetch them by tag instead of scraping build logs. Retained as
+      # long as the EIF, since the release can be published days after this build.
       - name: Upload PCR measurements
         uses: actions/upload-artifact@v4
         with:
@@ -375,7 +378,7 @@ jobs:
           path: |
             pcr_measurements.json
             pcr_measurements_insecure.json
-          retention-days: 7
+          retention-days: 30
 
   push-images:
     needs: build-enclave-and-plugin
@@ -552,36 +555,72 @@ jobs:
 
   # Publish secure + insecure PCR measurements (all arch/app legs) as release
   # assets, so go-tests can fetch them by tag instead of scraping build-run logs.
-  # Only release-branch pushes cut a release with a tag pointing at this commit;
-  # PR builds skip this job.
+  # The release is normally published after the release-branch build, so its
+  # release event pulls the artifacts from that build; a release published first
+  # is picked up by the release-branch push run instead. PR builds skip this job.
   publish-measurements:
     needs: build-enclave-and-plugin
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')
+    if: >-
+      !cancelled() &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/') &&
+        needs.build-enclave-and-plugin.result == 'success') ||
+       github.event_name == 'release')
     runs-on: ubuntu-latest
     permissions:
       contents: write
       actions: read
     steps:
+      # Takes the measurements from the build that pushed the tagged commit's
+      # images rather than rebuilding, and waits for it so a release published
+      # mid-build is not missed.
+      - name: Find release-branch build of tagged commit
+        id: build-run
+        if: github.event_name == 'release'
+        timeout-minutes: 60
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN_ID=$(gh api "repos/${{ github.repository }}/actions/workflows/build-deploy-nitro-enclave.yaml/runs?event=push&head_sha=${{ github.sha }}" \
+            --jq '[.workflow_runs[] | select(.head_branch | startswith("release/"))][0].id // empty')
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::No release-branch build of ${{ github.sha }}; its push run uploads the measurements once the branch is pushed."
+            exit 1
+          fi
+          until [ "$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID" --jq .status)" = "completed" ]; do
+            sleep 30
+          done
+          CONCLUSION=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID" --jq .conclusion)
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::Build run $RUN_ID concluded '$CONCLUSION'; re-run this job once it succeeds."
+            exit 1
+          fi
+          echo "Using measurements from build run $RUN_ID"
+          echo "run-id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
       - name: Download all measurement artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: pcr-measurements-*
           path: measurements
+          run-id: ${{ steps.build-run.outputs.run-id || github.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Rename and upload to release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          # Find the release tag whose tag points at this commit. Releases are
-          # cut by pushing release/** + creating the tag together, so the tag
-          # exists by the time this build runs; matching by SHA is robust to
-          # target_commitish being either main or release/x.
-          TAG=$(gh api "repos/${{ github.repository }}/tags?per_page=100" \
-            --jq '.[] | select(.commit.sha=="${{ github.sha }}") | .name' | head -1)
           if [ -z "$TAG" ]; then
-            echo "No tag points at ${{ github.sha }}; skipping release upload."
-            exit 0
+            # Find the release tag pointing at this commit; matching by SHA is
+            # robust to target_commitish being either main or release/x.
+            TAG=$(gh api "repos/${{ github.repository }}/tags?per_page=100" \
+              --jq '.[] | select(.commit.sha=="${{ github.sha }}") | .name' | head -1)
+            if [ -z "$TAG" ] || ! gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null; then
+              echo "No release for ${{ github.sha }} yet; its release event uploads the measurements."
+              exit 0
+            fi
           fi
           echo "Uploading measurements to release $TAG"
 
