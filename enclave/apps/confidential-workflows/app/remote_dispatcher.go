@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -36,6 +37,35 @@ import (
 // relay-DON's params.Validate sees a non-empty namespace and the canonical
 // hash binds to the same value on both sides.
 const defaultSecretsNamespace = "main"
+
+// relaySecretsCallbackIDDomain separates the relay callback ID derivation from
+// other hashes. Its version changes whenever the derivation does.
+const relaySecretsCallbackIDDomain = "chainlink-confidential-compute/relay-secrets-callback-id/v1\n"
+
+// relaySecretsCallbackID derives the callback ID sent to the relay DON for a
+// secrets request. The relay DON memoizes signed results, and the vault DON
+// deduplicates requests, by (workflow, execution, callback ID), while the signed
+// result is bound to the full request, including the enclave public key. A re-run
+// of the execution on an enclave with a different key reuses the WASM callback ID
+// and would be served a result it cannot verify or decrypt (INCIDENT-2692).
+// Deriving the ID from the request gives each key and config its own identity at
+// every layer, while an identical request keeps its ID, so retries still hit the
+// relay memo. Attestation and the forwarded compute requests are authorization
+// input that changes across retries on the same enclave, so they are excluded.
+func relaySecretsCallbackID(params confidentialrelay.SecretsRequestParams) (int32, error) {
+	params.Attestation = ""
+	params.SignedComputeRequests = nil
+	identity, err := json.Marshal(params)
+	if err != nil {
+		return 0, fmt.Errorf("marshalling secrets request identity: %w", err)
+	}
+	h := sha256.Sum256(append([]byte(relaySecretsCallbackIDDomain), identity...))
+	// Setting the top bit is a formality: the negative ID cannot collide with the
+	// non-negative IDs older enclaves send during rollout, and the nonzero ID is
+	// always included in the response hash, which skips a zero callback ID.
+	// ref: https://github.com/smartcontractkit/chainlink-common/blob/daa34bb8a9997e069365c6563c256ab2e32edb84/pkg/capabilities/v2/actions/confidentialrelay/types.go#L433-L435
+	return int32(binary.BigEndian.Uint32(h[:4]) | 1<<31), nil
+}
 
 // sendWithRetry sends a JSON-RPC relay request and decodes/verifies the
 // response bundle via verify, retrying on transient failures (gateway
@@ -338,6 +368,19 @@ func (d *remoteDispatcher) GetSecrets(ctx context.Context, workflowID string, re
 		// Forwarded to the relay DON as the authorization for this secrets request.
 		SignedComputeRequests: toRelaySignedComputeRequests(signedRequests),
 	}
+
+	relayCallbackID, err := relaySecretsCallbackID(params)
+	if err != nil {
+		return nil, err
+	}
+	// Relay and vault logs carry the derived ID; this maps it back to the WASM call.
+	d.logger.Infow("[remoteDispatcher] derived relay callback ID for secrets request",
+		"workflowID", workflowID,
+		"executionID", executionID,
+		"callbackID", req.GetCallbackId(),
+		"relayCallbackID", relayCallbackID,
+	)
+	params.CallbackID = relayCallbackID
 
 	att, err := d.attest(confidentialrelay.DomainSecretsGet, params)
 	if err != nil {
