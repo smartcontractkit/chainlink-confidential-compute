@@ -970,7 +970,10 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
-	telemetryCfg := loadHostTelemetryConfig(os.Getenv)
+	telemetryCfg, err := loadHostTelemetryConfig(os.Getenv)
+	if err != nil {
+		log.Fatalf("invalid telemetry config: %v", err)
+	}
 	telemetry, err := newHostTelemetry(ctx, telemetryCfg, lggr)
 	if err != nil {
 		log.Fatalf("failed to initialize telemetry: %v", err)
@@ -1001,7 +1004,8 @@ func main() {
 	host.logger = lggr
 	host.metrics = metrics
 	if telemetryCfg.enabled() {
-		go metrics.monitorEnclaveMemory(ctx, host.enclaveClient, lggr, enclaveMemoryPollInterval, enclaveMemoryPollTimeout)
+		lggr.Infow("polling enclave memory", "interval", telemetryCfg.MemoryPollInterval.String())
+		go metrics.monitorEnclaveMemory(ctx, host.enclaveClient, lggr, telemetryCfg.MemoryPollInterval, enclaveMemoryPollTimeout)
 	}
 	mainMux := http.NewServeMux()
 

@@ -199,7 +199,7 @@ func TestInspectPublicDataConfidentialHTTP(t *testing.T) {
 
 	metadata := inspectPublicData(lggr, types.AppIDConfidentialHTTP, publicData)
 
-	assert.Equal(t, executionMetadata{appID: types.AppIDConfidentialHTTP}, metadata)
+	assert.Equal(t, executionMetadata{appID: types.AppIDConfidentialHTTP, requestKind: "action"}, metadata)
 	fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA")
 	assert.Equal(t, types.AppIDConfidentialHTTP, fields["appID"])
 	assert.Equal(t, "confidential_http_request", fields["publicDataType"])
