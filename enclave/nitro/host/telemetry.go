@@ -24,7 +24,7 @@ const (
 
 	envOTLPEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
 	// envMemoryPollInterval overrides how often the host polls the enclave's
-	// memory, as a Go duration (e.g. "10s").
+	// memory, as a Go duration of at least 250ms (e.g. "500ms").
 	envMemoryPollInterval = "ENCLAVE_MEMORY_POLL_INTERVAL"
 )
 
@@ -57,8 +57,8 @@ func loadHostTelemetryConfig(getenv func(string) string) (hostTelemetryConfig, e
 		if err != nil {
 			return hostTelemetryConfig{}, fmt.Errorf("parse %s: %w", envMemoryPollInterval, err)
 		}
-		if interval <= 0 {
-			return hostTelemetryConfig{}, fmt.Errorf("%s must be positive, got %v", envMemoryPollInterval, interval)
+		if interval < minEnclaveMemoryPollInterval {
+			return hostTelemetryConfig{}, fmt.Errorf("%s must be at least %v, got %v", envMemoryPollInterval, minEnclaveMemoryPollInterval, interval)
 		}
 		cfg.MemoryPollInterval = interval
 	}

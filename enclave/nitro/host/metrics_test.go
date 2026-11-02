@@ -576,6 +576,71 @@ func TestHostMetricsOmitsUnavailableMemoryValues(t *testing.T) {
 	assert.False(t, found)
 }
 
+func TestHostMetricsMemoryReportsExtremesSinceLastCollection(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+	const mib = 1024 * 1024
+
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{TotalMB: 2048, UsedMB: 30, RSSMB: 100, AvailableMB: 500, PeakRSSMB: 100})
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{TotalMB: 2048, UsedMB: 50, RSSMB: 300, AvailableMB: 200, PeakRSSMB: 300})
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{TotalMB: 2048, UsedMB: 20, RSSMB: 150, AvailableMB: 400, PeakRSSMB: 300})
+	data := collectHostMetrics(t, reader)
+	assert.Equal(t, int64(2048*mib), gaugeValue(t, data, totalMemoryMetric, nil))
+	assert.Equal(t, int64(50*mib), gaugeValue(t, data, goRuntimeMemoryMetric, nil))
+	assert.Equal(t, int64(300*mib), gaugeValue(t, data, processRSSMemoryMetric, nil))
+	assert.Equal(t, int64(200*mib), gaugeValue(t, data, availableMemoryMetric, nil))
+	assert.Equal(t, int64(300*mib), gaugeValue(t, data, peakRSSMemoryMetric, nil))
+
+	// No poll in this window, so the latest reading stands.
+	data = collectHostMetrics(t, reader)
+	assert.Equal(t, int64(20*mib), gaugeValue(t, data, goRuntimeMemoryMetric, nil))
+	assert.Equal(t, int64(150*mib), gaugeValue(t, data, processRSSMemoryMetric, nil))
+	assert.Equal(t, int64(400*mib), gaugeValue(t, data, availableMemoryMetric, nil))
+
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{TotalMB: 2048, UsedMB: 25, RSSMB: 120, AvailableMB: 450, PeakRSSMB: 300})
+	data = collectHostMetrics(t, reader)
+	assert.Equal(t, int64(120*mib), gaugeValue(t, data, processRSSMemoryMetric, nil))
+	assert.Equal(t, int64(450*mib), gaugeValue(t, data, availableMemoryMetric, nil))
+}
+
+func TestHostMetricsMemoryExportsPreFailureExtremesOnce(t *testing.T) {
+	metrics, reader := newTestHostMetrics(t)
+
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{RSSMB: 900, AvailableMB: 64})
+	metrics.clearEnclaveMemory()
+	data := collectHostMetrics(t, reader)
+	assert.Equal(t, int64(900*1024*1024), gaugeValue(t, data, processRSSMemoryMetric, nil))
+	assert.Equal(t, int64(64*1024*1024), gaugeValue(t, data, availableMemoryMetric, nil))
+
+	data = collectHostMetrics(t, reader)
+	_, found := findMetric(data, processRSSMemoryMetric)
+	assert.False(t, found)
+	_, found = findMetric(data, availableMemoryMetric)
+	assert.False(t, found)
+}
+
+func TestMergeMemoryExtremesIgnoresUnavailableValues(t *testing.T) {
+	window := mergeMemoryExtremes(nil, &enclaveMemorySnapshot{totalBytes: 10, availableBytes: 5, processRSSBytes: 3})
+	merged := mergeMemoryExtremes(window, &enclaveMemorySnapshot{})
+
+	assert.Equal(t, &enclaveMemorySnapshot{totalBytes: 10, availableBytes: 5, processRSSBytes: 3}, merged)
+	assert.Equal(t, int64(5), window.availableBytes)
+}
+
+func TestHostMetricsGuestCPUUtilizationSpansFastPolls(t *testing.T) {
+	clock := &testClock{now: time.Unix(1_000, 0)}
+	metrics, reader := newTestHostMetricsWithClock(t, clock.Now)
+
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{GuestCPUBusySeconds: 100, GuestCPUTotalSeconds: 1_000})
+	clock.Advance(minEnclaveMemoryPollInterval)
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{GuestCPUBusySeconds: 101, GuestCPUTotalSeconds: 1_001})
+	_, found := findMetric(collectHostMetrics(t, reader), guestCPUUtilizationMetric)
+	assert.False(t, found)
+
+	clock.Advance(guestCPUSampleInterval - minEnclaveMemoryPollInterval)
+	metrics.recordEnclaveMemory(types.MemoryEstimateResponse{GuestCPUBusySeconds: 102, GuestCPUTotalSeconds: 1_010})
+	assert.InDelta(t, 0.2, float64GaugeValue(t, collectHostMetrics(t, reader), guestCPUUtilizationMetric, nil), 0.0001)
+}
+
 type memoryRoundTripResult struct {
 	status int
 	body   string

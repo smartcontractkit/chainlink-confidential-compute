@@ -50,7 +50,13 @@ func TestLoadHostTelemetryConfigMemoryPollInterval(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 15*time.Second, cfg.MemoryPollInterval)
 
-	for _, raw := range []string{"5", "fast", "0s", "-1s"} {
+	cfg, err = loadHostTelemetryConfig(envGetter(map[string]string{
+		envMemoryPollInterval: "250ms",
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, minEnclaveMemoryPollInterval, cfg.MemoryPollInterval)
+
+	for _, raw := range []string{"5", "fast", "0s", "-1s", "249ms", "1ms"} {
 		_, err := loadHostTelemetryConfig(envGetter(map[string]string{
 			envMemoryPollInterval: raw,
 		}))
