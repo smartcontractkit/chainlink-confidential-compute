@@ -1285,7 +1285,7 @@ func restartWorkflowNode(t *testing.T, testEnv *ttypes.TestEnvironment, p2pID [3
 	out, err := exec.Command("docker", "restart", container).CombinedOutput()
 	require.NoError(t, err, "docker restart %s: %s", container, out)
 
-	plugins := []string{"/usr/local/bin/http_trigger", "/usr/local/bin/http_action"}
+	plugins := []string{"http_trigger", "http_action"}
 	require.Eventually(t, func() bool {
 		top, topErr := exec.Command("docker", "top", container).CombinedOutput()
 		if topErr != nil {
