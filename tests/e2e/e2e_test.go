@@ -689,7 +689,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 					}
 				}
 
-				rotate := func(phase string, nodes [][32]byte, expectedSigners [][32]byte) {
+				rotate := func(phase string, nodes [][32]byte, expectedSigners [][32]byte, afterUpdate func()) {
 					recipient.mu.Lock()
 					recipient.requests = nil
 					recipient.mu.Unlock()
@@ -698,6 +698,9 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 					setWorkflowDONNodes(t, testEnv, nodes, testLogger)
 					testLogger.Info().Msg("Waiting 30s for nodes to pick up the new DON membership")
 					time.Sleep(30 * time.Second)
+					if afterUpdate != nil {
+						afterUpdate()
+					}
 
 					// Triggering drives EnsureFreshEnclaves on each node, which proposes
 					// the new signed enclave config.
@@ -711,8 +714,12 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 					require.NoError(t, app.Validate(framework.L, recipient.getRequests()), "validation failed during %s", phase)
 				}
 
-				rotate("node removal", reducedNodes, reducedNodes)
-				rotate("node restoration", originalNodes, originalNodes)
+				rotate("node removal", reducedNodes, reducedNodes, nil)
+				// The rejoined node can't relaunch its HTTP capabilities until restarted
+				// (chainlink#23679 leaks their gateway handlers when they are stopped).
+				rotate("node restoration", originalNodes, originalNodes, func() {
+					restartWorkflowNode(t, testEnv, originalNodes[len(originalNodes)-1], testLogger)
+				})
 			})
 
 			t.Run("DNS NXDOMAIN returns 502", func(t *testing.T) {
@@ -1260,6 +1267,41 @@ func setWorkflowDONNodes(t *testing.T, testEnv *ttypes.TestEnvironment, nodes []
 	testLogger.Info().Str("txHash", tx.Hash().Hex()).Int("nodeCount", len(nodes)).Msg("Submitted workflow DON node-set update")
 	_, err = bind.WaitMined(t.Context(), sethClient.Client, tx)
 	require.NoError(t, err, "failed waiting for DON node-set update to be mined")
+}
+
+// restartWorkflowNode restarts the workflow DON node with the given P2P ID and
+// waits for its HTTP capability plugins to be running again.
+func restartWorkflowNode(t *testing.T, testEnv *ttypes.TestEnvironment, p2pID [32]byte, testLogger zerolog.Logger) {
+	t.Helper()
+	workers, err := testEnv.Dons.MustWorkflowDON().Workers()
+	require.NoError(t, err, "failed to get worker nodes from topology")
+	idx := slices.IndexFunc(workers, func(n *crelib.Node) bool {
+		return n.Keys != nil && n.Keys.P2PKey != nil && bytes.Equal(n.Keys.P2PKey.PeerID[:], p2pID[:])
+	})
+	require.GreaterOrEqual(t, idx, 0, "no workflow node with P2P ID %x", p2pID)
+	container := workers[idx].Host
+
+	testLogger.Info().Str("container", container).Msg("Restarting workflow node")
+	out, err := exec.Command("docker", "restart", container).CombinedOutput()
+	require.NoError(t, err, "docker restart %s: %s", container, out)
+
+	plugins := []string{"/usr/local/bin/http_trigger", "/usr/local/bin/http_action"}
+	require.Eventually(t, func() bool {
+		top, topErr := exec.Command("docker", "top", container).CombinedOutput()
+		if topErr != nil {
+			return false
+		}
+		for _, p := range plugins {
+			if !strings.Contains(string(top), p) {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Minute, 5*time.Second, "HTTP capability plugins did not start on %s after restart", container)
+
+	// Let the plugins register their gateway handlers and the node reconnect to the gateway.
+	testLogger.Info().Str("container", container).Msg("HTTP capability plugins running, waiting 30s to settle")
+	time.Sleep(30 * time.Second)
 }
 
 // fetchEnclaveConfig reads the config the enclave currently reports on /publicKeys.
