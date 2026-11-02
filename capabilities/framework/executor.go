@@ -338,6 +338,7 @@ type RealExecutor struct {
 	keystore                   core.Keystore
 	rateLimiter                *ratelimit.RateLimiter
 	capabilityID               string
+	shardIndex                 uint32 // host node's shard, labeled on emitted events
 	secretsCache               *util.Cache[*cachedEDKS]
 	confidentialComputeVersion string
 	apiKey                     string
@@ -390,6 +391,7 @@ func NewRealExecutor(
 		capabilityRegistry:         capDependencies.CapabilityRegistry,
 		capConfigRaw:               capDependencies.Config,
 		capabilityID:               capabilityID,
+		shardIndex:                 capDependencies.ShardIndex,
 		confidentialComputeVersion: confidentialComputeVersion,
 		secretsCache:               util.NewCache[*cachedEDKS](nil, nil),
 		limitsFactory:              limitsFactory,
@@ -750,14 +752,14 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 				msg, ok := ev.Details["message"].(string)
 				runLggr.Debugw("emitting user_log beholder event", "ok", ok, "msg", msg)
 				if ok {
-					emitUserLog(ctx, runLggr, metadata, msg)
+					emitUserLog(ctx, runLggr, metadata, e.shardIndex, msg)
 				}
 			case "capability_started":
 				capID, _ := ev.Details["capability_id"].(string)
 				method, _ := ev.Details["method"].(string)
 				stepRef := detailInt32(ev.Details, "step_ref")
 				runLggr.Debugw("emitting capability_started beholder event", "capability_id", capID, "method", method, "step_ref", stepRef)
-				emitCapabilityStarted(ctx, runLggr, metadata, capID, method, stepRef)
+				emitCapabilityStarted(ctx, runLggr, metadata, e.shardIndex, capID, method, stepRef)
 			case "capability_finished":
 				capID, _ := ev.Details["capability_id"].(string)
 				method, _ := ev.Details["method"].(string)
@@ -765,7 +767,7 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 				errMsg, _ := ev.Details["error"].(string)
 				stepRef := detailInt32(ev.Details, "step_ref")
 				runLggr.Debugw("emitting capability_finished beholder event", "capability_id", capID, "method", method, "step_ref", stepRef, "success", success, "error", errMsg)
-				emitCapabilityFinished(ctx, runLggr, metadata, capID, method, stepRef, success, errMsg)
+				emitCapabilityFinished(ctx, runLggr, metadata, e.shardIndex, capID, method, stepRef, success, errMsg)
 			}
 		}
 	} else if executeResponses[0].Metrics != nil {
