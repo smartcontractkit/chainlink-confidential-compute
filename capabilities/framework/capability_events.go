@@ -22,9 +22,9 @@ const (
 
 // emitCapabilityStarted re-emits an enclave "capability_started" event as a v2
 // CapabilityExecutionStarted Beholder message, the channel the executions UI reads.
-func emitCapabilityStarted(ctx context.Context, lggr logger.Logger, meta capabilities.RequestMetadata, capabilityID, method string, stepRef int32) {
+func emitCapabilityStarted(ctx context.Context, lggr logger.Logger, meta capabilities.RequestMetadata, shardIndex uint32, capabilityID, method string, stepRef int32) {
 	event := &eventsv2.CapabilityExecutionStarted{
-		CreInfo:             creInfoFromMeta(meta),
+		CreInfo:             creInfoFromMeta(meta, shardIndex),
 		Workflow:            workflowKeyFromMeta(meta),
 		WorkflowExecutionID: meta.WorkflowExecutionID,
 		Timestamp:           time.Now().Format(time.RFC3339Nano),
@@ -38,13 +38,13 @@ func emitCapabilityStarted(ctx context.Context, lggr logger.Logger, meta capabil
 // emitCapabilityFinished re-emits an enclave "capability_finished" event as a v2
 // CapabilityExecutionFinished Beholder message. The enclave reports a success bool;
 // it maps to the SUCCEEDED/FAILED execution status the UI expects.
-func emitCapabilityFinished(ctx context.Context, lggr logger.Logger, meta capabilities.RequestMetadata, capabilityID, method string, stepRef int32, success bool, errMsg string) {
+func emitCapabilityFinished(ctx context.Context, lggr logger.Logger, meta capabilities.RequestMetadata, shardIndex uint32, capabilityID, method string, stepRef int32, success bool, errMsg string) {
 	status := eventsv2.ExecutionStatus_EXECUTION_STATUS_SUCCEEDED
 	if !success {
 		status = eventsv2.ExecutionStatus_EXECUTION_STATUS_FAILED
 	}
 	event := &eventsv2.CapabilityExecutionFinished{
-		CreInfo:             creInfoFromMeta(meta),
+		CreInfo:             creInfoFromMeta(meta, shardIndex),
 		Workflow:            workflowKeyFromMeta(meta),
 		WorkflowExecutionID: meta.WorkflowExecutionID,
 		Timestamp:           time.Now().Format(time.RFC3339Nano),

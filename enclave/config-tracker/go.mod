@@ -6,7 +6,7 @@ replace github.com/smartcontractkit/chainlink-confidential-compute => ../..
 
 require (
 	github.com/ethereum/go-ethereum v1.17.4
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20261014172120-daa34bb8a999
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20261028220357-f9f63cb65fce
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20250708191655-e9033561ddd9
 	github.com/smartcontractkit/chainlink-evm v0.3.2
 	github.com/smartcontractkit/chainlink-evm/gethwrappers v0.0.0-20250808121824-2c3544aab8f3
@@ -73,7 +73,7 @@ require (
 	github.com/jmoiron/sqlx v1.4.0 // indirect
 	github.com/jpillora/backoff v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
