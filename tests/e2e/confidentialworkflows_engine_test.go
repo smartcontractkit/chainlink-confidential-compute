@@ -385,6 +385,10 @@ func initCWEngineTestServers(configJSON string) (wasmURL string, configURL strin
 // Success signals:
 //   - "engine-test-secret" + the expected secret value in workflow-DON logs.
 //   - "engine-test-http" + status=200 in workflow-DON logs.
+//   - a 100kB POST to the echo target succeeds, despite exceeding the default
+//     CRE HTTP action request/response size limits. TODO: once limits are
+//     enforced, this must pass only via a per-workflow override (see
+//     fetchLargeEcho in testdata/workflow).
 //   - the reported price readable via getPrice on the deployed consumer contract.
 //
 // Echo target: https://postman-echo.com/post. The EIF-baked DefaultPolicy
@@ -641,6 +645,7 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	//      - workflow-DON reached the enclave successfully
 	//      - GetSecret → VaultDON remote dispatch succeeded
 	//      - http-actions was intercepted in-enclave and the HTTPS fetch succeeded
+	//      - an http-actions request/response over the default CRE size limits succeeded
 	//      - consensus/Simple was intercepted and returned the single observation
 	//    WASM runtime.Logger() lines do NOT surface: enclaveExecutionHelper.EmitUserLog
 	//    is a no-op stub today, with PRIV-443 tracking the wiring. So we rely on this
