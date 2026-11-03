@@ -33,9 +33,14 @@ const (
 	subCapabilityErrorCapability  = "capability"
 	subCapabilityErrorUnknown     = "unknown"
 	enclaveMemoryPollInterval     = 5 * time.Second
+	minEnclaveMemoryPollInterval  = 250 * time.Millisecond
 	enclaveMemoryPollTimeout      = 30 * time.Second
 	maxEnclaveMemoryResponseBytes = 64 * 1024
 )
+
+// guestCPUSampleInterval is the shortest window for guest CPU utilization,
+// since the enclave reports CPU time in whole seconds.
+const guestCPUSampleInterval = 5 * time.Second
 
 var executionDurationBuckets = []float64{
 	0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1,
@@ -101,10 +106,15 @@ type hostMetrics struct {
 	workflowCountMax int64
 	workflowRefs     map[string]int64
 
-	// Latest enclave samples, published for lock-free reads in OTel callbacks.
-	// Nil means that no series is currently available.
+	// Latest enclave samples. Nil means that no series is currently available.
+	// memory is written under memoryMu.
 	memory         atomic.Pointer[enclaveMemorySnapshot]
 	guestCPUSample atomic.Pointer[guestCPUUtilizationSample]
+
+	// Memory extremes since the previous metric collection, guarded by
+	// memoryMu. Nil means no poll succeeded during the current window.
+	memoryMu     sync.Mutex
+	memoryWindow *enclaveMemorySnapshot
 
 	// Cumulative CPU baselines, written only by the memory-poll goroutine.
 	lastProcessCPUSeconds    uint64
@@ -112,6 +122,7 @@ type hostMetrics struct {
 	lastGuestCPUBusySeconds  uint64
 	lastGuestCPUTotalSeconds uint64
 	hasGuestCPUBaseline      bool
+	lastGuestCPUSampleAt     time.Time
 }
 
 func newHostMetrics(meter metric.Meter) (*hostMetrics, error) {
@@ -236,9 +247,8 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	}
 	goRuntimeMemory, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.memory.go_runtime",
-		metric.WithDescription("Memory mapped by the enclave Go runtime, quantized to the nearest MiB inside the enclave"),
+		metric.WithDescription("Highest memory mapped by the enclave Go runtime since the previous metric collection, quantized to the nearest MiB inside the enclave"),
 		metric.WithUnit("By"),
-		metric.WithInt64Callback(metrics.observeGoRuntimeMemory),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create enclave Go runtime memory gauge: %w", err)
@@ -247,16 +257,14 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 		"confidential_compute.enclave.memory.total",
 		metric.WithDescription("Total RAM of the enclave guest (/proc/meminfo MemTotal), quantized to the nearest MiB inside the enclave; the denominator for memory-pressure ratios"),
 		metric.WithUnit("By"),
-		metric.WithInt64Callback(metrics.observeTotalMemory),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create enclave total memory gauge: %w", err)
 	}
 	processRSSMemory, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.memory.rss",
-		metric.WithDescription("Resident memory of the enclave process, including native Wasmtime allocations, quantized to the nearest MiB inside the enclave"),
+		metric.WithDescription("Highest resident memory of the enclave process since the previous metric collection, including native Wasmtime allocations, quantized to the nearest MiB inside the enclave"),
 		metric.WithUnit("By"),
-		metric.WithInt64Callback(metrics.observeProcessRSSMemory),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create enclave process RSS memory gauge: %w", err)
@@ -271,7 +279,7 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	}
 	guestCPUUtilization, err := meter.Float64ObservableGauge(
 		"confidential_compute.enclave.guest.cpu.utilization",
-		metric.WithDescription("Fraction of enclave guest vCPU capacity busy with user, nice, system, IRQ, or softirq work during the latest poll interval; iowait and steal are non-busy and cumulative inputs are quantized to whole seconds inside the enclave"),
+		metric.WithDescription("Fraction of enclave guest vCPU capacity busy with user, nice, system, IRQ, or softirq work over the latest sampling window of at least 5s; iowait and steal are non-busy and cumulative inputs are quantized to whole seconds inside the enclave"),
 		metric.WithUnit("1"),
 		metric.WithFloat64Callback(metrics.observeGuestCPUUtilization),
 	)
@@ -281,9 +289,8 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 
 	availableMemory, err := meter.Int64ObservableGauge(
 		"confidential_compute.enclave.memory.available",
-		metric.WithDescription("Guest RAM the enclave kernel reports as available (/proc/meminfo MemAvailable), quantized to the nearest MiB inside the enclave; the headroom that total and RSS together cannot show"),
+		metric.WithDescription("Lowest guest RAM the enclave kernel reports as available (/proc/meminfo MemAvailable) since the previous metric collection, quantized to the nearest MiB inside the enclave; the headroom that total and RSS together cannot show"),
 		metric.WithUnit("By"),
-		metric.WithInt64Callback(metrics.observeAvailableMemory),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create enclave available memory gauge: %w", err)
@@ -292,7 +299,6 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 		"confidential_compute.enclave.memory.rss_peak",
 		metric.WithDescription("High-water mark of the enclave process's resident set (/proc/self/status VmHWM), quantized to the nearest MiB inside the enclave; monotonic, so a spike between two polls stays visible"),
 		metric.WithUnit("By"),
-		metric.WithInt64Callback(metrics.observePeakRSSMemory),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create enclave peak RSS memory gauge: %w", err)
@@ -316,6 +322,17 @@ func newHostMetricsWithClock(meter metric.Meter, now func() time.Time) (*hostMet
 	)
 	if err != nil {
 		return nil, fmt.Errorf("register enclave execution load callback: %w", err)
+	}
+	_, err = meter.RegisterCallback(
+		metrics.observeEnclaveMemory,
+		metrics.totalMemory,
+		metrics.goRuntimeMemory,
+		metrics.processRSSMemory,
+		metrics.availableMemory,
+		metrics.peakRSSMemory,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("register enclave memory callback: %w", err)
 	}
 	return metrics, nil
 }
@@ -374,46 +391,37 @@ func (m *hostMetrics) observeExecutionLoad(_ context.Context, observer metric.Ob
 	return nil
 }
 
-// Memory is sampled over vsock in a background goroutine. These callbacks only
-// load the latest immutable snapshot, so metric collection never waits on the enclave.
-// observeTotalMemory skips zero values so hosts polling an enclave that
-// predates the totalMB field export no series instead of a bogus zero.
-func (m *hostMetrics) observeTotalMemory(_ context.Context, observer metric.Int64Observer) error {
-	snapshot := m.memory.Load()
-	if snapshot != nil && snapshot.totalBytes > 0 {
-		observer.Observe(snapshot.totalBytes)
+// Memory is sampled over vsock in a background goroutine. The callback only
+// swaps in-memory snapshots, so metric collection never waits on the enclave.
+// Each collection reports the extremes since the previous one, or the latest
+// reading when no poll finished in between. Zero values are skipped so hosts
+// polling an enclave that predates a field export no series instead of a
+// bogus zero.
+func (m *hostMetrics) observeEnclaveMemory(_ context.Context, observer metric.Observer) error {
+	m.memoryMu.Lock()
+	snapshot := m.memoryWindow
+	m.memoryWindow = nil
+	if snapshot == nil {
+		snapshot = m.memory.Load()
 	}
-	return nil
-}
-
-func (m *hostMetrics) observeGoRuntimeMemory(_ context.Context, observer metric.Int64Observer) error {
-	snapshot := m.memory.Load()
-	if snapshot != nil && snapshot.goRuntimeBytes > 0 {
-		observer.Observe(snapshot.goRuntimeBytes)
+	m.memoryMu.Unlock()
+	if snapshot == nil {
+		return nil
 	}
-	return nil
-}
 
-func (m *hostMetrics) observeProcessRSSMemory(_ context.Context, observer metric.Int64Observer) error {
-	snapshot := m.memory.Load()
-	if snapshot != nil && snapshot.processRSSBytes > 0 {
-		observer.Observe(snapshot.processRSSBytes)
-	}
-	return nil
-}
-
-func (m *hostMetrics) observeAvailableMemory(_ context.Context, observer metric.Int64Observer) error {
-	snapshot := m.memory.Load()
-	if snapshot != nil && snapshot.availableBytes > 0 {
-		observer.Observe(snapshot.availableBytes)
-	}
-	return nil
-}
-
-func (m *hostMetrics) observePeakRSSMemory(_ context.Context, observer metric.Int64Observer) error {
-	snapshot := m.memory.Load()
-	if snapshot != nil && snapshot.peakRSSBytes > 0 {
-		observer.Observe(snapshot.peakRSSBytes)
+	for _, gauge := range []struct {
+		instrument metric.Int64ObservableGauge
+		value      int64
+	}{
+		{m.totalMemory, snapshot.totalBytes},
+		{m.goRuntimeMemory, snapshot.goRuntimeBytes},
+		{m.processRSSMemory, snapshot.processRSSBytes},
+		{m.availableMemory, snapshot.availableBytes},
+		{m.peakRSSMemory, snapshot.peakRSSBytes},
+	} {
+		if gauge.value > 0 {
+			observer.ObserveInt64(gauge.instrument, gauge.value)
+		}
 	}
 	return nil
 }
@@ -428,15 +436,43 @@ func (m *hostMetrics) observeGuestCPUUtilization(_ context.Context, observer met
 
 // recordEnclaveMemory updates resource metrics carried by the enclave's /memory response.
 func (m *hostMetrics) recordEnclaveMemory(estimate types.MemoryEstimateResponse) {
-	m.memory.Store(&enclaveMemorySnapshot{
+	reading := &enclaveMemorySnapshot{
 		totalBytes:      mibToBytes(estimate.TotalMB),
 		goRuntimeBytes:  mibToBytes(estimate.UsedMB),
 		processRSSBytes: mibToBytes(estimate.RSSMB),
 		availableBytes:  mibToBytes(estimate.AvailableMB),
 		peakRSSBytes:    mibToBytes(estimate.PeakRSSMB),
-	})
+	}
+	m.memoryMu.Lock()
+	m.memory.Store(reading)
+	m.memoryWindow = mergeMemoryExtremes(m.memoryWindow, reading)
+	m.memoryMu.Unlock()
+
 	m.recordProcessCPUTime(estimate.ProcessCPUSeconds)
-	m.recordGuestCPUUtilization(estimate.GuestCPUBusySeconds, estimate.GuestCPUTotalSeconds)
+	if now := m.now(); now.Sub(m.lastGuestCPUSampleAt) >= guestCPUSampleInterval {
+		m.lastGuestCPUSampleAt = now
+		m.recordGuestCPUUtilization(estimate.GuestCPUBusySeconds, estimate.GuestCPUTotalSeconds)
+	}
+}
+
+// mergeMemoryExtremes folds a reading into a window, keeping the highest usage,
+// the lowest available memory and the latest total. Zero means unavailable and
+// never replaces a reported value. Snapshots are immutable once stored.
+func mergeMemoryExtremes(window, reading *enclaveMemorySnapshot) *enclaveMemorySnapshot {
+	if window == nil {
+		return reading
+	}
+	merged := *window
+	if reading.totalBytes > 0 {
+		merged.totalBytes = reading.totalBytes
+	}
+	merged.goRuntimeBytes = max(merged.goRuntimeBytes, reading.goRuntimeBytes)
+	merged.processRSSBytes = max(merged.processRSSBytes, reading.processRSSBytes)
+	merged.peakRSSBytes = max(merged.peakRSSBytes, reading.peakRSSBytes)
+	if reading.availableBytes > 0 && (merged.availableBytes == 0 || reading.availableBytes < merged.availableBytes) {
+		merged.availableBytes = reading.availableBytes
+	}
+	return &merged
 }
 
 // recordProcessCPUTime expects ordered samples from the single memory-poll
@@ -511,10 +547,13 @@ func (m *hostMetrics) recordGuestCPUUtilization(busy, total uint64) {
 	})
 }
 
-// clearEnclaveMemory drops stale gauges after a failed poll but keeps the CPU
-// baselines so recovery cannot replay cumulative process time.
+// clearEnclaveMemory drops the latest reading after a failed poll, so memory
+// gauges disappear once the current window's extremes are exported. It keeps
+// the CPU baselines so recovery cannot replay cumulative process time.
 func (m *hostMetrics) clearEnclaveMemory() {
+	m.memoryMu.Lock()
 	m.memory.Store(nil)
+	m.memoryMu.Unlock()
 	m.guestCPUSample.Store(nil)
 }
 

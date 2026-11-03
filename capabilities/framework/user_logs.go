@@ -21,9 +21,9 @@ const (
 // emitUserLog re-emits an enclave "user_log" event as a v2 WorkflowUserLog Beholder
 // message, the channel the logs UI reads. The message text comes from the enclave
 // response; the workflow/DON coordinates come from the host's request metadata.
-func emitUserLog(ctx context.Context, lggr logger.Logger, meta capabilities.RequestMetadata, msg string) {
+func emitUserLog(ctx context.Context, lggr logger.Logger, meta capabilities.RequestMetadata, shardIndex uint32, msg string) {
 	event := &eventsv2.WorkflowUserLog{
-		CreInfo:             creInfoFromMeta(meta),
+		CreInfo:             creInfoFromMeta(meta, shardIndex),
 		Workflow:            workflowKeyFromMeta(meta),
 		WorkflowExecutionID: meta.WorkflowExecutionID,
 		Timestamp:           time.Now().Format(time.RFC3339Nano),
