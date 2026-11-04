@@ -24,6 +24,7 @@ import (
 	p2ptypes "github.com/smartcontractkit/libocr/ragep2p/types"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
+	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/ratelimit"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
@@ -658,8 +659,8 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 			// or older nodes), in which case the enclave uses its configured MasterPublicKey.
 			// Signed as part of ComputeRequest.Hash().
 			MasterPublicKey: rawVaultPublicKey,
-			AppID:                        e.capabilityID,
-			Version:                      e.confidentialComputeVersion,
+			AppID:           e.capabilityID,
+			Version:         e.confidentialComputeVersion,
 		}
 		innerLggr.Debugw("signing compute request",
 			"appID", e.capabilityID,
@@ -1378,6 +1379,33 @@ func generateSecretCacheKey(enclaveEphemeralPublicKey []byte, secret *framework.
 	return sha256.Sum256([]byte(keyData))
 }
 
+// getSecretsDirectlyEnabled reports whether the pre-fetch Vault GetSecrets path
+// should use the direct-read response aggregator. Both the capability-side
+// rollout gate and the per-workflow feature flag must be active for the
+// execution timestamp, so every capability DON node makes the same choice.
+func (e *RealExecutor) getSecretsDirectlyEnabled(ctx context.Context, metadata capabilities.RequestMetadata) bool {
+	ctx = metadata.ContextWithCRE(ctx)
+	ts := commonconfig.Timestamp(metadata.ExecutionTimestamp.Unix())
+
+	capabilityGate, err := cresettings.Default.ConfidentialCompute.
+		ConfidentialHTTPVaultGetSecretsDirectlyActivePeriod.GetOrDefault(ctx, e.limitsFactory.Settings)
+	if err != nil {
+		e.lggr.Warnw("failed to read ConfidentialCompute.ConfidentialHTTPVaultGetSecretsDirectlyActivePeriod, using the OCR path", "err", err)
+		return false
+	}
+	if !capabilityGate.Contains(ts) {
+		return false
+	}
+
+	globalGate, err := cresettings.Default.PerWorkflow.
+		FeatureVaultGetSecretsDirectlyActivePeriod.GetOrDefault(ctx, e.limitsFactory.Settings)
+	if err != nil {
+		e.lggr.Warnw("failed to read PerWorkflow.FeatureVaultGetSecretsDirectlyActivePeriod, using the OCR path", "err", err)
+		return false
+	}
+	return globalGate.Contains(ts)
+}
+
 // GetEncryptedDecryptionShares fetches secrets and their encrypted decryption key shares from the
 // VaultDON, serving them from the local cache when every requested secret is present. lggr must be
 // the request-scoped logger so the emitted lines carry the workflow/execution/enclave fields.
@@ -1463,9 +1491,17 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 		}
 		requestedKeys[i] = fmt.Sprintf("%s::%s::%s", owner, secret.Namespace, secret.Key)
 	}
+	direct := e.getSecretsDirectlyEnabled(ctx, metadata)
 	vaultDONRequestPayload := &vault.GetSecretsRequest{
 		Requests: secretRequests,
 	}
+	if direct {
+		vaultDONRequestPayload.GetSecretsDirectly = true
+	}
+	lggr.Debugw("vault GetSecrets direct-read decision",
+		"direct", direct,
+		"executionTimestamp", metadata.ExecutionTimestamp,
+	)
 	vaultDONInputAny, err := anypb.New(vaultDONRequestPayload)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to marshal VaultDON request payload to Any: %w", err)
