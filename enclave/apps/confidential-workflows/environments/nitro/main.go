@@ -95,16 +95,18 @@ func main() {
 		)
 	}
 
-	// Cap concurrent executions at (enclave memory - reserve) / per-exec so a burst
-	// can't exhaust the fixed enclave memory and wedge the VM. Derived from memory
-	// read at startup, so it scales with the enclave's sizing.
-	limit := memlimit.Derive()
+	limit, err := memlimit.Derive()
+	if err != nil {
+		logger.Fatalf("Failed to derive workflow memory budget: %v", err)
+	}
 	appLogger.Infow("Confidential workflows concurrency limit",
-		"maxConcurrentExecutions", limit.MaxConcurrent,
+		"maxConcurrentExecutions", limit.MaxConcurrentExecutions,
+		"compileCapacity", limit.MaxConcurrentCompilations,
 		"totalMemMB", limit.TotalMB,
 		"reserveMB", limit.ReserveMB,
 		"perExecMB", limit.PerExecMB,
-		"memoryIntrospected", limit.Introspected,
+		"perCompilationMB", limit.PerCompilationMB,
+		"safetyMB", limit.SafetyMB,
 	)
 	confApp, err := app.NewConfidentialWorkflowsApp(
 		sdkpb.TeeType_TEE_TYPE_AWS_NITRO,
@@ -118,7 +120,8 @@ func main() {
 					proxyclient.NewWorkflowControlledDialer(types.ProxyParentCID, types.ProxyPort).DialContext,
 				),
 			),
-			MaxConcurrentExecutions: limit.MaxConcurrent,
+			MaxConcurrentExecutions: limit.MaxConcurrentExecutions,
+			CompileCapacity:         limit.MaxConcurrentCompilations,
 		},
 	)
 	if err != nil {

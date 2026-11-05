@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
@@ -46,12 +47,14 @@ type confidentialWorkflowsApp struct {
 	// compileSlots bounds how many admitted executions compile simultaneously,
 	// capping peak compilation memory while guests run concurrently. Waiting
 	// executions keep their limiter slot; the wait doesn't count against
-	// executionTimeout. Sized by WorkflowSettings.MaxConcurrentCompilations
-	// (default defaultMaxConcurrentCompilations) and swapped whole on
-	// reinjection: executions already holding a slot release it back to the
-	// gate they acquired, so a shrink takes effect as in-flight compilations
-	// finish rather than preempting them.
+	// executionTimeout. The first successful injection installs the final gate
+	// before publishing storage credentials; reinjections reuse that same gate.
 	compileSlots atomic.Pointer[semaphore.Weighted]
+	// compileCapacity caps compilation concurrency based on the enclave memory budget; zero means no cap.
+	compileCapacity int64
+	settingsMu      sync.Mutex
+	// compileConcurrency is the installed slot count, guarded by settingsMu; zero until configured.
+	compileConcurrency int64
 
 	// executionTimeout bounds a single WASM run (nanoseconds; 0 = the WASM
 	// host's own default). Injected via InjectSettings, read on every Execute,
@@ -86,6 +89,10 @@ type Config struct {
 	StorageFetcherFactory   StorageFetcherFactory
 	RemoteDispatcherFactory RemoteDispatcherFactory
 	MaxConcurrentExecutions int64
+	// CompileCapacity is the startup compilation capacity. A positive value
+	// also caps cache/download settings to the built-in limits budgeted by memlimit.
+	// Zero leaves fake/test sizing unchanged. Settings may select lower concurrency.
+	CompileCapacity int64
 }
 
 type Option func(*confidentialWorkflowsApp)
@@ -180,10 +187,8 @@ func WithMaxConcurrentExecutions(n int64) Option {
 // the first injection, the remote dispatcher (via the factory). The required
 // fields are asserted before anything is applied, so a deployment that forgot
 // one fails the injection instead of running half-configured; see
-// WorkflowSettings. Fetcher tunables (max binary size, fetch timeout, cache
-// size) and the timeouts (global request, gateway client, workflow execution)
-// fall back to the built-in defaults when omitted. Safe to call again (e.g. key
-// rotation), as long as the payload stays complete.
+// WorkflowSettings. Safe to call again (e.g. key rotation), as long as the
+// payload stays complete and the effective compile concurrency is unchanged.
 func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	var req WorkflowSettings
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -193,43 +198,30 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 		return err
 	}
 
-	a.fetcher.SetMaxCacheBytes(int(req.MaxCacheBytes))
-	if a.httpFetcher != nil {
-		a.httpFetcher.SetDefaultTimeout(time.Duration(req.RequestTimeout))
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
+	concurrency := cmp.Or(req.MaxConcurrentCompilations, a.compileConcurrency, defaultMaxConcurrentCompilations)
+	if a.compileCapacity > 0 {
+		if req.MaxConcurrentCompilations > a.compileCapacity {
+			a.logger.Warnw("[app] capping compilation concurrency to startup budget", "requested", req.MaxConcurrentCompilations, "compileCapacity", a.compileCapacity)
+		}
+		concurrency = min(concurrency, a.compileCapacity)
+		if req.MaxCacheBytes > types.DefaultMaxBinaryCacheBytes || req.MaxBinarySize > types.DefaultMaxBinarySize {
+			a.logger.Warnw("[app] capping binary settings to startup budget",
+				"requestedCacheBytes", req.MaxCacheBytes, "maxCacheBytes", types.DefaultMaxBinaryCacheBytes,
+				"requestedBinarySize", req.MaxBinarySize, "maxBinarySize", types.DefaultMaxBinarySize)
+		}
+		req.MaxCacheBytes = min(req.MaxCacheBytes, types.DefaultMaxBinaryCacheBytes)
+		req.MaxBinarySize = min(req.MaxBinarySize, types.DefaultMaxBinarySize)
 	}
-	if req.ExecutionTimeout > 0 {
-		a.executionTimeout.Store(int64(req.ExecutionTimeout))
-	}
-	if req.MaxConcurrentCompilations > 0 {
-		a.compileSlots.Store(semaphore.NewWeighted(req.MaxConcurrentCompilations))
-	}
-	if req.WorkflowGracePeriod != 0 {
-		a.gracePeriod.Store(int64(req.WorkflowGracePeriod))
+	if a.compileConcurrency != 0 && concurrency != a.compileConcurrency {
+		return errors.New("compilation concurrency cannot change after initialization; restart the enclave")
 	}
 
-	// The injected endpoint replaces the startup default (which only the fake and
-	// test wirings set).
-	a.mu.Lock()
-	a.storageServiceURL = req.StorageServiceURL
-	a.storageServiceTLS = req.StorageServiceTLS
-	url, tls := a.storageServiceURL, a.storageServiceTLS
-	a.mu.Unlock()
-
-	fetcher, pub, err := a.storageFactory(url, tls, req.StorageKey, req.MaxBinarySize, time.Duration(req.BinaryFetchTimeout), a.logger)
+	fetcher, pub, err := a.storageFactory(req.StorageServiceURL, req.StorageServiceTLS, req.StorageKey, req.MaxBinarySize, time.Duration(req.BinaryFetchTimeout), a.logger)
 	if err != nil {
 		return fmt.Errorf("building storage fetcher: %w", err)
 	}
-	a.mu.Lock()
-	old := a.storageFetcher
-	a.storageFetcher = fetcher
-	a.mu.Unlock()
-	if old != nil {
-		if cerr := old.Close(); cerr != nil {
-			a.logger.Warnf("[app] closing previous storage fetcher: %v", cerr)
-		}
-	}
-	a.logger.Infof("[app] storage credentials set (pubkey=%x, storage=%s)", pub, url)
-
 	a.mu.Lock()
 	if a.dispatcher == nil && a.dispatcherFactory != nil {
 		d, err := a.dispatcherFactory(GatewayConfig{
@@ -240,6 +232,9 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 		})
 		if err != nil {
 			a.mu.Unlock()
+			if cerr := fetcher.Close(); cerr != nil {
+				a.logger.Warnf("[app] closing unused storage fetcher: %v", cerr)
+			}
 			return fmt.Errorf("building remote dispatcher: %w", err)
 		}
 		if a.haveConfig {
@@ -250,7 +245,33 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 		a.dispatcher = d
 		a.logger.Infof("[app] remote dispatch enabled (gateway=%s)", req.GatewayURL)
 	}
+	// Set the initial compilation concurrency on the first successful injection.
+	if a.compileConcurrency == 0 {
+		a.compileSlots.Store(semaphore.NewWeighted(concurrency))
+		a.compileConcurrency = concurrency
+		a.logger.Infow("[app] compilation admission configured", "maxConcurrentCompilations", concurrency, "compileCapacity", a.compileCapacity)
+	}
+	a.fetcher.SetMaxCacheBytes(int(req.MaxCacheBytes))
+	if a.httpFetcher != nil {
+		a.httpFetcher.SetDefaultTimeout(time.Duration(req.RequestTimeout))
+	}
+	if req.ExecutionTimeout > 0 {
+		a.executionTimeout.Store(int64(req.ExecutionTimeout))
+	}
+	if req.WorkflowGracePeriod != 0 {
+		a.gracePeriod.Store(int64(req.WorkflowGracePeriod))
+	}
+	a.storageServiceURL = req.StorageServiceURL
+	a.storageServiceTLS = req.StorageServiceTLS
+	old := a.storageFetcher
+	a.storageFetcher = fetcher
 	a.mu.Unlock()
+	if old != nil {
+		if cerr := old.Close(); cerr != nil {
+			a.logger.Warnf("[app] closing previous storage fetcher: %v", cerr)
+		}
+	}
+	a.logger.Infof("[app] storage credentials set (pubkey=%x, storage=%s)", pub, req.StorageServiceURL)
 	return nil
 }
 
@@ -281,6 +302,9 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 	if config.RemoteDispatcherFactory == nil {
 		return nil, errors.New("remote dispatcher factory is required")
 	}
+	if config.CompileCapacity < 0 {
+		return nil, errors.New("compilation capacity must be non-negative")
+	}
 
 	a := &confidentialWorkflowsApp{
 		logger:            lggr,
@@ -288,10 +312,15 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 		httpFetcher:       config.HTTPFetcher,
 		tpe:               tpe,
 		limiter:           newExecutionLimiter(config.MaxConcurrentExecutions),
+		compileCapacity:   config.CompileCapacity,
 		storageFactory:    config.StorageFetcherFactory,
 		dispatcherFactory: config.RemoteDispatcherFactory,
 	}
-	a.compileSlots.Store(semaphore.NewWeighted(defaultMaxConcurrentCompilations))
+	concurrency := int64(defaultMaxConcurrentCompilations)
+	if a.compileCapacity > 0 {
+		concurrency = min(concurrency, a.compileCapacity)
+	}
+	a.compileSlots.Store(semaphore.NewWeighted(concurrency))
 	a.gracePeriod.Store(int64(types.DefaultWorkflowGracePeriod))
 	a.requirementsHandler.Tee = a.validTee
 	return a, nil
