@@ -16,9 +16,14 @@ func TestForMemory(t *testing.T) {
 		{1892, 1, 1},
 		{1992, 1, 1},
 		{2048, 1, 1},
+		{2247, 1, 1},
+		{2248, 2, 1},
 		{2631, 3, 1},
 		{2632, 2, 2}, // Growing the compile pool can lower execution capacity.
 		{3000, 3, 2},
+		{7071, 9, 7},
+		{7072, 8, 8}, // The compile pool reaches its cap.
+		{7812, 10, 8},
 		{9990, 16, 8},
 		{10240, 16, 8},
 	}
@@ -41,12 +46,35 @@ func TestForMemory(t *testing.T) {
 	}
 }
 
+func TestDerive(t *testing.T) {
+	total, readErr := totalMemoryMB()
+	got, err := Derive()
+	if readErr != nil {
+		require.ErrorContains(t, err, "reading guest memory")
+		require.Zero(t, got)
+		return
+	}
+	want, budgetErr := ForMemory(total)
+	if budgetErr != nil {
+		require.EqualError(t, err, budgetErr.Error())
+	} else {
+		require.NoError(t, err)
+	}
+	require.Equal(t, want, got)
+}
+
 func FuzzForMemory(f *testing.F) {
-	for _, total := range []uint64{0, 1100, 1891, 1892, 2631, 2632, 9990, math.MaxUint64} {
+	for _, total := range []uint64{0, 1100, 1891, 1892, 2631, 2632, 7071, 7072, 7812, 9990, math.MaxUint64} {
 		f.Add(total)
 	}
 	f.Fuzz(func(t *testing.T, total uint64) {
 		r, err := ForMemory(total)
+		if total < ReserveMB+SafetyMB+PerExecMB+PerCompilationMB {
+			require.Error(t, err)
+		} else if (total-ReserveMB-SafetyMB)/PerExecMB <= uint64(math.MaxInt) {
+			// Even without reserving compilation memory, the execution count fits.
+			require.NoError(t, err)
+		}
 		if err != nil {
 			return
 		}
