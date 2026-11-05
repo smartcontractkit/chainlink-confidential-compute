@@ -71,7 +71,7 @@
       capabilities = ["./binaries/confidential-http"]
       user_config_overrides = """
       [Log]
-      Level = 'warn'
+      Level = 'debug'
       JSONConsole = true
 
       [Tracing]
