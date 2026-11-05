@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -370,9 +369,7 @@ func (e *RealExecutor) refreshLimitSettings(ctx context.Context) {
 	next := *cur
 	e.applyLimitSettings(ctx, &next)
 	e.setCapConfig(&next)
-	if !reflect.DeepEqual(cur, &next) {
-		e.logResolvedConfig(&next)
-	}
+	e.logResolvedConfig(&next)
 }
 
 // logResolvedConfig logs the effective config resolved from the limits
