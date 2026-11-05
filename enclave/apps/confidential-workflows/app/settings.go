@@ -19,7 +19,7 @@ import (
 // Every injection carries the complete configuration: StorageKey,
 // StorageServiceURL and GatewayURL are required and a payload missing any of
 // them is rejected whole, rather than leaving the app half-configured. The
-// remaining fields are tunables that fall back to their built-in defaults when
+// remaining fields use defaults or preserve their previous values when
 // omitted. Unknown fields are ignored, so a payload written for a newer app can
 // still be injected into an older one.
 //
@@ -30,12 +30,15 @@ import (
 //   - GatewayURL: the Gateway endpoint(s) for remote dispatch (dynamic secrets +
 //     capability calls). Accepts a comma-separated list; the enclave round-robins
 //     across them and fails over to the next on a transport/proxy error.
-//   - MaxBinarySize: max decompressed workflow-binary size accepted from
-//     storage, in bytes. Zero falls back to the enclave's built-in default.
+//   - MaxBinarySize: max compressed workflow-binary size accepted from storage,
+//     after base64 decoding, in bytes. Zero uses the built-in default. When a
+//     startup memory budget is set, larger values are capped to that default.
 //   - BinaryFetchTimeout: per-fetch timeout for downloading a workflow binary.
 //     Zero falls back to the enclave's built-in default.
 //   - MaxCacheBytes: size bound of the verified-binary LRU cache, in bytes.
-//     Zero falls back to the enclave's built-in default.
+//     Zero leaves the current bound unchanged (initially the built-in default).
+//     A startup memory budget caps larger values to that default; smaller
+//     values remain adjustable without restarting.
 //   - RequestTimeout: global request timeout inside the enclave, used as the
 //     default deadline for outbound HTTP a workflow makes while being served.
 //     Should track the caller's enclave request timeout, since work outliving
@@ -55,8 +58,9 @@ import (
 //   - MaxConcurrentCompilations: how many executions may hold a WASM module
 //     under compilation simultaneously. Capping this bounds peak compilation
 //     memory; raising it bounds queue wait when many workflows compile at
-//     once. Zero falls back to defaultMaxConcurrentCompilations; negative
-//     values are rejected so a typo can't fully stall execution.
+//     once. Capped to the startup budget when present. Zero uses the default
+//     on first injection and preserves the configured concurrency thereafter.
+//     Changing the effective concurrency requires a restart; negatives are rejected.
 //   - MaxEncryptedSharesPerRelayResult: cap on encrypted shares taken from one
 //     relay-DON signer's result for one secret. Extra shares are dropped, so a
 //     faulty signer cannot fail the request or inflate decryption work. Zero
@@ -85,7 +89,7 @@ type WorkflowSettings struct {
 	ExecutionTimeout    Duration `json:"executionTimeout,omitempty"`
 	WorkflowGracePeriod Duration `json:"workflowGracePeriod,omitempty"`
 	// MaxConcurrentCompilations caps simultaneous WASM compilations; zero means
-	// defaultMaxConcurrentCompilations.
+	// use the default initially or preserve the configured concurrency on reinjection.
 	MaxConcurrentCompilations int64 `json:"maxConcurrentCompilations,omitempty"`
 	// MaxEncryptedSharesPerRelayResult caps the encrypted shares taken from one
 	// relay-DON signer's result for one secret; zero means
@@ -93,8 +97,7 @@ type WorkflowSettings struct {
 	MaxEncryptedSharesPerRelayResult int64 `json:"maxEncryptedSharesPerRelayResult,omitempty"`
 }
 
-// defaultMaxConcurrentCompilations is the compile-slot count applied when the
-// injected settings omit MaxConcurrentCompilations.
+// Starting compile concurrency, before applying the startup memory budget ceiling.
 const defaultMaxConcurrentCompilations = 4
 
 // validate reports the required settings the payload left empty. The enclave
@@ -114,7 +117,7 @@ func (s *WorkflowSettings) validate() error {
 		missing = append(missing, "gatewayUrl")
 	}
 	if s.MaxConcurrentCompilations < 0 {
-		return fmt.Errorf("maxConcurrentCompilations must be non-negative; 0 means the default of %d (got %d)", defaultMaxConcurrentCompilations, s.MaxConcurrentCompilations)
+		return fmt.Errorf("maxConcurrentCompilations must be non-negative (got %d)", s.MaxConcurrentCompilations)
 	}
 	if s.MaxEncryptedSharesPerRelayResult < 0 {
 		return fmt.Errorf("maxEncryptedSharesPerRelayResult must be non-negative; 0 means the default of %d (got %d)", types.DefaultMaxEncryptedSharesPerRelayResult, s.MaxEncryptedSharesPerRelayResult)

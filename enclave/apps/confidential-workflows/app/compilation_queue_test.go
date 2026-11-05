@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
@@ -76,6 +77,9 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 	a.logger = lggr
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
+	// Finish downloading before reinjection closes the old storage connection.
+	_, err = a.fetcher.Fetch(ctx, locator, hash[:], a.storageFetcher)
+	require.NoError(t, err)
 	compileSlot := a.compileSlots.Load()
 	require.NoError(t, compileSlot.Acquire(ctx, 1))
 	release := sync.OnceFunc(func() { compileSlot.Release(1) })
@@ -99,6 +103,13 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 		t.Fatalf("execution bypassed occupied compilation queue: %+v", result)
 	case <-time.After(100 * time.Millisecond):
 	}
+	settings := testSettings(a.storageServiceURL)
+	settings.MaxConcurrentCompilations = 1
+	raw, err := json.Marshal(settings)
+	require.NoError(t, err)
+	require.NoError(t, a.InjectSettings(raw))
+	require.Same(t, compileSlot, a.compileSlots.Load())
+	require.False(t, a.compileSlots.Load().TryAcquire(1), "reinjection must not add permits")
 	release()
 	for range 2 {
 		select {
@@ -111,4 +122,5 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 	}
 	require.Empty(t, a.limiter.slots)
 	require.True(t, compileSlot.TryAcquire(1))
+	compileSlot.Release(1)
 }

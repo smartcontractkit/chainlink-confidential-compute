@@ -4,9 +4,7 @@ package memlimit
 
 import "errors"
 
-// totalMemoryMB is unsupported off Linux; MaxConcurrentExecutions then uses
-// FallbackConcurrency. The enclave only ever runs on Linux; this exists so the
-// package (and its test) builds on dev machines.
+// The Nitro guest is Linux; fake environments do not derive a memory budget.
 func totalMemoryMB() (uint64, error) {
 	return 0, errors.New("total memory introspection is only supported on linux")
 }
