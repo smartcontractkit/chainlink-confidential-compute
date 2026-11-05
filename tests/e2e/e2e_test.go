@@ -246,7 +246,22 @@ func isTelemetryNoise(lowerLine string) bool {
 const (
 	httpDONConfigFile   = "/configs/workflow-don.toml"
 	engineDONConfigFile = "/configs/workflow-don-engine.toml"
+
+	// The vault capability runs on the workflow nodeset in workflow-don.toml.
+	confidentialHTTPVaultNodesetName = "workflow"
+
+	confidentialHTTPDirectReadGlobalTOML = `[ConfidentialCompute]
+ConfidentialHTTPVaultGetSecretsDirectlyActivePeriod = '[2000-01-01 00:00:00 +0000 UTC,2100-01-01 00:00:00 +0000 UTC]'`
+
+	confidentialHTTPDirectReadWorkflowTOML = `[PerWorkflow]
+FeatureVaultGetSecretsDirectlyActivePeriod = '[2000-01-01 00:00:00 +0000 UTC,2100-01-01 00:00:00 +0000 UTC]'`
 )
+
+func requireConfidentialHTTPVaultDirectRead(t *testing.T, testEnv *ttypes.TestEnvironment) {
+	t.Helper()
+
+	systemtests.RequireContainerLogsForNodesetEventually(t, testEnv, confidentialHTTPVaultNodesetName, "served direct get secrets request", time.Minute, 2*time.Second)
+}
 
 func getTestConfig(t *testing.T, configPath string) *ttypes.TestConfig {
 	t.Helper()
@@ -628,7 +643,32 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				}
 			}
 			require.NotZero(t, numNodes, "workflow nodeset not found in config")
-			totalExpected := totalTriggers * numNodes
+
+			var negativeExpected int
+			if app.Name == "confidential-http" {
+				workflowIDForSettings := strings.TrimPrefix(workflowID, "0x")
+
+				// First exercise the OCR path: enable the global per-workflow flag
+				// but leave the capability-side direct-read gate off.
+				testLogger.Info().Msg("Checking OCR Vault GetSecrets path with the capability gate off...")
+				ocrSettings := systemtests.ApplyCRESettings(t, testEnv,
+					systemtests.Workflow(workflowIDForSettings, confidentialHTTPDirectReadWorkflowTOML),
+				)
+				sendHTTPTrigger(t, testLogger, gatewayURL, uniqueWorkflowName, workflowID, workflowOwnerAddr, signingKey, triggerInputs[0])
+				negativeExpected = numNodes
+				require.Eventually(t, func() bool {
+					return recipient.requestCount() >= negativeExpected
+				}, 5*time.Minute, 5*time.Second, "recipient should receive the OCR-path workflow result")
+				ocrSettings.Reset(t)
+
+				testLogger.Info().Msg("Enabling Vault direct reads for confidential-http...")
+				systemtests.ApplyCRESettings(t, testEnv,
+					systemtests.Global(confidentialHTTPDirectReadGlobalTOML),
+					systemtests.Workflow(workflowIDForSettings, confidentialHTTPDirectReadWorkflowTOML),
+				)
+			}
+
+			totalExpected := negativeExpected + totalTriggers*numNodes
 			testLogger.Info().Msgf("Sending %d total triggers (%d rounds x %d inputs, expecting %d results with %d nodes, interRequestDelay=%s)...", totalTriggers, requestCount, len(triggerInputs), totalExpected, numNodes, interRequestDelay)
 			triggersSent := 0
 			for i := range requestCount {
@@ -653,6 +693,10 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			testLogger.Info().Msgf("Validating recipient requests...")
 			err = app.Validate(framework.L, recipient.getRequests())
 			require.NoError(t, err, "recipient request validation failed")
+
+			if app.Name == "confidential-http" {
+				requireConfidentialHTTPVaultDirectRead(t, testEnv)
+			}
 
 			// --- Error handling sub-tests ---
 			// These exercise the enclave app's error-to-response conversion
