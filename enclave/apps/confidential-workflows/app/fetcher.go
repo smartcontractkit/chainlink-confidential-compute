@@ -72,7 +72,10 @@ func (f *BinaryFetcher) Fetch(ctx context.Context, locator string, binaryHash []
 	}
 
 	f.cachePut(cacheKey, binary)
-	f.logger.Infof("fetched and cached binary (%d bytes, cache: %d/%d bytes)", len(binary), f.cacheBytes, f.maxCacheBytes)
+	f.mu.Lock()
+	cacheBytes, maxCacheBytes := f.cacheBytes, f.maxCacheBytes
+	f.mu.Unlock()
+	f.logger.Infof("fetched and cached binary (%d bytes, cache: %d/%d bytes)", len(binary), cacheBytes, maxCacheBytes)
 	return binary, nil
 }
 
