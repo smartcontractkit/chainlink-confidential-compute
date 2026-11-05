@@ -27,7 +27,7 @@ func (e *RealExecutor) resolveRequestTimeout(ctx context.Context, publicKey bool
 	capCC := e.capabilityLimits()
 
 	if publicKey {
-		timeout, err := capCC.PublicKeyRequestTimeout.GetOrDefaultWithFallback(ctx, g, cc.PublicKeyRequestTimeout)
+		timeout, err := resolveWithFallback(ctx, g, capCC.PublicKeyRequestTimeout, cc.PublicKeyRequestTimeout)
 		if err != nil {
 			return 0, fmt.Errorf("resolve public key request timeout from limits: %w", err)
 		}
@@ -40,7 +40,7 @@ func (e *RealExecutor) resolveRequestTimeout(ctx context.Context, publicKey bool
 		return types.DefaultPublicKeyRequestTimeout, nil
 	}
 
-	timeout, err := capCC.EnclaveRequestTimeout.GetOrDefaultWithFallback(ctx, g, cc.EnclaveRequestTimeout)
+	timeout, err := resolveWithFallback(ctx, g, capCC.EnclaveRequestTimeout, cc.EnclaveRequestTimeout)
 	if err != nil {
 		return 0, fmt.Errorf("resolve enclave request timeout from limits: %w", err)
 	}
