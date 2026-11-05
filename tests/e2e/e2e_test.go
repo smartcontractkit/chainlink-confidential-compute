@@ -515,6 +515,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 
 	for _, app := range apps {
 		t.Run(fmt.Sprintf("Testing %s", app.Name), func(t *testing.T) {
+			_, usingPriorBinary := priorVersionPaths[app.Name]
 			testLogger.Info().Msgf("Provisioning enclave for app: %s", app.Name)
 			enclaveType := types.EnclaveTypeNitro
 			if tests.UseFakeEnclave() {
@@ -645,7 +646,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			require.NotZero(t, numNodes, "workflow nodeset not found in config")
 
 			var negativeExpected int
-			if app.Name == "confidential-http" {
+			if app.Name == "confidential-http" && !usingPriorBinary {
 				workflowIDForSettings := strings.TrimPrefix(workflowID, "0x")
 
 				// First exercise the OCR path: enable the global per-workflow flag
@@ -694,7 +695,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			err = app.Validate(framework.L, recipient.getRequests())
 			require.NoError(t, err, "recipient request validation failed")
 
-			if app.Name == "confidential-http" {
+			if app.Name == "confidential-http" && !usingPriorBinary {
 				requireConfidentialHTTPVaultDirectRead(t, testEnv)
 			}
 
