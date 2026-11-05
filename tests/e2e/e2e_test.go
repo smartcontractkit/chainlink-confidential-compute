@@ -254,7 +254,8 @@ const (
 ConfidentialHTTPVaultGetSecretsDirectlyActivePeriod = '[2000-01-01 00:00:00 +0000 UTC,2100-01-01 00:00:00 +0000 UTC]'`
 
 	confidentialHTTPDirectReadWorkflowTOML = `[PerWorkflow]
-FeatureVaultGetSecretsDirectlyActivePeriod = '[2000-01-01 00:00:00 +0000 UTC,2100-01-01 00:00:00 +0000 UTC]'`
+FeatureVaultGetSecretsDirectlyActivePeriod = '[2000-01-01 00:00:00 +0000 UTC,2100-01-01 00:00:00 +0000 UTC]'
+ExecutionTimestampsEnabled = 'true'`
 )
 
 func requireConfidentialHTTPVaultDirectRead(t *testing.T, testEnv *ttypes.TestEnvironment) {
