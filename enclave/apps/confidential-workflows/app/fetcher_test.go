@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -167,4 +168,32 @@ func TestFetch_LRU_AccessRefreshesEntry(t *testing.T) {
 	f.mu.Unlock()
 	assert.True(t, has0, "binary 0 should still be cached after refresh")
 	assert.False(t, has1, "binary 1 should have been evicted")
+}
+
+func TestFetch_ConcurrentCacheResize(t *testing.T) {
+	binaries, hashes, data := lruBinaries(t)
+	raw := &stubRawFetcher{data: data}
+	f := newBinaryFetcher(logger.Test(t), 20)
+	var wg sync.WaitGroup
+	for i := range binaries {
+		wg.Go(func() {
+			for range 50 {
+				got, err := f.Fetch(t.Context(), fmt.Sprintf("loc-%d", i), hashes[i], raw)
+				assert.NoError(t, err)
+				assert.Equal(t, binaries[i], got)
+				runtime.Gosched()
+			}
+		})
+	}
+	wg.Go(func() {
+		for range 50 {
+			f.SetMaxCacheBytes(10)
+			runtime.Gosched()
+			f.SetMaxCacheBytes(20)
+			runtime.Gosched()
+		}
+	})
+	wg.Wait()
+	f.SetMaxCacheBytes(10)
+	require.Equal(t, 10, f.cacheBytes)
 }

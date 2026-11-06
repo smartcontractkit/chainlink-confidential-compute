@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
@@ -13,8 +14,12 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/memlimit"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/emitter"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
+	"github.com/smartcontractkit/chainlink-confidential-compute/util"
+	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/semaphore"
@@ -67,23 +72,45 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 	require.NoError(t, w.Close())
 	binary := compressed.Bytes()
 	hash := sha256.Sum256(binary)
-	enclave, locator := newStorageBackedAppWithSettings(t, binary, func(s *WorkflowSettings) {
-		s.WorkflowGracePeriod = Duration(-time.Second)
-		s.MaxConcurrentCompilations = 1
-	}, WithMaxConcurrentExecutions(2))
-	a := enclave.(*confidentialWorkflowsApp)
+	budget, err := memlimit.ForMemory(2248) // Two executions sharing one compile slot.
+	require.NoError(t, err)
+	require.Equal(t, int64(2), budget.MaxConcurrentExecutions)
+	require.Equal(t, int64(1), budget.MaxConcurrentCompilations)
 	lggr, _ := logger.TestObserved(t, zapcore.DebugLevel)
-	a.logger = lggr
+	enclave, err := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, lggr, Config{
+		MaxConcurrentExecutions: budget.MaxConcurrentExecutions,
+		CompileCapacity:         budget.MaxConcurrentCompilations,
+		HTTPFetcher:             httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
+		StorageFetcherFactory: storageFetcherFactory(func() types.HTTPClient {
+			return util.NewUnrestrictedClient()
+		}),
+		RemoteDispatcherFactory: func(GatewayConfig) (RemoteDispatcher, error) {
+			return &testRemoteDispatcher{}, nil
+		},
+	})
+	require.NoError(t, err)
+	a := enclave.(*confidentialWorkflowsApp)
+	settings := testSettings(startFakeStorage(t, binary))
+	settings.WorkflowGracePeriod = Duration(-time.Second)
+	settings.MaxConcurrentCompilations = 8
+	raw, err := json.Marshal(settings)
+	require.NoError(t, err)
+	require.NoError(t, a.InjectSettings(raw))
+	t.Cleanup(func() { require.NoError(t, a.storageFetcher.Close()) })
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
+	// Finish downloading before reinjection closes the old storage connection.
+	_, err = a.fetcher.Fetch(ctx, testLocator, hash[:], a.storageFetcher)
+	require.NoError(t, err)
 	compileSlot := a.compileSlots.Load()
 	require.NoError(t, compileSlot.Acquire(ctx, 1))
 	release := sync.OnceFunc(func() { compileSlot.Release(1) })
 	results := make(chan *types.ExecuteError, 2)
 	var wg sync.WaitGroup
 	defer func() { release(); wg.Wait() }()
+	require.False(t, compileSlot.TryAcquire(1), "requested concurrency must be capped to one permit")
 	for i := range 2 {
-		input, err := proto.Marshal(makeExecution(t, fmt.Sprintf("workflow-%d", i), locator, hash[:]))
+		input, err := proto.Marshal(makeExecution(t, fmt.Sprintf("workflow-%d", i), testLocator, hash[:]))
 		require.NoError(t, err)
 		wg.Go(func() {
 			_, err := a.Execute([32]byte{byte(i)}, types.AppIDConfidentialWorkflows, input, nil, emitter.NewNoOpEmitter())
@@ -99,6 +126,9 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 		t.Fatalf("execution bypassed occupied compilation queue: %+v", result)
 	case <-time.After(100 * time.Millisecond):
 	}
+	require.NoError(t, a.InjectSettings(raw))
+	require.True(t, compileSlot == a.compileSlots.Load(), "reinjection must reuse the compilation gate")
+	require.False(t, a.compileSlots.Load().TryAcquire(1), "reinjection must not add permits")
 	release()
 	for range 2 {
 		select {
@@ -111,4 +141,5 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 	}
 	require.Empty(t, a.limiter.slots)
 	require.True(t, compileSlot.TryAcquire(1))
+	compileSlot.Release(1)
 }

@@ -1,39 +1,90 @@
 package memlimit
 
-import "testing"
+import (
+	"fmt"
+	"math"
+	"testing"
 
-func TestConcurrency(t *testing.T) {
+	"github.com/stretchr/testify/require"
+)
+
+func TestForMemory(t *testing.T) {
 	cases := []struct {
-		name                          string
-		totalMB, reserveMB, perExecMB uint64
-		want                          int64
+		total                    uint64
+		executions, compilations int64
 	}{
-		{"staging 2048 reproduces default 8", 2048, 1024, 128, 8},
-		{"introspected below 2048 stays close", 1950, 1024, 128, 7},
-		{"scales up on a 4096 enclave", 4096, 1024, 128, 24},
-		{"reserve exceeds total clamps to 1", 512, 1024, 128, 1},
-		{"total equals reserve clamps to 1", 1024, 1024, 128, 1},
-		{"zero per-exec clamps to 1", 2048, 1024, 0, 1},
+		{1892, 1, 1},
+		{1992, 1, 1},
+		{2048, 1, 1},
+		{2247, 1, 1},
+		{2248, 2, 1},
+		{2631, 3, 1},
+		{2632, 2, 2}, // Growing the compile pool can lower execution capacity.
+		{3000, 3, 2},
+		{7071, 9, 7},
+		{7072, 8, 8}, // The compile pool reaches its cap.
+		{7812, 10, 8},
+		{9990, 16, 8},
+		{10240, 16, 8},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := concurrency(tc.totalMB, tc.reserveMB, tc.perExecMB); got != tc.want {
-				t.Fatalf("concurrency(%d, %d, %d) = %d, want %d",
-					tc.totalMB, tc.reserveMB, tc.perExecMB, got, tc.want)
-			}
+		t.Run(fmt.Sprint(tc.total), func(t *testing.T) {
+			r, err := ForMemory(tc.total)
+			require.NoError(t, err)
+			require.Equal(t, tc.executions, r.MaxConcurrentExecutions)
+			require.Equal(t, tc.compilations, r.MaxConcurrentCompilations)
+			require.Equal(t, tc.total, r.TotalMB)
+			require.Equal(t, ReserveMB, r.ReserveMB)
+			require.Equal(t, SafetyMB, r.SafetyMB)
+			require.Equal(t, PerExecMB, r.PerExecMB)
+			require.Equal(t, PerCompilationMB, r.PerCompilationMB)
 		})
+	}
+	for _, total := range []uint64{0, 512, 1024, 1100, 1152, 1891} {
+		_, err := ForMemory(total)
+		require.Error(t, err, "total=%d", total)
 	}
 }
 
-// Derive must never hand back a non-positive limit, which would make the
-// semaphore either panic (negative cap) or reject everything (zero). It must
-// also report the configured reserve/per-exec so the startup log is accurate.
 func TestDerive(t *testing.T) {
-	r := Derive()
-	if r.MaxConcurrent < 1 {
-		t.Fatalf("Derive().MaxConcurrent = %d, want >= 1", r.MaxConcurrent)
+	total, readErr := totalMemoryMB()
+	got, err := Derive()
+	if readErr != nil {
+		require.ErrorContains(t, err, "reading guest memory")
+		require.Zero(t, got)
+		return
 	}
-	if r.ReserveMB != ReserveMB || r.PerExecMB != PerExecMB {
-		t.Fatalf("Derive() = %+v, want ReserveMB=%d PerExecMB=%d", r, ReserveMB, PerExecMB)
+	want, budgetErr := ForMemory(total)
+	if budgetErr != nil {
+		require.EqualError(t, err, budgetErr.Error())
+	} else {
+		require.NoError(t, err)
 	}
+	require.Equal(t, want, got)
+}
+
+func FuzzForMemory(f *testing.F) {
+	for _, total := range []uint64{0, 1100, 1891, 1892, 2631, 2632, 7071, 7072, 7812, 9990, math.MaxUint64} {
+		f.Add(total)
+	}
+	f.Fuzz(func(t *testing.T, total uint64) {
+		r, err := ForMemory(total)
+		if total < ReserveMB+SafetyMB+PerExecMB+PerCompilationMB {
+			require.Error(t, err)
+		} else if (total-ReserveMB-SafetyMB)/PerExecMB <= uint64(math.MaxInt) {
+			// Even without reserving compilation memory, the execution count fits.
+			require.NoError(t, err)
+		}
+		if err != nil {
+			return
+		}
+		require.Positive(t, r.MaxConcurrentCompilations)
+		require.GreaterOrEqual(t, r.MaxConcurrentExecutions, r.MaxConcurrentCompilations)
+		require.LessOrEqual(t, uint64(r.MaxConcurrentCompilations), TargetCompilations)
+		require.LessOrEqual(t, ReserveMB+SafetyMB, total)
+		available := total - ReserveMB - SafetyMB
+		require.LessOrEqual(t, uint64(r.MaxConcurrentCompilations), available/PerCompilationMB)
+		available -= uint64(r.MaxConcurrentCompilations) * PerCompilationMB
+		require.Equal(t, available/PerExecMB, uint64(r.MaxConcurrentExecutions))
+	})
 }
