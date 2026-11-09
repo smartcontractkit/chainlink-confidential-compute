@@ -108,6 +108,8 @@
   supported_evm_chains = [1337, 2337]
   capabilities = ["vault"]
   exposes_remote_capabilities = true
+  # Vault nodes log at debug: the test asserts on the debug-level
+  # "received workflow get secrets request" log.
 
   [nodesets.db]
     image = "postgres:16"
@@ -119,7 +121,7 @@
       custom_ports = ["17770:7777"]
       user_config_overrides = """
       [Log]
-      Level = 'info'
+      Level = 'debug'
       JSONConsole = true
 
       [Tracing]
@@ -138,7 +140,7 @@
       custom_ports = ["17771:7777"]
       user_config_overrides = """
       [Log]
-      Level = 'info'
+      Level = 'debug'
       JSONConsole = true
 
       [Tracing]
@@ -157,7 +159,7 @@
       custom_ports = ["17772:7777"]
       user_config_overrides = """
       [Log]
-      Level = 'info'
+      Level = 'debug'
       JSONConsole = true
 
       [Tracing]
@@ -176,7 +178,7 @@
       custom_ports = ["17773:7777"]
       user_config_overrides = """
       [Log]
-      Level = 'info'
+      Level = 'debug'
       JSONConsole = true
 
       [Tracing]
