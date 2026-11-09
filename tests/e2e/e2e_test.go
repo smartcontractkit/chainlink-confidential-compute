@@ -244,8 +244,9 @@ func isTelemetryNoise(lowerLine string) bool {
 // sharedEnvironments map and re-use a TestEnvironment from a different topology;
 // keeping HTTP and engine on distinct paths is what avoids that.
 const (
-	httpDONConfigFile   = "/configs/workflow-don.toml"
-	engineDONConfigFile = "/configs/workflow-don-engine.toml"
+	httpDONConfigFile         = "/configs/workflow-don.toml"
+	engineDONConfigFile       = "/configs/workflow-don-engine.toml"
+	engineDirectDONConfigFile = "/configs/workflow-don-engine-direct.toml"
 )
 
 func getTestConfig(t *testing.T, configPath string) *ttypes.TestConfig {
@@ -1029,7 +1030,33 @@ func TestConfidentialWorkflowsEngineE2E(t *testing.T) {
 	}
 	t.Cleanup(func() { nukeDockerState(testLogger) })
 
-	buildLocalBinaries := func() error {
+	testConfidentialWorkflowsEngine(t, testLogger, buildConfidentialWorkflowsCapabilityBinary(testLogger), confidentialWorkflowsEngineOptions{
+		ctfConfigsPath: "configs/workflow-don-engine.toml",
+		testConfigPath: engineDONConfigFile,
+	})
+}
+
+// TestConfidentialWorkflowsEngineE2E_DirectSecrets runs the engine E2E with
+// direct Vault GetSecrets reads, where each relay node signs a different share
+// set. It skips the gateway-outage phase.
+func TestConfidentialWorkflowsEngineE2E_DirectSecrets(t *testing.T) {
+	var testLogger = framework.L
+	requireE2EEnvVars(t)
+	if os.Getenv("LOAD_TEST") == "true" {
+		t.Skip("engine test does not run in load-test mode")
+	}
+	t.Cleanup(func() { nukeDockerState(testLogger) })
+
+	testConfidentialWorkflowsEngine(t, testLogger, buildConfidentialWorkflowsCapabilityBinary(testLogger), confidentialWorkflowsEngineOptions{
+		ctfConfigsPath:         "configs/workflow-don-engine-direct.toml",
+		testConfigPath:         engineDirectDONConfigFile,
+		expectDirectVaultReads: true,
+		skipGatewayOutage:      true,
+	})
+}
+
+func buildConfidentialWorkflowsCapabilityBinary(testLogger zerolog.Logger) func() error {
+	return func() error {
 		projectPath := "../../enclave/apps/confidential-workflows/capability/cmd/confidential-workflows"
 		outputBinary := "binaries/confidential-workflows"
 		absoluteBinaryPath, err := filepath.Abs(outputBinary)
@@ -1049,7 +1076,6 @@ func TestConfidentialWorkflowsEngineE2E(t *testing.T) {
 		testLogger.Info().Msgf("Local capability binary confidential-workflows built successfully")
 		return nil
 	}
-	testConfidentialWorkflowsEngine(t, testLogger, buildLocalBinaries)
 }
 
 func mustInitializeCapabilitySetup(

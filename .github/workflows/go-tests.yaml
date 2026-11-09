@@ -823,7 +823,7 @@ jobs:
               echo "Fake-enclave run: workflow-engine e2e (matches make e2e-local-conf-workflows)"
               cd tests/e2e
               CTF_CONFIGS=configs/workflow-don-engine.toml \
-                GOMAXPROCS=2 go test -v ./... -run '^TestConfidentialWorkflowsEngineE2E$' -timeout 90m -p 1
+                GOMAXPROCS=2 go test -v ./... -run '^TestConfidentialWorkflowsEngineE2E(_DirectSecrets)?$' -timeout 90m -p 1
               ;;
             unit|*)
               echo "Fake-enclave run: unit tests across all modules, plus the tests/ root integration suite (tests/e2e excluded)"

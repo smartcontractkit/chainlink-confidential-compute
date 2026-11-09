@@ -42,6 +42,11 @@ const defaultSecretsNamespace = "main"
 // other hashes. Its version changes whenever the derivation does.
 const relaySecretsCallbackIDDomain = "chainlink-confidential-compute/relay-secrets-callback-id/v1\n"
 
+// maxEncryptedSharesPerRelayResult caps the encrypted shares taken from one
+// signer's result for one secret. Extra shares are dropped, so a faulty signer
+// cannot fail the request or inflate decryption work.
+const maxEncryptedSharesPerRelayResult = 128
+
 // relaySecretsCallbackID derives the callback ID sent to the relay DON for a
 // secrets request. The relay DON memoizes signed results, and the vault DON
 // deduplicates requests, by (workflow, execution, callback ID), while the signed
@@ -402,11 +407,11 @@ func (d *remoteDispatcher) GetSecrets(ctx context.Context, workflowID string, re
 			}
 			d.logger.Debugw("[remoteDispatcher] received secrets response bundle", "rawBundleSize", len(bundle.Responses))
 			entries, skipped := d.secretsEntries(bundle, params)
-			idx, qErr := d.selectQuorumResult("GetSecrets", len(bundle.Responses), skipped, entries, cfg)
+			merged, qErr := d.selectSecretsQuorumResult("GetSecrets", len(bundle.Responses), skipped, entries, params, cfg)
 			if qErr != nil {
 				return confidentialrelay.SecretsResponseResult{}, fmt.Errorf("verifying secrets response: %w", qErr)
 			}
-			return bundle.Responses[idx].Result, nil
+			return merged, nil
 		})
 	if err != nil {
 		return nil, err
@@ -489,33 +494,27 @@ type orderedSecret struct {
 // returned with a nil entry so the caller can surface a per-secret error while
 // keeping positional alignment. [CL112-16]
 func orderRelaySecrets(requested []confidentialrelay.SecretIdentifier, got []confidentialrelay.SecretEntry) ([]orderedSecret, error) {
-	type idKey struct{ namespace, key string }
-	want := make(map[idKey]bool, len(requested))
-	order := make([]confidentialrelay.SecretIdentifier, 0, len(requested))
-	for _, s := range requested {
-		k := idKey{s.Namespace, s.Key}
-		if !want[k] {
-			want[k] = true
-			order = append(order, s)
-		}
+	order := uniqueSecretIDs(requested)
+	want := make(map[confidentialrelay.SecretIdentifier]bool, len(order))
+	for _, s := range order {
+		want[s] = true
 	}
 
-	byID := make(map[idKey]confidentialrelay.SecretEntry, len(got))
+	byID := make(map[confidentialrelay.SecretIdentifier]confidentialrelay.SecretEntry, len(got))
 	for i := range got {
-		k := idKey{got[i].ID.Namespace, got[i].ID.Key}
+		k := got[i].ID
 		if !want[k] {
-			return nil, fmt.Errorf("unexpected secret %s/%s not in request", got[i].ID.Namespace, got[i].ID.Key)
+			return nil, fmt.Errorf("unexpected secret %s/%s not in request", k.Namespace, k.Key)
 		}
 		if _, dup := byID[k]; dup {
-			return nil, fmt.Errorf("duplicate secret %s/%s in response", got[i].ID.Namespace, got[i].ID.Key)
+			return nil, fmt.Errorf("duplicate secret %s/%s in response", k.Namespace, k.Key)
 		}
 		byID[k] = got[i]
 	}
 
 	ordered := make([]orderedSecret, 0, len(order))
 	for _, id := range order {
-		k := idKey{id.Namespace, id.Key}
-		if e, ok := byID[k]; ok {
+		if e, ok := byID[id]; ok {
 			e := e
 			ordered = append(ordered, orderedSecret{id: id, entry: &e})
 		} else {
@@ -525,7 +524,9 @@ func orderRelaySecrets(requested []confidentialrelay.SecretIdentifier, got []con
 	return ordered, nil
 }
 
-// decryptSecret NaCl-decrypts the TDH2 shares, then aggregates them to recover plaintext.
+// decryptSecret NaCl-decrypts the TDH2 shares and aggregates them into the
+// plaintext. Shares that fail to decode or decrypt are skipped so one faulty
+// relay node cannot block decryption; the combiner verifies the rest.
 func (d *remoteDispatcher) decryptSecret(kp keychain.Keypair, entry confidentialrelay.SecretEntry, masterPK []byte, threshold int) ([]byte, error) {
 	ciphertext, err := base64.StdEncoding.DecodeString(entry.Ciphertext)
 	if err != nil {
@@ -533,17 +534,34 @@ func (d *remoteDispatcher) decryptSecret(kp keychain.Keypair, entry confidential
 	}
 
 	var shares [][]byte
+	skipped := 0
+	var lastErr error
 	for i, encShare := range entry.EncryptedShares {
 		encBytes, err := base64.StdEncoding.DecodeString(encShare)
 		if err != nil {
-			return nil, fmt.Errorf("decoding share %d: %w", i, err)
+			skipped++
+			lastErr = fmt.Errorf("decoding share %d: %w", i, err)
+			continue
 		}
 		share, err := kp.Decrypt(encBytes)
 		if err != nil {
-			return nil, fmt.Errorf("decrypting share %d: %w", i, err)
+			skipped++
+			lastErr = fmt.Errorf("decrypting share %d: %w", i, err)
+			continue
 		}
 		shares = append(shares, share)
 	}
+	if len(shares) == 0 {
+		if lastErr != nil {
+			return nil, fmt.Errorf("no decryptable shares (%d skipped): %w", skipped, lastErr)
+		}
+		return nil, errors.New("no encrypted shares provided")
+	}
+	d.logger.Debugw("[remoteDispatcher] decrypted secret shares",
+		"encryptedShares", len(entry.EncryptedShares),
+		"decryptedShares", len(shares),
+		"skippedShares", skipped,
+	)
 
 	return d.combiner.AggregateShares(ciphertext, shares, masterPK, threshold)
 }
@@ -618,14 +636,54 @@ func (d *remoteDispatcher) capabilityEntries(
 	return entries, skipped
 }
 
-// secretsEntries decodes a secrets response bundle into quorum entries. A secrets
-// result has no per-node ordering to normalize, so it groups on the hash the node
-// signed.
+// secretsRelayEntry is one relay node's signed GetSecrets result, decoded but
+// not yet signature-checked.
+type secretsRelayEntry struct {
+	idx       int
+	sigHash   [32]byte
+	signature confidentialrelay.RelayResponseSignature
+	result    confidentialrelay.SecretsResponseResult
+	desc      string
+}
+
+// secretGroupKey holds the fields of one secret's result that a quorum of
+// signers must agree on. Shares may differ between signers.
+type secretGroupKey struct {
+	ciphertext string
+	vaultPK    string
+}
+
+func (k secretGroupKey) sortKey() string {
+	return k.ciphertext + "\x00" + k.vaultPK
+}
+
+func (k secretGroupKey) describe() string {
+	return fmt.Sprintf("ct=%s pk=%s", digestOf([]byte(k.ciphertext)), digestOf([]byte(k.vaultPK)))
+}
+
+// uniqueSecretIDs returns the requested identifiers without duplicates, in
+// request order. The relay returns one entry per distinct identifier.
+func uniqueSecretIDs(requested []confidentialrelay.SecretIdentifier) []confidentialrelay.SecretIdentifier {
+	seen := make(map[confidentialrelay.SecretIdentifier]struct{}, len(requested))
+	unique := make([]confidentialrelay.SecretIdentifier, 0, len(requested))
+	for _, s := range requested {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		unique = append(unique, s)
+	}
+	return unique
+}
+
+// secretsEntries decodes a secrets response bundle into entries for signature
+// verification. Responses whose result cannot be hashed are returned as skipped
+// diagnostics.
 func (d *remoteDispatcher) secretsEntries(
 	bundle confidentialrelay.SignedSecretsResponseBundle,
 	params confidentialrelay.SecretsRequestParams,
-) ([]relayEntry, []string) {
-	entries := make([]relayEntry, 0, len(bundle.Responses))
+) ([]secretsRelayEntry, []string) {
+	entries := make([]secretsRelayEntry, 0, len(bundle.Responses))
 	var skipped []string
 	for i, r := range bundle.Responses {
 		desc := describeSecretsResult(r.Result)
@@ -635,15 +693,255 @@ func (d *remoteDispatcher) secretsEntries(
 			skipped = append(skipped, fmt.Sprintf("[idx=%d unhashable=%v %s]", i, err, desc))
 			continue
 		}
-		entries = append(entries, relayEntry{
+		entries = append(entries, secretsRelayEntry{
 			sigHash:   h,
-			groupHash: h,
 			signature: r.Signature,
+			result:    r.Result,
 			desc:      desc,
 			idx:       i,
 		})
 	}
 	return entries, skipped
+}
+
+// validateSecretsResultShape checks that a result has exactly one entry per
+// distinct requested secret. Results that fail do not count toward quorum.
+func validateSecretsResultShape(result confidentialrelay.SecretsResponseResult, wanted map[confidentialrelay.SecretIdentifier]int) error {
+	if len(result.Secrets) != len(wanted) {
+		return fmt.Errorf("expected %d secret responses, got %d", len(wanted), len(result.Secrets))
+	}
+	seen := make(map[confidentialrelay.SecretIdentifier]struct{}, len(result.Secrets))
+	for _, s := range result.Secrets {
+		if _, ok := wanted[s.ID]; !ok {
+			return fmt.Errorf("unexpected secret %s/%s in response", s.ID.Namespace, s.ID.Key)
+		}
+		if _, dup := seen[s.ID]; dup {
+			return fmt.Errorf("duplicate secret %s/%s in response", s.ID.Namespace, s.ID.Key)
+		}
+		seen[s.ID] = struct{}{}
+	}
+	return nil
+}
+
+// selectSecretsQuorumResult verifies relay-DON signatures and, for each
+// requested secret, selects the ciphertext and vault public key backed by at
+// least F+1 distinct signers. It returns the union of the shares those signers
+// sent. Shares can differ between signers, so each one is checked during
+// decryption: TDH2 rejects invalid shares and the combiner dedupes by node index.
+func (d *remoteDispatcher) selectSecretsQuorumResult(
+	path string,
+	rawBundleSize int,
+	skipped []string,
+	entries []secretsRelayEntry,
+	params confidentialrelay.SecretsRequestParams,
+	cfg types.EnclaveConfig,
+) (confidentialrelay.SecretsResponseResult, error) {
+	if err := d.requireRelayVerifier(path, cfg); err != nil {
+		return confidentialrelay.SecretsResponseResult{}, err
+	}
+	required := int(cfg.F) + 1
+	unhashable := len(skipped)
+
+	unique := uniqueSecretIDs(params.Secrets)
+	want := make(map[confidentialrelay.SecretIdentifier]int, len(unique))
+	for i, id := range unique {
+		want[id] = i
+	}
+
+	type group struct {
+		key     secretGroupKey
+		signers map[[32]byte]struct{}
+		shares  []string
+	}
+	groupsBySecret := make([]map[secretGroupKey]*group, len(unique))
+	for i := range groupsBySecret {
+		groupsBySecret[i] = make(map[secretGroupKey]*group)
+	}
+
+	validSignatures := 0
+	invalidSignatures := 0
+	malformed := 0
+	diags := make([]string, 0, len(entries))
+	for _, e := range entries {
+		signer, err := d.verifyRelaySigner(path, e.idx, e.sigHash, e.signature, cfg)
+		if err != nil {
+			invalidSignatures++
+			diags = append(diags, fmt.Sprintf("[idx=%d signature=invalid(%v) claimedSigner=%s %s]", e.idx, err, shortBytes(e.signature.Signer), e.desc))
+			continue
+		}
+		validSignatures++
+		signerFP := sha256.Sum256(signer)
+
+		if shapeErr := validateSecretsResultShape(e.result, want); shapeErr != nil {
+			malformed++
+			d.logger.Debugw("[remoteDispatcher] skipping malformed relay secrets result", "path", path, "idx", e.idx, "err", shapeErr)
+			skipped = append(skipped, fmt.Sprintf("[idx=%d malformed=%v %s]", e.idx, shapeErr, e.desc))
+			continue
+		}
+
+		for _, secret := range e.result.Secrets {
+			// validateSecretsResultShape guarantees every ID is in want.
+			idx := want[secret.ID]
+			gk := secretGroupKey{ciphertext: secret.Ciphertext, vaultPK: e.result.RawVaultPublicKey}
+			g, ok := groupsBySecret[idx][gk]
+			if !ok {
+				g = &group{key: gk, signers: make(map[[32]byte]struct{})}
+				groupsBySecret[idx][gk] = g
+			}
+			if _, counted := g.signers[signerFP]; counted {
+				// Take each signer's shares once per group.
+				continue
+			}
+			g.signers[signerFP] = struct{}{}
+			contributed := secret.EncryptedShares
+			if len(contributed) > maxEncryptedSharesPerRelayResult {
+				d.logger.Warnw("[remoteDispatcher] truncating oversized relay share list",
+					"path", path, "idx", e.idx, "shares", len(contributed), "max", maxEncryptedSharesPerRelayResult)
+				contributed = contributed[:maxEncryptedSharesPerRelayResult]
+			}
+			g.shares = append(g.shares, contributed...)
+		}
+		diags = append(diags, fmt.Sprintf("[idx=%d signature=valid signer=%s %s]", e.idx, shortBytes(signer), e.desc))
+	}
+
+	stats := secretsQuorumStats{
+		path:              path,
+		required:          required,
+		rawBundleSize:     rawBundleSize,
+		hashable:          len(entries),
+		unhashable:        unhashable,
+		malformed:         malformed,
+		validSignatures:   validSignatures,
+		invalidSignatures: invalidSignatures,
+	}
+
+	merged := make([]confidentialrelay.SecretEntry, 0, len(unique))
+	vaultPK := ""
+	totalMergedShares := 0
+	tallies := make([]string, 0, len(unique))
+	for i, req := range unique {
+		var winner *group
+		maxSigners := 0
+		tallyParts := make([]string, 0, len(groupsBySecret[i]))
+		for _, g := range groupsBySecret[i] {
+			n := len(g.signers)
+			tallyParts = append(tallyParts, fmt.Sprintf("%s=%d", g.key.describe(), n))
+			if n > maxSigners {
+				maxSigners = n
+			}
+			if n < required {
+				continue
+			}
+			if winner == nil || n > len(winner.signers) || (n == len(winner.signers) && g.key.sortKey() < winner.key.sortKey()) {
+				winner = g
+			}
+		}
+		sort.Strings(tallyParts)
+		tallies = append(tallies, fmt.Sprintf("%s/%s groups=%d maxSigners=%d [%s]",
+			req.Namespace, req.Key, len(groupsBySecret[i]), maxSigners, strings.Join(tallyParts, " ")))
+		if winner == nil {
+			return confidentialrelay.SecretsResponseResult{}, d.secretsQuorumError(stats, tallies, diags, skipped)
+		}
+
+		if i == 0 {
+			vaultPK = winner.key.vaultPK
+		} else if winner.key.vaultPK != vaultPK {
+			return confidentialrelay.SecretsResponseResult{}, fmt.Errorf(
+				"relay-DON secrets results disagree on vault public key for %s/%s", req.Namespace, req.Key)
+		}
+
+		seenShares := make(map[string]struct{}, len(winner.shares))
+		mergedShares := make([]string, 0, len(winner.shares))
+		for _, share := range winner.shares {
+			if _, ok := seenShares[share]; ok {
+				continue
+			}
+			seenShares[share] = struct{}{}
+			mergedShares = append(mergedShares, share)
+		}
+		merged = append(merged, confidentialrelay.SecretEntry{
+			ID:              confidentialrelay.SecretIdentifier{Namespace: req.Namespace, Key: req.Key},
+			Ciphertext:      winner.key.ciphertext,
+			EncryptedShares: mergedShares,
+		})
+		totalMergedShares += len(mergedShares)
+	}
+
+	d.logger.Infow("[remoteDispatcher] relay-DON secrets quorum reached", append(stats.logFields(),
+		"secrets", len(merged),
+		"mergedShares", totalMergedShares,
+		"groupsBySecret", truncate(strings.Join(tallies, "; "), maxDiagLen),
+	)...)
+	return confidentialrelay.SecretsResponseResult{
+		Secrets:           merged,
+		RawVaultPublicKey: vaultPK,
+	}, nil
+}
+
+// secretsQuorumStats holds the bundle counts logged by selectSecretsQuorumResult.
+type secretsQuorumStats struct {
+	path              string
+	required          int
+	rawBundleSize     int
+	hashable          int
+	unhashable        int
+	malformed         int
+	validSignatures   int
+	invalidSignatures int
+}
+
+func (s secretsQuorumStats) logFields() []any {
+	return []any{
+		"path", s.path,
+		"required", s.required,
+		"rawBundleSize", s.rawBundleSize,
+		"hashableEntries", s.hashable,
+		"unhashable", s.unhashable,
+		"malformed", s.malformed,
+		"validSignatures", s.validSignatures,
+		"invalidSignatures", s.invalidSignatures,
+	}
+}
+
+func (d *remoteDispatcher) secretsQuorumError(stats secretsQuorumStats, tallies, diags, skipped []string) error {
+	groupDetail := truncate(strings.Join(tallies, "; "), maxDiagLen)
+	entryDetail := truncate(strings.Join(diags, " "), maxDiagLen)
+	skippedDetail := truncate(strings.Join(skipped, " "), maxDiagLen)
+	d.logger.Errorw("[remoteDispatcher] relay-DON secrets quorum not reached", append(stats.logFields(),
+		"secretsByGroup", groupDetail,
+		"entries", entryDetail,
+		"skippedEntries", skippedDetail,
+	)...)
+	return fmt.Errorf("no relay-DON result reached quorum: need %d valid distinct signers (raw bundle %d, hashable %d, unhashable %d, malformed %d, %d valid signatures, %d invalid); secrets: %s; entries: %s; skipped: %s",
+		stats.required, stats.rawBundleSize, stats.hashable, stats.unhashable, stats.malformed, stats.validSignatures, stats.invalidSignatures,
+		groupDetail, entryDetail, skippedDetail)
+}
+
+// requireRelayVerifier returns an error when no verifier or signer set is
+// configured, since no relay response can be trusted without them.
+func (d *remoteDispatcher) requireRelayVerifier(path string, cfg types.EnclaveConfig) error {
+	if d.verifier == nil {
+		d.logger.Errorw("[remoteDispatcher] relay-DON signature verification failed", "path", path, "reason", "verifier not configured")
+		return fmt.Errorf("relay signature verifier not configured")
+	}
+	if len(cfg.Signers) == 0 {
+		d.logger.Errorw("[remoteDispatcher] relay-DON signature verification failed", "path", path, "reason", "signer set not configured")
+		return fmt.Errorf("DON signer set not configured")
+	}
+	return nil
+}
+
+// verifyRelaySigner verifies a relay-DON response signature over sigHash
+// against the configured signers and returns the signer. Callers skip
+// responses that fail.
+func (d *remoteDispatcher) verifyRelaySigner(path string, idx int, sigHash [32]byte, sig confidentialrelay.RelayResponseSignature, cfg types.EnclaveConfig) ([]byte, error) {
+	prefixed := confidentialrelay.RelayResponseSignaturePayload(sigHash)
+	signer, err := d.verifier.VerifySignature(prefixed, sig.Signature, cfg.Signers)
+	if err != nil {
+		d.logger.Debugw("[remoteDispatcher] skipping invalid or foreign relay signature", "path", path, "idx", idx, "err", err)
+		return nil, err
+	}
+	return signer, nil
 }
 
 // selectQuorumResult is the trust anchor on the gateway->enclave hop. The gateway
@@ -673,13 +971,8 @@ func (d *remoteDispatcher) secretsEntries(
 // the workflow DON and the relay DON are the same DON wearing two hats. If that
 // ever changes, this is the spot to introduce a separate RelayDON signer set.
 func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize int, skipped []string, entries []relayEntry, cfg types.EnclaveConfig) (int, error) {
-	if d.verifier == nil {
-		d.logger.Errorw("[remoteDispatcher] relay-DON signature verification failed", "path", path, "reason", "verifier not configured")
-		return 0, fmt.Errorf("relay signature verifier not configured")
-	}
-	if len(cfg.Signers) == 0 {
-		d.logger.Errorw("[remoteDispatcher] relay-DON signature verification failed", "path", path, "reason", "signer set not configured")
-		return 0, fmt.Errorf("DON signer set not configured")
+	if err := d.requireRelayVerifier(path, cfg); err != nil {
+		return 0, err
 	}
 	required := int(cfg.F) + 1
 
@@ -692,12 +985,9 @@ func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize int, sk
 	invalidSignatures := 0
 	diags := make([]string, 0, len(entries))
 	for _, e := range entries {
-		prefixed := confidentialrelay.RelayResponseSignaturePayload(e.sigHash)
-		signer, err := d.verifier.VerifySignature(prefixed, e.signature.Signature, cfg.Signers)
+		signer, err := d.verifyRelaySigner(path, e.idx, e.sigHash, e.signature, cfg)
 		if err != nil {
-			// Untrusted gateway / faulty node noise. Skip, do not fail.
 			invalidSignatures++
-			d.logger.Debugw("[remoteDispatcher] skipping invalid or foreign relay signature", "path", path, "idx", e.idx, "err", err)
 			diags = append(diags, e.diag(fmt.Sprintf("signature=invalid(%v) claimedSigner=%s", err, shortBytes(e.signature.Signer))))
 			continue
 		}

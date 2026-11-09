@@ -448,7 +448,16 @@ func startFakeStorageService(t *testing.T, enclaveHost string) (string, *fakeSto
 	return fmt.Sprintf("%s:%d", enclaveHost, port), svc
 }
 
-func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, buildLocalBinaries func() error) {
+// confidentialWorkflowsEngineOptions parameterizes the engine-path E2E for the
+// OCR and direct Vault GetSecrets topologies.
+type confidentialWorkflowsEngineOptions struct {
+	ctfConfigsPath         string
+	testConfigPath         string
+	expectDirectVaultReads bool
+	skipGatewayOutage      bool
+}
+
+func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, buildLocalBinaries func() error, opts confidentialWorkflowsEngineOptions) {
 	t.Helper()
 	if os.Getenv("REMOTE_ENCLAVE_URLS") != "" || tests.UseLegacyEnclaves() {
 		t.Skip("engine test does not run against remote/legacy enclaves")
@@ -459,7 +468,7 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// Engine test needs the multi-DON topology (workflow + capabilities) with the
 	// confidential-workflows capability registered. The http subtest runs first
 	// with workflow-don.toml; override for our scope only.
-	t.Setenv("CTF_CONFIGS", "configs/workflow-don-engine.toml")
+	t.Setenv("CTF_CONFIGS", opts.ctfConfigsPath)
 	// Register docker log dumping FIRST so it runs LAST (cleanups run in reverse
 	// order). Captures workflow-node container logs on failure, which is the
 	// only way to diagnose engine execution errors (GetSecret / http-actions /
@@ -533,7 +542,7 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	secretValues := []string{"s3cret-from-vault"}
 	testEnv := mustInitializeCapabilitySetup(
 		t,
-		engineDONConfigFile,
+		opts.testConfigPath,
 		configURLs,
 		allCaps,
 		buildLocalBinaries,
@@ -647,6 +656,10 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	//    engine-level log.
 	waitForWorkflowExecutionComplete(t, testEnv, testLogger, workflowID, 5*time.Minute)
 
+	if opts.expectDirectVaultReads {
+		requireVaultDirectSecretsRead(t, testEnv, "MOCK_SECRET", 5*time.Minute)
+	}
+
 	require.Equal(t, engineTestBinaryFilename, storageSvc.lastArtifactID(), "unexpected artifact requested from storage")
 	require.Positive(t, cwEngineTestServers.artifactHits.Load(), "enclave never downloaded the artifact URL returned by storage")
 
@@ -677,21 +690,27 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// response cache answers the repeat request without re-executing. The
 	// workflow must ultimately succeed: a second successful execution proves the
 	// triggers that fired during the outage were not lost.
-	testLogger.Info().Msg("Gateway-outage phase: taking the healthy gateway proxy down for 60s")
-	gwProxy.TakeDown()
-	time.Sleep(60 * time.Second)
-	gwProxy.BringUp()
-	testLogger.Info().Msg("Gateway-outage phase: gateway proxy back up; waiting for a post-outage execution")
+	if opts.skipGatewayOutage {
+		testLogger.Info().Msg("Gateway-outage phase skipped for this variant")
+	} else {
+		testLogger.Info().Msg("Gateway-outage phase: taking the healthy gateway proxy down for 60s")
+		gwProxy.TakeDown()
+		time.Sleep(60 * time.Second)
+		gwProxy.BringUp()
+		testLogger.Info().Msg("Gateway-outage phase: gateway proxy back up; waiting for a post-outage execution")
 
-	waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, 2, 5*time.Minute)
+		waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, 2, 5*time.Minute)
 
-	// The outage must have been real: the enclave's gateway calls during the
-	// window have to have hit the proxy while it was rejecting. Zero downHits
-	// means the outage was never observed (e.g. no trigger fired in the window)
-	// and the resilience assertion above passed vacuously.
-	require.Positive(t, gwProxy.HitsWhileDown(), "no gateway request hit the simulated outage; the resilience phase did not exercise retries")
+		// The outage must have been real: the enclave's gateway calls during the
+		// window have to have hit the proxy while it was rejecting. Zero downHits
+		// means the outage was never observed (e.g. no trigger fired in the window)
+		// and the resilience assertion above passed vacuously.
+		require.Positive(t, gwProxy.HitsWhileDown(), "no gateway request hit the simulated outage; the resilience phase did not exercise retries")
 
-	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write + gateway-outage resilience validated")
+		testLogger.Info().Msg("Gateway-outage resilience validated")
+	}
+
+	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write validated")
 }
 
 // engineTestFeedID / engineTestPrice are the feed the confidential workflow reports
@@ -875,10 +894,25 @@ func workflowDONContainerNames(testEnv *ttypes.TestEnvironment) []string {
 			workflowDONNames[don.Name] = true
 		}
 	}
+	return nodeSetContainerNames(testEnv, workflowDONNames)
+}
 
-	var names []string
+// vaultDONContainerNames returns the chainlink container names for the nodeset
+// hosting the vault capability.
+func vaultDONContainerNames(testEnv *ttypes.TestEnvironment) []string {
+	vaultDONNames := map[string]bool{}
+	for _, don := range testEnv.Dons.List() {
+		if don.HasFlag(crelib.VaultCapability) {
+			vaultDONNames[don.Name] = true
+		}
+	}
+	return nodeSetContainerNames(testEnv, vaultDONNames)
+}
+
+func nodeSetContainerNames(testEnv *ttypes.TestEnvironment, names map[string]bool) []string {
+	var containers []string
 	for _, ns := range testEnv.Config.NodeSets {
-		if !workflowDONNames[ns.Name] {
+		if !names[ns.Name] {
 			continue
 		}
 		if ns.Out == nil {
@@ -888,10 +922,40 @@ func workflowDONContainerNames(testEnv *ttypes.TestEnvironment) []string {
 			if cl == nil || cl.Node == nil || cl.Node.ContainerName == "" {
 				continue
 			}
-			names = append(names, cl.Node.ContainerName)
+			containers = append(containers, cl.Node.ContainerName)
 		}
 	}
-	return names
+	return containers
+}
+
+// requireVaultDirectSecretsRead waits until a vault node logs a direct
+// GetSecrets request for secretID.
+func requireVaultDirectSecretsRead(t *testing.T, testEnv *ttypes.TestEnvironment, secretID string, timeout time.Duration) {
+	t.Helper()
+	containers := vaultDONContainerNames(testEnv)
+	require.NotEmpty(t, containers, "no vault DON containers found to scrape")
+
+	require.Eventually(t, func() bool {
+		for _, name := range containers {
+			out, err := exec.Command("docker", "logs", "--tail", "10000", name).CombinedOutput()
+			if err != nil {
+				continue
+			}
+			for _, line := range bytes.Split(out, []byte{'\n'}) {
+				if !bytes.Contains(line, []byte("received workflow get secrets request")) {
+					continue
+				}
+				if !bytes.Contains(line, []byte(secretID)) {
+					continue
+				}
+				if bytes.Contains(line, []byte("get_secrets_directly: true")) ||
+					bytes.Contains(line, []byte("get_secrets_directly:true")) {
+					return true
+				}
+			}
+		}
+		return false
+	}, timeout, 5*time.Second, "vault never logged a direct GetSecrets request for %s", secretID)
 }
 
 // deployConfidentialWorkflowForEngine registers a confidential workflow with the

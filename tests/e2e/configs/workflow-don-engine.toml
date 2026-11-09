@@ -57,7 +57,7 @@
   # cresettings ChainAllowed default allowlist, so no extra CL_CRE_SETTINGS is needed.
   capabilities = ["consensus", "confidential-workflows", "confidential-relay", "cron", "http-action", "http-trigger", "don-time", "evm-1337"]
   exposes_remote_capabilities = true
-  registry_based_launch_allowlist = ["cron-trigger@1.0.0"]
+  registry_based_launch_allowlist = ["cron-trigger@1.0.0", "dontime@1.0.0"]
 
   [nodesets.db]
     image = "postgres:16"
