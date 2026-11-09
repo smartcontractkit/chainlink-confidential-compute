@@ -23,9 +23,11 @@ func (e *RealExecutor) newRequestTimeoutResolver() func(ctx context.Context, pub
 func (e *RealExecutor) resolveRequestTimeout(ctx context.Context, publicKey bool) (time.Duration, error) {
 	g := e.limitsFactory.Settings
 	cfg := e.getCapConfig()
+	cc := cresettings.Default.ConfidentialCompute
+	capCC := e.capabilityLimits()
 
 	if publicKey {
-		timeout, err := cresettings.Default.ConfidentialCompute.PublicKeyRequestTimeout.GetOrDefault(ctx, g)
+		timeout, err := resolveWithFallback(ctx, g, capCC.PublicKeyRequestTimeout, cc.PublicKeyRequestTimeout)
 		if err != nil {
 			return 0, fmt.Errorf("resolve public key request timeout from limits: %w", err)
 		}
@@ -38,7 +40,7 @@ func (e *RealExecutor) resolveRequestTimeout(ctx context.Context, publicKey bool
 		return types.DefaultPublicKeyRequestTimeout, nil
 	}
 
-	timeout, err := cresettings.Default.ConfidentialCompute.EnclaveRequestTimeout.GetOrDefault(ctx, g)
+	timeout, err := resolveWithFallback(ctx, g, capCC.EnclaveRequestTimeout, cc.EnclaveRequestTimeout)
 	if err != nil {
 		return 0, fmt.Errorf("resolve enclave request timeout from limits: %w", err)
 	}

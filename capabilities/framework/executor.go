@@ -222,6 +222,33 @@ func ParseConfig(capConfigRaw string) (*ParsedConfig, error) {
 	return parsed, nil
 }
 
+// capabilityLimits returns the Confidential Compute overrides for this
+// executor's capability. An unrecognized capability gets the zero value, which
+// resolves every setting from the shared ConfidentialCompute values.
+func (e *RealExecutor) capabilityLimits() cresettings.ConfidentialComputePerCapability {
+	switch e.capabilityID {
+	case types.AppIDConfidentialHTTP:
+		return cresettings.Default.ConfidentialCompute.HTTP
+	case types.AppIDConfidentialWorkflows:
+		return cresettings.Default.ConfidentialCompute.Workflows
+	default:
+		return cresettings.ConfidentialComputePerCapability{}
+	}
+}
+
+// capabilityOwnerLimits returns the per-owner Confidential Compute overrides for
+// this executor's capability, zero-valued for an unrecognized capability.
+func (e *RealExecutor) capabilityOwnerLimits() cresettings.OwnerConfidentialComputePerCapability {
+	switch e.capabilityID {
+	case types.AppIDConfidentialHTTP:
+		return cresettings.Default.PerOwner.ConfidentialCompute.HTTP
+	case types.AppIDConfidentialWorkflows:
+		return cresettings.Default.PerOwner.ConfidentialCompute.Workflows
+	default:
+		return cresettings.OwnerConfidentialComputePerCapability{}
+	}
+}
+
 // applyLimitSettings overlays the CRE limits framework values onto the parsed
 // config: the global + per-workflow-owner request rates, the retry policy, the
 // secrets-cache toggle, the enclave/public-key request timeouts, TLS verification,
@@ -238,34 +265,49 @@ func ParseConfig(capConfigRaw string) (*ParsedConfig, error) {
 // deployments migrate off the job-spec config. GetOrDefault returns the limits
 // default (which mirrors the historical hardcoded defaults) on any lookup error,
 // so behavior is preserved if settings are unavailable.
+//
+// Every setting with a per-capability group resolves through it first: this
+// executor's ConfidentialCompute.{HTTP,Workflows} value when set, otherwise the
+// shared ConfidentialCompute value. Each capability builds its own enclave pool
+// from its own on-chain enclave list, so its rates, retries, timeouts, refresh
+// interval, public-key cache and session settings are all independent. Tuning one
+// capability therefore leaves the other where it was.
+//
+// InsecureSkipTLSVerify stays shared: it is a node-wide enclave trust posture,
+// not a per-capability limit.
 func (e *RealExecutor) applyLimitSettings(ctx context.Context, parsed *ParsedConfig) {
 	g := e.limitsFactory.Settings
 	cc := cresettings.Default.ConfidentialCompute
+	capCC := e.capabilityLimits()
+	ownerCC := cresettings.Default.PerOwner.ConfidentialCompute
+	ownerCapCC := e.capabilityOwnerLimits()
 	pkc := cc.PublicKeyCache
+	capPKC := capCC.PublicKeyCache
 	sess := cc.Session
+	capSess := capCC.Session
 
-	globalRate, _ := cc.GlobalRate.GetOrDefault(ctx, g)
-	ownerRate, _ := cresettings.Default.PerOwner.ConfidentialCompute.Rate.GetOrDefault(ctx, g)
-	maxRetries, _ := cc.MaxRetries.GetOrDefault(ctx, g)
-	retryBackoff, _ := cc.RetryBackoff.GetOrDefault(ctx, g)
-	secretsCacheEnabled, _ := cc.SecretsCacheEnabled.GetOrDefault(ctx, g)
-	enclaveRequestTimeout, _ := cc.EnclaveRequestTimeout.GetOrDefault(ctx, g)
-	publicKeyRequestTimeout, _ := cc.PublicKeyRequestTimeout.GetOrDefault(ctx, g)
+	globalRate, _ := resolveWithFallback(ctx, g, capCC.GlobalRate, cc.GlobalRate)
+	ownerRate, _ := resolveWithFallback(ctx, g, ownerCapCC.Rate, ownerCC.Rate)
+	maxRetries, _ := resolveWithFallback(ctx, g, capCC.MaxRetries, cc.MaxRetries)
+	retryBackoff, _ := resolveWithFallback(ctx, g, capCC.RetryBackoff, cc.RetryBackoff)
+	secretsCacheEnabled, _ := resolveWithFallback(ctx, g, capCC.SecretsCacheEnabled, cc.SecretsCacheEnabled)
+	enclaveRequestTimeout, _ := resolveWithFallback(ctx, g, capCC.EnclaveRequestTimeout, cc.EnclaveRequestTimeout)
+	publicKeyRequestTimeout, _ := resolveWithFallback(ctx, g, capCC.PublicKeyRequestTimeout, cc.PublicKeyRequestTimeout)
 	insecureSkipTLSVerify, _ := cc.InsecureSkipTLSVerify.GetOrDefault(ctx, g)
-	enclaveRefreshInterval, _ := cc.EnclaveRefreshInterval.GetOrDefault(ctx, g)
-	publicKeyRetriesMax, _ := cc.PublicKeyRetriesMax.GetOrDefault(ctx, g)
-	publicKeyRetriesBackoff, _ := cc.PublicKeyRetriesBackoff.GetOrDefault(ctx, g)
-	cacheEnabled, _ := pkc.Enabled.GetOrDefault(ctx, g)
-	cacheTTL, _ := pkc.TTL.GetOrDefault(ctx, g)
-	cacheMaxTTL, _ := pkc.MaxTTL.GetOrDefault(ctx, g)
-	cacheCleanup, _ := pkc.CleanupInterval.GetOrDefault(ctx, g)
-	cacheTTLBufferPercent, _ := pkc.TTLBufferPercent.GetOrDefault(ctx, g)
-	cacheProactiveRefresh, _ := pkc.ProactiveRefreshEnabled.GetOrDefault(ctx, g)
-	cacheRefreshIntervalPercent, _ := pkc.RefreshIntervalPercent.GetOrDefault(ctx, g)
-	cacheMinRefreshInterval, _ := pkc.MinRefreshInterval.GetOrDefault(ctx, g)
-	cacheRefreshTimeout, _ := pkc.RefreshTimeout.GetOrDefault(ctx, g)
-	sessionPersistence, _ := sess.PersistenceEnabled.GetOrDefault(ctx, g)
-	sessionHeaderName, _ := sess.HeaderName.GetOrDefault(ctx, g)
+	enclaveRefreshInterval, _ := resolveWithFallback(ctx, g, capCC.EnclaveRefreshInterval, cc.EnclaveRefreshInterval)
+	publicKeyRetriesMax, _ := resolveWithFallback(ctx, g, capCC.PublicKeyRetriesMax, cc.PublicKeyRetriesMax)
+	publicKeyRetriesBackoff, _ := resolveWithFallback(ctx, g, capCC.PublicKeyRetriesBackoff, cc.PublicKeyRetriesBackoff)
+	cacheEnabled, _ := resolveWithFallback(ctx, g, capPKC.Enabled, pkc.Enabled)
+	cacheTTL, _ := resolveWithFallback(ctx, g, capPKC.TTL, pkc.TTL)
+	cacheMaxTTL, _ := resolveWithFallback(ctx, g, capPKC.MaxTTL, pkc.MaxTTL)
+	cacheCleanup, _ := resolveWithFallback(ctx, g, capPKC.CleanupInterval, pkc.CleanupInterval)
+	cacheTTLBufferPercent, _ := resolveWithFallback(ctx, g, capPKC.TTLBufferPercent, pkc.TTLBufferPercent)
+	cacheProactiveRefresh, _ := resolveWithFallback(ctx, g, capPKC.ProactiveRefreshEnabled, pkc.ProactiveRefreshEnabled)
+	cacheRefreshIntervalPercent, _ := resolveWithFallback(ctx, g, capPKC.RefreshIntervalPercent, pkc.RefreshIntervalPercent)
+	cacheMinRefreshInterval, _ := resolveWithFallback(ctx, g, capPKC.MinRefreshInterval, pkc.MinRefreshInterval)
+	cacheRefreshTimeout, _ := resolveWithFallback(ctx, g, capPKC.RefreshTimeout, pkc.RefreshTimeout)
+	sessionPersistence, _ := resolveWithFallback(ctx, g, capSess.PersistenceEnabled, sess.PersistenceEnabled)
+	sessionHeaderName, _ := resolveWithFallback(ctx, g, capSess.HeaderName, sess.HeaderName)
 
 	parsed.GlobalRPS = float64(globalRate.Limit)
 	parsed.GlobalBurst = globalRate.Burst
@@ -327,6 +369,41 @@ func (e *RealExecutor) refreshLimitSettings(ctx context.Context) {
 	next := *cur
 	e.applyLimitSettings(ctx, &next)
 	e.setCapConfig(&next)
+	e.logResolvedConfig(&next)
+}
+
+// logResolvedConfig logs the effective config resolved from the limits
+// framework, so the values a node is running with can be checked against the
+// configured overrides. The deprecated job-spec Config is omitted because it
+// carries encrypted API keys.
+func (e *RealExecutor) logResolvedConfig(parsed *ParsedConfig) {
+	e.lggr.Infow("resolved capability config",
+		"capabilityID", e.capabilityID,
+		"globalRPS", parsed.GlobalRPS,
+		"globalBurst", parsed.GlobalBurst,
+		"workflowOwnerRPS", parsed.WorkflowOwnerRPS,
+		"workflowOwnerBurst", parsed.WorkflowOwnerBurst,
+		"maxRetries", parsed.MaxRetries,
+		"retryBackoffSeconds", parsed.RetryBackoffSeconds,
+		"enableSecretsCache", parsed.EnableSecretsCache,
+		"enclaveRequestTimeout", parsed.EnclaveRequestTimeout,
+		"publicKeyRequestTimeout", parsed.PublicKeyRequestTimeout,
+		"enclaveRefreshInterval", parsed.EnclaveRefreshInterval,
+		"insecureSkipTLSVerify", parsed.InsecureSkipTLSVerify,
+		"publicKeyRetriesMax", parsed.PublicKeyRetriesMax,
+		"publicKeyRetriesBackoff", parsed.PublicKeyRetriesBackoff,
+		"cacheEnabled", parsed.CacheConfig.EnableCache,
+		"cacheTTL", parsed.CacheConfig.DefaultTTL,
+		"cacheMaxTTL", parsed.CacheConfig.MaxTTL,
+		"cacheCleanupInterval", parsed.CacheConfig.CleanupInterval,
+		"cacheTTLBufferPercent", parsed.CacheConfig.TTLBufferPercent,
+		"cacheProactiveRefreshEnabled", parsed.CacheConfig.EnableProactiveRefresh,
+		"cacheRefreshIntervalPercent", parsed.CacheConfig.RefreshIntervalPercent,
+		"cacheMinRefreshInterval", parsed.CacheConfig.MinRefreshInterval,
+		"cacheRefreshTimeout", parsed.CacheConfig.RefreshTimeout,
+		"sessionPersistenceEnabled", parsed.SessionConfig.EnableSessionPersistence,
+		"sessionHeaderName", parsed.SessionConfig.SessionHeaderName,
+	)
 }
 
 // RealExecutor is the concrete implementation of the Executor interface.
@@ -824,6 +901,7 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 	// job-spec Config field still wins for backward compatibility during
 	// migration.
 	e.applyLimitSettings(ctx, parsedConfig)
+	e.logResolvedConfig(parsedConfig)
 	rateLimiter, err := ratelimit.NewRateLimiter(ratelimit.RateLimiterConfig{
 		GlobalRPS:      parsedConfig.GlobalRPS,
 		GlobalBurst:    parsedConfig.GlobalBurst,
