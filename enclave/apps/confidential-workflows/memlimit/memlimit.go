@@ -34,7 +34,8 @@ const (
 	TargetCompilations uint64 = 8
 )
 
-// Result contains execution and compilation capacities plus budget inputs for logging.
+// Result contains memory-derived admission limits and budget inputs for logging.
+// These are not measured concurrency or workload percentiles.
 // Compiling executions count toward both limits.
 type Result struct {
 	MaxConcurrentExecutions   int64
