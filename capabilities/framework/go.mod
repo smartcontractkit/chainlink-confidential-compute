@@ -9,7 +9,7 @@ replace github.com/smartcontractkit/chainlink-confidential-compute/enclave-clien
 require (
 	github.com/ethereum/go-ethereum v1.17.4
 	github.com/smartcontractkit/capabilities/libs v0.0.0-20260928161313-2aaae97ddf69
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20261105151309-6cbefe46d476
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20261105180829-079dfdd5c1f3
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20260415113950-0671a5b829b6
 	github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-00010101000000-000000000000
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20261013212015-e622e8b83b6b
