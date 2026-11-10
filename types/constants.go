@@ -79,14 +79,14 @@ const (
 	GatewayFailoverDelay = 5 * time.Second
 
 	// Workflow-binary fetch & cache defaults. Each is overridable per-deployment
-	// at runtime via the injected settings (the host forwards them over vsock);
+	// via the host's startup settings;
 	// these values apply only when the corresponding setting is left unset.
 	//
 	// DefaultMaxBinarySize bounds the workflow binary accepted from storage.
 	DefaultMaxBinarySize = 20 * 1024 * 1024 // 20 MB (matches chainlink-common default)
 	// DefaultBinaryFetchTimeout bounds a single workflow-binary download.
 	DefaultBinaryFetchTimeout = 60 * time.Second
-	// DefaultMaxBinaryCacheBytes bounds the enclave's verified-binary LRU cache.
+	// DefaultMaxBinaryCacheBytes bounds the host's verified-binary LRU cache.
 	DefaultMaxBinaryCacheBytes = 256 * 1024 * 1024 // 256 MB
 
 	// Enclave inbound proxy timeouts & caching

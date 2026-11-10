@@ -243,7 +243,7 @@ func TestInspectPublicDataConfidentialWorkflows(t *testing.T) {
 	host := NewHostServer(t.Context(), &http.Client{})
 	t.Cleanup(host.cancel)
 	metadata, binary, err := host.publicDataPrehook(lggr, types.AppIDConfidentialWorkflows, publicData)
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "not configured")
 	assert.Nil(t, binary, "no binary without a provider")
 
 	assert.Equal(t, executionMetadata{
@@ -385,6 +385,8 @@ func TestHandleExecuteRecordsOneExecutionAfterQuorum(t *testing.T) {
 
 	execution := &confworkflowtypes.WorkflowExecution{
 		WorkflowId: "workflow-id",
+		BinaryUrl:  "artifact-id",
+		BinaryHash: sha256Sum([]byte("binary")),
 		SdkExecuteRequest: &sdkpb.ExecuteRequest{
 			Request: &sdkpb.ExecuteRequest_Trigger{Trigger: &sdkpb.Trigger{Id: 7}},
 		},
@@ -403,6 +405,8 @@ func TestHandleExecuteRecordsOneExecutionAfterQuorum(t *testing.T) {
 	host := NewHostServer(context.Background(), &http.Client{Transport: transport})
 	host.config = types.EnclaveConfig{Signers: signers, T: 1, F: 1}
 	host.metrics = recordedMetrics
+	raw := &countingRawFetcher{binary: []byte("binary")}
+	host.binaries = testBinaryProvider(t, raw)
 
 	recorders := make([]*httptest.ResponseRecorder, 2)
 	done := make([]chan struct{}, 2)
@@ -447,6 +451,7 @@ func TestHandleExecuteRecordsOneExecutionAfterQuorum(t *testing.T) {
 	started, completed = recordedMetrics.snapshot()
 	assert.Len(t, started, 1)
 	assert.Len(t, completed, 1)
+	assert.Equal(t, int32(1), raw.calls.Load(), "cached responses must not refetch binaries")
 }
 
 func TestHandleExecuteRecordsEnclaveError(t *testing.T) {
@@ -465,10 +470,8 @@ func TestHandleExecuteRecordsEnclaveError(t *testing.T) {
 	host := NewHostServer(context.Background(), &http.Client{Transport: transport})
 	host.config = types.EnclaveConfig{Signers: signers, T: 1, F: 1}
 	host.metrics = recordedMetrics
-	request := types.ComputeRequest{
-		RequestID: sha256.Sum256([]byte("execution-metrics-error")),
-		AppID:     types.AppIDConfidentialWorkflows,
-	}
+	host.binaries = testBinaryProvider(t, &countingRawFetcher{binary: []byte("binary")})
+	request := workflowExecuteRequest(t, "execution-metrics-error")
 
 	recorders := make([]*httptest.ResponseRecorder, numSigners)
 	done := make([]chan struct{}, numSigners)
@@ -514,10 +517,8 @@ func TestHandleExecuteRelaysEnclaveErrorResponse(t *testing.T) {
 		Body:       io.NopCloser(bytes.NewReader(enclaveBody)),
 	}}})
 	host.config = types.EnclaveConfig{Signers: [][]byte{publicKey}, T: 1, F: 0}
-	request := types.ComputeRequest{
-		RequestID: sha256.Sum256([]byte("enclave-error-response")),
-		AppID:     types.AppIDConfidentialWorkflows,
-	}
+	host.binaries = testBinaryProvider(t, &countingRawFetcher{binary: []byte("binary")})
+	request := workflowExecuteRequest(t, "enclave-error-response")
 
 	w := httptest.NewRecorder()
 	host.handleExecute(w, signedExecuteRequest(t, request, privateKey))
@@ -857,11 +858,11 @@ func TestHandleExecuteWithBatchingAndCaching(t *testing.T) {
 	require.Len(t, mockTransport.requests, 1)
 
 	// Verify that the batch request contains all three original requests
+	var enclaveReqs []types.SignedComputeRequest
 	bodyBytes, err := io.ReadAll(mockTransport.requests[0].Body)
 	require.NoError(t, err)
-	enclaveBatch, err := types.UnmarshalExecuteBatch(bodyBytes)
+	err = json.Unmarshal(bodyBytes, &enclaveReqs)
 	require.NoError(t, err)
-	enclaveReqs := enclaveBatch.Requests
 	assert.Len(t, enclaveReqs, numRequests)
 	for i := 0; i < numRequests; i++ {
 		assert.Equal(t, sha256.Sum256([]byte("test-request-id-batching-caching")), enclaveReqs[i].RequestID)
@@ -1477,11 +1478,11 @@ func TestHandleExecuteWithInvalidSigner(t *testing.T) {
 	assert.Equal(t, 1, len(mockTransport.requests))
 
 	// Verify the batch contains only the three unique valid signatures (not the duplicate).
+	var enclaveReqs []types.SignedComputeRequest
 	bodyBytes, err := io.ReadAll(mockTransport.requests[0].Body)
 	require.NoError(t, err)
-	enclaveBatch, err := types.UnmarshalExecuteBatch(bodyBytes)
+	err = json.Unmarshal(bodyBytes, &enclaveReqs)
 	require.NoError(t, err)
-	enclaveReqs := enclaveBatch.Requests
 	assert.Equal(t, 3, len(enclaveReqs))
 }
 
@@ -1700,4 +1701,48 @@ func TestHandleExecuteFetchesBinaryAfterQuorum(t *testing.T) {
 	batch, err := types.UnmarshalExecuteBatch(body)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("binary"), batch.UnauthenticatedData, "fetched binary rides with the batch")
+}
+
+func TestHandleExecuteBinaryFetchFailureAndRetry(t *testing.T) {
+	signers := make([][]byte, 2)
+	keys := make([]ed25519.PrivateKey, 2)
+	for i := range keys {
+		pub, key, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		signers[i], keys[i] = pub, key
+	}
+	request := workflowExecuteRequest(t, "fetch-retry")
+	transport := &mockRoundTripper{response: &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader(util.MustMarshal(t, types.ExecuteResponse{RequestID: request.RequestID}))),
+	}}
+	host := NewHostServer(t.Context(), &http.Client{Transport: transport})
+	t.Cleanup(host.cancel)
+	host.config = types.EnclaveConfig{Signers: signers, T: 1, F: 1}
+	raw := &countingRawFetcher{binary: []byte("binary"), err: errors.New("storage unavailable")}
+	host.binaries = testBinaryProvider(t, raw)
+	for _, status := range []int{http.StatusInternalServerError, http.StatusOK} {
+		var wg sync.WaitGroup
+		recorders := make([]*httptest.ResponseRecorder, len(keys))
+		for i, key := range keys {
+			recorders[i] = httptest.NewRecorder()
+			req := signedExecuteRequest(t, request, key)
+			wg.Go(func() { host.handleExecute(recorders[i], req) })
+		}
+		wg.Wait()
+		for _, rec := range recorders {
+			assert.Equal(t, status, rec.Code)
+			if status == http.StatusInternalServerError {
+				assert.Contains(t, rec.Body.String(), "storage unavailable")
+			}
+		}
+		assert.Zero(t, host.pendingRequestsCache.Size())
+		if status == http.StatusInternalServerError {
+			assert.Empty(t, transport.requests)
+			assert.Zero(t, host.responseCache.Size(), "failures must remain retryable")
+		}
+		raw.err = nil
+	}
+	assert.Equal(t, int32(2), raw.calls.Load())
+	assert.Len(t, transport.requests, 1)
 }

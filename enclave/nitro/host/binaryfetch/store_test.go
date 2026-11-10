@@ -7,15 +7,14 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// storeImpls runs a shared contract over every Store implementation, so the
-// enclave's memory store and the host's disk store stay behaviourally
-// interchangeable.
+// storeImpls runs a shared contract over every Store implementation.
 func storeImpls(t *testing.T) map[string]Store {
 	t.Helper()
 	disk, err := NewDiskStore(t.TempDir())
@@ -106,10 +105,14 @@ func TestDiskStore_PersistsAcrossInstances(t *testing.T) {
 func TestDiskStore_IgnoresForeignFiles(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("hi"), 0o600))
+	interrupted := filepath.Join(dir, "key-1.bin.tmp-interrupted")
+	require.NoError(t, os.WriteFile(interrupted, testBinary, 0o600))
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "subdir"), 0o700))
 
 	s, err := NewDiskStore(dir)
 	require.NoError(t, err)
+	assert.NoFileExists(t, interrupted)
+	assert.FileExists(t, filepath.Join(dir, "notes.txt"))
 	require.NoError(t, s.Put("key-1", []byte("12345")))
 
 	entries, err := s.Entries()
@@ -188,33 +191,14 @@ func TestCache_GetDropsIndexWhenStoreLostEntry(t *testing.T) {
 	assert.Equal(t, 0, c.Bytes(), "byte accounting should not drift when the store loses an entry")
 }
 
-func TestCache_SetMaxCacheBytesEvicts(t *testing.T) {
-	store := NewMemoryStore()
-	c := NewCache(logger.Test(t), store, 100)
-	c.Put("key-1", []byte("1234567890"))
-	c.Put("key-2", []byte("1234567890"))
-
-	c.SetMaxCacheBytes(10)
-	assert.Equal(t, 10, c.Bytes())
-	_, ok := store.Get("key-1")
-	assert.False(t, ok, "least-recently-used entry should be evicted from the store")
-
-	// Non-positive values are ignored.
-	c.SetMaxCacheBytes(0)
-	assert.Equal(t, 10, c.Bytes())
-}
-
-// Concurrent Puts for different keys must not overshoot the bound. Without
-// reserving the incoming bytes before releasing the lock, every writer sees the
-// same free space, evicts to fit, and then publishes -- so the total lands well
-// over maxCacheBytes.
+// Slow writes must not let concurrent cache publications exceed the byte bound.
 func TestCache_ConcurrentPutsRespectBound(t *testing.T) {
 	const (
 		writers   = 16
 		valueSize = 10
 		maxBytes  = 50 // fits 5 entries
 	)
-	store := NewMemoryStore()
+	store := &slowStore{Store: NewMemoryStore()}
 	c := NewCache(logger.Test(t), store, maxBytes)
 
 	var wg sync.WaitGroup
@@ -239,14 +223,21 @@ func TestCache_ConcurrentPutsRespectBound(t *testing.T) {
 	assert.Equal(t, total, c.Bytes(), "byte accounting must match the store contents")
 }
 
-// A store write failure must give back the bytes Put reserved, or the cache
-// slowly starves itself.
-func TestCache_FailedPutReleasesReservation(t *testing.T) {
+type slowStore struct {
+	Store
+}
+
+func (s *slowStore) Put(key string, value []byte) error {
+	time.Sleep(time.Millisecond)
+	return s.Store.Put(key, value)
+}
+
+func TestCache_FailedPutDoesNotConsumeCapacity(t *testing.T) {
 	store := &failingStore{Store: NewMemoryStore(), fail: true}
 	c := NewCache(logger.Test(t), store, 100)
 
 	c.Put("key-1", []byte("1234567890"))
-	assert.Zero(t, c.Bytes(), "a failed write must not leak reserved bytes")
+	assert.Zero(t, c.Bytes(), "a failed write must not consume capacity")
 
 	// The cache is still usable for its full capacity afterwards.
 	store.fail = false

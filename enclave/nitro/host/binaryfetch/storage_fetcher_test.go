@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -145,7 +146,7 @@ func TestStorageFetcher_SendsBareArtifactID(t *testing.T) {
 
 	req := fake.request()
 	require.NotNil(t, req)
-	require.Equal(t, id, req.GetId(), "enclave must send the bare artifact id, not the full URL")
+	require.Equal(t, id, req.GetId(), "host must send the bare artifact id, not the full URL")
 	require.Equal(t, storage_service.ArtifactType_ARTIFACT_TYPE_BINARY, req.GetType())
 }
 
@@ -155,6 +156,26 @@ func TestNewStorageFetcherRequiresArtifactHTTPClient(t *testing.T) {
 	)
 	require.Nil(t, f)
 	require.EqualError(t, err, "artifact HTTP client is required")
+}
+
+func TestStorageFetcher_DownloadSizeBound(t *testing.T) {
+	for _, size := range []int{3, 4, 5} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			binary := bytes.Repeat([]byte("x"), size)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(binary)))
+			}))
+			defer srv.Close()
+			fetcher := &StorageFetcher{httpClient: srv.Client(), maxBytes: 4, lggr: logger.Test(t)}
+			got, err := fetcher.Download(t.Context(), srv.URL)
+			if size > 4 {
+				require.ErrorContains(t, err, "exceeds max size")
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, binary, got)
+			}
+		})
+	}
 }
 
 func TestStorageFetcher_ProxyDialerPreservesAuthorityAndAuthorization(t *testing.T) {

@@ -8,10 +8,9 @@ import (
 	"sync"
 )
 
-// Store is where cached binary bytes physically live. The enclave uses
-// MemoryStore (RAM only, nothing leaves the TEE); the host uses DiskStore so a
-// binary survives container restarts. Eviction policy is not the Store's
-// concern -- Cache owns it and calls Delete.
+// Store holds cached binary bytes. The host uses DiskStore for persistence;
+// MemoryStore supports tests. Cache owns eviction and must exclusively own
+// its store (including the directory for a DiskStore).
 //
 // Implementations must be safe for concurrent use.
 type Store interface {
@@ -87,6 +86,19 @@ func NewDiskStore(dir string) (*DiskStore, error) {
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("creating cache dir %q: %w", dir, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("reading cache dir: %w", err)
+	}
+	// The directory has one owner; leftover temp files are interrupted writes.
+	for _, entry := range entries {
+		key, suffix, ok := strings.Cut(entry.Name(), binaryFileExt+".tmp-")
+		if ok && suffix != "" && safeKey(key) == nil && entry.Type().IsRegular() {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+				return nil, fmt.Errorf("removing interrupted cache write: %w", err)
+			}
+		}
 	}
 	return &DiskStore{dir: dir}, nil
 }
@@ -186,7 +198,7 @@ func (s *DiskStore) Entries() (map[string]int, error) {
 	}
 	out := make(map[string]int, len(dirEntries))
 	for _, e := range dirEntries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), binaryFileExt) {
+		if !e.Type().IsRegular() || !strings.HasSuffix(e.Name(), binaryFileExt) {
 			continue
 		}
 		key := strings.TrimSuffix(e.Name(), binaryFileExt)

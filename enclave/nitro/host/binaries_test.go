@@ -2,7 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,6 +15,7 @@ import (
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/host/binaryfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,8 +30,6 @@ func TestNewBinaryProvider_NilWithoutStorageSettings(t *testing.T) {
 	for name, settings := range map[string]string{
 		"empty":           "",
 		"whitespace":      "   ",
-		"no storage key":  `{"storageServiceUrl":"storage:443"}`,
-		"no storage url":  `{"storageKey":"` + testStorageKeyHex + `"}`,
 		"unrelated app":   `{"gatewayUrl":"https://gateway"}`,
 		"empty json body": `{}`,
 	} {
@@ -63,19 +67,31 @@ func TestNewBinaryProvider_RejectsMalformedSettings(t *testing.T) {
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "binaryFetchTimeout")
+	for _, settings := range []string{`{"storageServiceUrl":"storage:443"}`, `{"storageKey":"` + testStorageKeyHex + `"}`} {
+		_, err := newBinaryProvider(settings, lggr)
+		require.ErrorContains(t, err, "both required")
+	}
 }
 
 func TestNewBinaryProvider_Enabled(t *testing.T) {
 	lggr := cllogger.Sugared(cllogger.Nop())
 	t.Cleanup(withBinaryCacheDir(t.TempDir()))
-	p, err := newBinaryProvider(
-		`{"storageKey":"`+testStorageKeyHex+`","storageServiceUrl":"storage.invalid:443","binaryFetchTimeout":"30s"}`,
-		lggr,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, p)
-	t.Cleanup(func() { require.NoError(t, p.Close()) })
-	assert.Equal(t, 30*1e9, float64(p.timeout))
+	for value, want := range map[string]time.Duration{
+		`"30s"`: 30 * time.Second, `30000000000`: 30 * time.Second,
+		`"0s"`: types.DefaultBinaryFetchTimeout, `0`: types.DefaultBinaryFetchTimeout,
+		`-1`: types.DefaultBinaryFetchTimeout,
+	} {
+		t.Run(value, func(t *testing.T) {
+			p, err := newBinaryProvider(
+				`{"storageKey":"`+testStorageKeyHex+`","storageServiceUrl":"storage.invalid:443","binaryFetchTimeout":`+value+`}`,
+				lggr,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, p)
+			t.Cleanup(func() { require.NoError(t, p.Close()) })
+			assert.Equal(t, want, p.timeout)
+		})
+	}
 }
 
 // withBinaryCacheDir points the flag at dir and returns a cleanup that restores it.
@@ -91,7 +107,7 @@ func TestBinaryProvider_NilIsSafe(t *testing.T) {
 	var p *binaryProvider
 	binary, err := p.binaryFor(t.Context(), nil)
 	assert.Nil(t, binary)
-	assert.NoError(t, err)
+	assert.ErrorContains(t, err, "not configured")
 	assert.NoError(t, p.Close())
 }
 
@@ -124,20 +140,6 @@ func TestBinaryProvider_IncompleteExecutionErrors(t *testing.T) {
 	}
 }
 
-func TestCacheKey(t *testing.T) {
-	// Hex workflow IDs pass through unchanged, so the cache is readable.
-	id := "0a1b2c3d4e5f"
-	assert.Equal(t, id, cacheKey(id))
-
-	// Anything else is hex-encoded rather than trusted as a filename.
-	for _, unsafe := range []string{"../../etc/passwd", "with/slash", "with space"} {
-		got := cacheKey(unsafe)
-		assert.Equal(t, hex.EncodeToString([]byte(unsafe)), got)
-		assert.NotContains(t, got, "/")
-		assert.NotContains(t, got, "..")
-	}
-}
-
 // countingRawFetcher stands in for the storage-service fetcher and records how
 // many times the host actually reached for a binary.
 type countingRawFetcher struct {
@@ -165,6 +167,117 @@ func testBinaryProvider(t *testing.T, raw binaryfetch.RawFetcher) *binaryProvide
 		fetcher: binaryfetch.NewBinaryFetcherWithStore(lggr, binaryfetch.NewMemoryStore(), 1<<20),
 		raw:     raw,
 		timeout: 5 * time.Second,
-		logger:  lggr,
+	}
+}
+
+func TestBinaryProvider_CacheIdentityAndSize(t *testing.T) {
+	raw := &countingRawFetcher{binary: []byte("binary")}
+	p := testBinaryProvider(t, raw)
+	for _, id := range []string{"workflow-1", "workflow-2", "../../escape"} {
+		got, err := p.binaryFor(t.Context(), &confworkflowtypes.WorkflowExecution{
+			WorkflowId: id, BinaryUrl: "loc", BinaryHash: sha256Sum(raw.binary),
+		})
+		require.NoError(t, err)
+		assert.Equal(t, raw.binary, got)
+	}
+	assert.Equal(t, int32(1), raw.calls.Load())
+	p.settings.MaxBinarySize = 1
+	_, err := p.binaryFor(t.Context(), &confworkflowtypes.WorkflowExecution{
+		WorkflowId: "workflow-1", BinaryUrl: "loc", BinaryHash: sha256Sum(raw.binary),
+	})
+	require.ErrorContains(t, err, "exceeds max size")
+}
+
+func TestNewBinaryProvider_CacheConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	t.Cleanup(withBinaryCacheDir(dir))
+	oldCID, oldMax := *enclaveCID, *binaryCacheMaxBytes
+	t.Cleanup(func() { *enclaveCID, *binaryCacheMaxBytes = oldCID, oldMax })
+	for cid, bound := range []int{0, 10} {
+		*enclaveCID, *binaryCacheMaxBytes = cid+16, bound
+		p, err := newBinaryProvider(`{"storageKey":"`+testStorageKeyHex+`","storageServiceUrl":"storage:443","maxCacheBytes":5}`, cllogger.Sugared(cllogger.Nop()))
+		require.NoError(t, err)
+		require.NoError(t, p.raw.Close())
+		raw := &countingRawFetcher{binary: []byte("binary")}
+		p.raw = raw
+		for range 2 {
+			_, err := p.binaryFor(t.Context(), &confworkflowtypes.WorkflowExecution{
+				WorkflowId: "workflow", BinaryUrl: "loc", BinaryHash: sha256Sum(raw.binary),
+			})
+			require.NoError(t, err)
+		}
+		if bound == 0 {
+			assert.Equal(t, int32(2), raw.calls.Load(), "settings bound prevents caching an oversized binary")
+		} else {
+			assert.Equal(t, int32(1), raw.calls.Load(), "flag overrides settings bound")
+		}
+	}
+	first, err := os.ReadDir(filepath.Join(dir, "16"))
+	require.NoError(t, err)
+	assert.Empty(t, first)
+	second, err := os.ReadDir(filepath.Join(dir, "17"))
+	require.NoError(t, err)
+	assert.Len(t, second, 1, "different enclave CIDs must own separate cache directories")
+}
+
+func TestBinaryProvider_ArtifactHTTPPolicy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("d2FzbQ=="))
+	}))
+	defer srv.Close()
+	previous := *outboundAllowLocalForTests
+	t.Cleanup(func() { *outboundAllowLocalForTests = previous })
+	for _, allow := range []bool{false, true} {
+		*outboundAllowLocalForTests = allow
+		p, err := newBinaryProviderWithCache(hostStorageSettings{
+			StorageKey: testStorageKeyHex, StorageServiceURL: "storage:443",
+		}, t.TempDir(), 100, cllogger.Sugared(cllogger.Nop()))
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, p.Close()) })
+		got, err := p.raw.(*binaryfetch.StorageFetcher).Download(t.Context(), srv.URL)
+		if allow {
+			require.NoError(t, err)
+			assert.Equal(t, []byte("wasm"), got)
+		} else {
+			require.Error(t, err, "production artifact downloads must reject plain HTTP and loopback")
+		}
+	}
+}
+
+func TestHandleInjectSettings_StorageRequiresRestart(t *testing.T) {
+	initial := `{"storageKey":"` + testStorageKeyHex + `","storageServiceUrl":"storage:443","binaryFetchTimeout":"30s"}`
+	settings, _, err := parseHostStorageSettings(initial)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name     string
+		provider *binaryProvider
+		payload  string
+		status   int
+	}{
+		{"unchanged", &binaryProvider{settings: settings}, initial, http.StatusNoContent},
+		{"enclave setting", &binaryProvider{settings: settings}, strings.TrimSuffix(initial, "}") + `,"gatewayUrl":"https://new"}`, http.StatusNoContent},
+		{"equivalent duration", &binaryProvider{settings: settings}, strings.Replace(initial, `"30s"`, `30000000000`, 1), http.StatusNoContent},
+		{"rotation", &binaryProvider{settings: settings}, strings.Replace(initial, testStorageKeyHex, strings.Repeat("a", 64), 1), http.StatusConflict},
+		{"remove", &binaryProvider{settings: settings}, `{}`, http.StatusConflict},
+		{"provision", nil, initial, http.StatusConflict},
+		{"partial", nil, `{"storageKey":"key"}`, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := &mockRoundTripper{response: &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody}}
+			host := NewHostServer(t.Context(), &http.Client{Transport: transport})
+			t.Cleanup(host.cancel)
+			host.binaries = tc.provider
+			recorder := httptest.NewRecorder()
+			host.handleInjectSettings(recorder, httptest.NewRequest(http.MethodPost, types.SettingsPath, strings.NewReader(tc.payload)))
+			assert.Equal(t, tc.status, recorder.Code)
+			if tc.status == http.StatusNoContent {
+				require.Len(t, transport.requests, 1)
+				var forwarded map[string]any
+				require.NoError(t, json.NewDecoder(transport.requests[0].Body).Decode(&forwarded))
+				assert.Equal(t, testStorageKeyHex, forwarded["storageKey"])
+			} else {
+				assert.Empty(t, transport.requests, "rejected settings must not reach the enclave")
+			}
+		})
 	}
 }

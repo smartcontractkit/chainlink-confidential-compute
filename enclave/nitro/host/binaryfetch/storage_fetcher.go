@@ -34,12 +34,9 @@ type RawFetcher interface {
 	Close() error
 }
 
-// StorageFetcher fetches the workflow binary directly from the CRE storage
-// service, from inside the enclave: it calls NodeService.DownloadArtifact over
-// JWT-authed gRPC (the JWT is EdDSA-signed with the injected ed25519 storage
-// key) to obtain a pre-signed URL, then downloads that URL. This is the code
-// that previously lived in the host-agent sidecar; it now runs in the TEE so
-// the fetch is authenticated by the enclave itself.
+// StorageFetcher calls NodeService.DownloadArtifact from the host over JWT-authed
+// gRPC, then downloads the pre-signed URL. The enclave verifies binary integrity
+// independently of the storage service and host.
 type StorageFetcher struct {
 	conn       *grpc.ClientConn
 	client     storage_service.NodeServiceClient
@@ -125,7 +122,7 @@ func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes 
 	}
 
 	grpcOptions := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
-	// Preserve the hostname so the parent-side SOCKS proxy performs DNS resolution.
+	// Preserve the hostname for custom dialers.
 	target := "passthrough:///" + storageURL
 	if config.dialContext != nil {
 		grpcOptions = append(grpcOptions,
@@ -264,6 +261,9 @@ func (f *StorageFetcher) Download(ctx context.Context, url string) ([]byte, erro
 	decoded, err := base64.StdEncoding.DecodeString(string(encoded))
 	if err != nil {
 		return nil, fmt.Errorf("base64 decoding binary: %w", err)
+	}
+	if int64(len(decoded)) > f.maxBytes {
+		return nil, fmt.Errorf("binary exceeds max size of %d bytes", f.maxBytes)
 	}
 	return decoded, nil
 }
