@@ -64,8 +64,7 @@ type confidentialWorkflowsApp struct {
 
 	// Runtime config + secrets injected via InjectSettings (host over vsock). A
 	// Nitro EIF is measured (PCR), so environment-specific endpoints can't be
-	// baked in; the storage endpoint, the ed25519 storage key, and the gateway
-	// URL all arrive at runtime. mu guards everything below.
+	// baked in; the gateway URL arrives at runtime. mu guards everything below.
 	mu                sync.Mutex
 	dispatcher        RemoteDispatcher        // nil = local mode
 	dispatcherFactory RemoteDispatcherFactory // builds dispatcher on first GatewayURL injection
@@ -149,7 +148,7 @@ func WithMaxConcurrentExecutions(n int64) Option {
 // a deployment that forgot one fails the injection instead of running
 // half-configured; see WorkflowSettings. The timeouts (global request, gateway
 // client, workflow execution) fall back to the built-in defaults when omitted.
-// Safe to call again (e.g. key rotation), as long as the payload stays complete.
+// Safe to call again as long as the payload stays complete.
 // The storage fields are ignored here: the host fetches workflow binaries.
 func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	var req WorkflowSettings
@@ -300,11 +299,6 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		}
 	}
 
-	// unauthenticatedData may carry the binary the host pre-fetched. It is not
-	// covered by the DON signatures, so it is verified against the signed
-	// binary_hash below like any other source.
-	hostBinary := unauthenticatedData
-
 	if execution.SdkExecuteRequest == nil {
 		return nil, &types.ExecuteError{
 			Error: "execute_request is required",
@@ -330,19 +324,19 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	// The binary arrives as unauthenticatedData, fetched by the host. The host
 	// is untrusted, so verify it against the signed binary_hash before
 	// executing.
-	if len(hostBinary) == 0 {
+	binary := unauthenticatedData
+	if len(binary) == 0 {
 		return nil, &types.ExecuteError{
 			Error: "no workflow binary supplied by the host",
 			Code:  http.StatusBadGateway,
 		}
 	}
-	if actual := sha256.Sum256(hostBinary); !bytes.Equal(actual[:], execution.BinaryHash) {
+	if actual := sha256.Sum256(binary); !bytes.Equal(actual[:], execution.BinaryHash) {
 		return nil, &types.ExecuteError{
 			Error: fmt.Sprintf("host-supplied binary hash mismatch: expected %x, got %x", execution.BinaryHash, actual[:]),
 			Code:  http.StatusBadGateway,
 		}
 	}
-	binary := hostBinary
 
 	var helper host.ExecutionHelper = &enclaveExecutionHelper{
 		requestID:        requestID,

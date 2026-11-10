@@ -102,6 +102,12 @@ func TestExecute_HelloWasm(t *testing.T) {
 	errResult, ok := cwResp.SdkExecutionResult.Result.(*sdkpb.ExecutionResult_Value)
 	require.True(t, ok, "expected value result, got %T", cwResp.SdkExecutionResult.Result)
 	assert.Equal(t, "hello from enclave wasm", errResult.Value.GetStringValue())
+
+	tampered := append([]byte("evil"), binary...)
+	_, execErr = app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, tampered, nil, emitter.NewNoOpEmitter())
+	require.NotNil(t, execErr)
+	assert.Equal(t, http.StatusBadGateway, execErr.Code)
+	assert.Contains(t, execErr.Error, "host-supplied binary hash mismatch")
 }
 
 // TestExecute_HttpCallWasm is the WASM-level integration test for the
@@ -556,7 +562,7 @@ func TestInjectSettings_MaxConcurrentCompilations(t *testing.T) {
 	}
 	inject := func(t *testing.T, a *confidentialWorkflowsApp, mutate func(*WorkflowSettings)) error {
 		t.Helper()
-		s := testSettings("127.0.0.1:1")
+		s := testSettings()
 		mutate(&s)
 		raw, err := json.Marshal(s)
 		require.NoError(t, err)

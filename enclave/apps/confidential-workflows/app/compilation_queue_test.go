@@ -86,12 +86,12 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 		input, err := proto.Marshal(makeExecution(t, fmt.Sprintf("workflow-%d", i), locator, hash[:]))
 		require.NoError(t, err)
 		wg.Go(func() {
-			_, err := a.Execute([32]byte{byte(i)}, types.AppIDConfidentialWorkflows, input, nil, emitter.NewNoOpEmitter())
+			_, err := a.Execute([32]byte{byte(i)}, types.AppIDConfidentialWorkflows, input, binary, nil, emitter.NewNoOpEmitter())
 			results <- err
 		})
 	}
 	require.Eventually(t, func() bool { return len(a.limiter.slots) == 2 }, 5*time.Second, time.Millisecond)
-	_, rejected := a.Execute([32]byte{3}, types.AppIDConfidentialWorkflows, nil, nil, emitter.NewNoOpEmitter())
+	_, rejected := a.Execute([32]byte{3}, types.AppIDConfidentialWorkflows, nil, nil, nil, emitter.NewNoOpEmitter())
 	require.NotNil(t, rejected)
 	require.Equal(t, http.StatusTooManyRequests, rejected.Code)
 	select {

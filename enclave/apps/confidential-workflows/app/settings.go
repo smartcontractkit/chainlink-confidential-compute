@@ -8,8 +8,8 @@ import (
 )
 
 // WorkflowSettings is the runtime config + secrets contract of this app. The
-// host injects it as opaque JSON over vsock (POST /settings) and forwards it
-// verbatim, so this app is the sole owner of the schema. A Nitro EIF is measured
+// host injects it as JSON over vsock (POST /settings). Storage settings are
+// owned by the host; this app reads the remaining fields. A Nitro EIF is measured
 // (PCR), so environment-specific endpoints and tunables cannot be baked in
 // without changing the attestation; they are supplied at runtime instead,
 // keeping one EIF usable across environments.
@@ -71,11 +71,7 @@ type WorkflowSettings struct {
 // injected settings omit MaxConcurrentCompilations.
 const defaultMaxConcurrentCompilations = 4
 
-// validate reports the required settings the payload left empty. The enclave
-// cannot fetch a workflow binary without the storage endpoint and key, and
-// cannot reach dynamic secrets or remote capabilities without a gateway, so a
-// payload missing any of them is a deployment error worth failing on at
-// injection time instead of surfacing as a failed execution later.
+// validate rejects missing gateway settings and invalid compilation limits.
 func (s *WorkflowSettings) validate() error {
 	var missing []string
 	if s.GatewayURL == "" {

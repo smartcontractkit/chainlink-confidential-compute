@@ -523,7 +523,7 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	// A binary-prefetching host sends an ExecuteBatch envelope whose
 	// unauthenticatedData carries the workflow binary it fetched; hosts
 	// predating that send a bare request array. UnauthenticatedData is not
-	// covered by the DON signatures — the app verifies it against the signed
+	// covered by the DON signatures; the app verifies it against the signed
 	// binary_hash before use.
 	batch, err := types.UnmarshalExecuteBatch(body)
 	if err != nil {
@@ -694,8 +694,7 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	// Forward the full F+1 signed batch to the app; confidential-workflows relays it
 	// to the relay DON as the authorization for any secrets requests.
 	// UnauthenticatedData is the binary the host fetched, unverified: the app
-	// checks it against the signed binary_hash and falls back to fetching
-	// itself when it is absent or fails verification.
+	// rejects absent data or a mismatch against the signed binary_hash.
 	execResp, execErr := s.app.Execute(req.RequestID, req.AppID, req.PublicData, batch.UnauthenticatedData, secretsMap, responseEmitter, reqs...)
 	responseEmitter.Emit("app_execution_completed", map[string]any{
 		"duration_seconds": time.Since(appExecStart).Seconds(),
