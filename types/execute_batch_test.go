@@ -73,6 +73,9 @@ func TestUnmarshalExecuteBatch_OmitsEmptyUnauthenticatedData(t *testing.T) {
 	body, err := MarshalExecuteBatch(batch)
 	require.NoError(t, err)
 	assert.NotContains(t, string(body), "unauthenticatedData", "an absent field should not bloat the vsock payload")
+	var legacy []SignedComputeRequest
+	require.NoError(t, json.Unmarshal(body, &legacy), "batches without binaries must remain readable by old enclaves")
+	assert.Equal(t, batch.Requests, legacy)
 }
 
 func TestUnmarshalExecuteBatch_Invalid(t *testing.T) {

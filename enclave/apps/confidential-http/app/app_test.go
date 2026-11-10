@@ -856,9 +856,11 @@ func TestHTTPEnclaveApp_Execute_DoesNotReuseConnectionsAcrossExecutions(t *testi
 		_, execErr := enclaveApp.Execute(
 			requestID,
 			types.AppIDConfidentialHTTP,
-			requestBytes, nil,
+			requestBytes,
 			nil,
-			&testEmitter{})
+			nil,
+			&testEmitter{},
+		)
 		require.Nil(t, execErr)
 	}
 

@@ -33,8 +33,7 @@ func newStorageBackedApp(t *testing.T, rawBinary []byte, opts ...Option) (types.
 func newStorageBackedAppWithSettings(t *testing.T, rawBinary []byte, mutate func(*WorkflowSettings), opts ...Option) (types.EnclaveApp, string) {
 	t.Helper()
 
-	allOpts := append([]Option{}, opts...)
-	a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), allOpts...)
+	a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), opts...)
 	settings := testSettings()
 	if mutate != nil {
 		mutate(&settings)

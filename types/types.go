@@ -214,13 +214,15 @@ type ExecuteBatch struct {
 	// UnauthenticatedData carries data the host fetched on the enclave's behalf
 	// (the workflow binary for confidential-workflows), outside the signed
 	// requests. It is NOT covered by the DON signatures: the enclave app must
-	// verify it — for binaries, against the signed binary_hash — before use,
-	// and fetch the data itself when it is empty.
+	// verify it against the signed binary_hash before use.
 	UnauthenticatedData []byte `json:"unauthenticatedData,omitempty"`
 }
 
 // MarshalExecuteBatch encodes a batch for the enclave.
 func MarshalExecuteBatch(batch ExecuteBatch) ([]byte, error) {
+	if len(batch.UnauthenticatedData) == 0 {
+		return json.Marshal(batch.Requests)
+	}
 	return json.Marshal(batch)
 }
 
