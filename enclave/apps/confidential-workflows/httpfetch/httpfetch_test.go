@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +12,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -153,7 +151,12 @@ func TestFetch_RedactsErrors(t *testing.T) {
 		{name: "TLS internal alert", method: "GET", url: rawURL,
 			err: &net.OpError{Op: "remote error", Err: tls.AlertError(80)}, want: "http request failed: TLS peer reported internal error"},
 		{name: "unknown transport", method: "GET", url: rawURL, err: errors.New(secret), want: "http request failed: transport failure"},
-		{name: "body read", method: "GET", url: rawURL, body: &privateErrorBody{secret: secret}, want: "reading response failed"},
+		{name: "body read", method: "GET", url: rawURL, body: &privateErrorBody{secret: secret, err: errors.New(secret)}, want: "reading response: transport failure"},
+		{name: "body timeout", method: "GET", url: rawURL, body: &privateErrorBody{secret: secret, err: context.DeadlineExceeded}, want: "reading response: request timed out"},
+		{name: "body cancellation", method: "GET", url: rawURL, body: &privateErrorBody{secret: secret, err: context.Canceled}, want: "reading response: request canceled"},
+		{name: "body truncated", method: "GET", url: rawURL, body: &privateErrorBody{secret: secret, err: io.ErrUnexpectedEOF}, want: "reading response: unexpected end of response"},
+		{name: "body reset", method: "GET", url: rawURL, body: &privateErrorBody{secret: secret, err: syscall.ECONNRESET}, want: "reading response: connection reset"},
+		{name: "body TLS alert", method: "GET", url: rawURL, body: &privateErrorBody{secret: secret, err: &net.OpError{Op: "remote error", Err: tls.AlertError(20)}}, want: "reading response: TLS peer reported bad record MAC"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -175,14 +178,20 @@ func TestFetch_RedactsErrors(t *testing.T) {
 			assert.NotContains(t, fmt.Sprintf("%+v", err), secret)
 			var urlErr *url.Error
 			assert.False(t, errors.As(err, &urlErr), "raw error must not be recoverable by unwrapping")
+			if body, ok := tt.body.(*privateErrorBody); ok {
+				assert.NotErrorIs(t, err, body.err)
+			}
 		})
 	}
 }
 
-type privateErrorBody struct{ secret string }
+type privateErrorBody struct {
+	secret string
+	err    error
+}
 
 func (b *privateErrorBody) Read(p []byte) (int, error) {
-	return copy(p, b.secret), errors.New(b.secret)
+	return copy(p, b.secret), fmt.Errorf("%s: %w", b.secret, b.err)
 }
 
 func (b *privateErrorBody) Close() error { return nil }

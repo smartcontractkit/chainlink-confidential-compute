@@ -141,7 +141,7 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request) (*httpcap.Resp
 	limited := io.LimitReader(resp.Body, f.policy.MaxResponseBodyBytes+1)
 	body, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, errors.New("reading response failed")
+		return nil, fmt.Errorf("reading response: %w", util.SanitizeOutboundHTTPError(err))
 	}
 	if int64(len(body)) > f.policy.MaxResponseBodyBytes {
 		return nil, fmt.Errorf("response body exceeds limit %d bytes", f.policy.MaxResponseBodyBytes)

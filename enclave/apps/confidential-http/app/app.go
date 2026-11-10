@@ -315,7 +315,7 @@ func (a *httpEnclaveApp) executeHTTPRequest(request *enclavetypes.Request, templ
 	limitedReader := io.LimitReader(httpResp.Body, maxResponseBytes+1)
 	respBody, err := io.ReadAll(limitedReader)
 	if err != nil {
-		return enclavetypes.Response{}, fmt.Errorf("error reading http response")
+		return enclavetypes.Response{}, fmt.Errorf("error reading http response: %w", util.SanitizeOutboundHTTPError(err))
 	}
 	if len(respBody) > maxResponseBytes {
 		return enclavetypes.Response{}, fmt.Errorf("%s of %d bytes", types.ErrResponseBodyTooLarge, maxResponseBytes)
