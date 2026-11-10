@@ -43,10 +43,9 @@ func TestGetSecrets_ResharePublicKeyFromResponse(t *testing.T) {
 			Secrets: []confidentialrelay.SecretEntry{{
 				ID:         secretID,
 				Ciphertext: base64.StdEncoding.EncodeToString([]byte("ciphertext")),
-				// No encrypted shares: the combiner is stubbed, so share decryption
-				// via the keypair is not exercised; we only assert the master key the
-				// dispatcher selects for aggregation.
-				EncryptedShares: nil,
+				// The stubs ignore share contents; the list only needs to be
+				// non-empty to reach aggregation.
+				EncryptedShares: []string{base64.StdEncoding.EncodeToString([]byte("share"))},
 			}},
 		}
 	}
@@ -132,9 +131,11 @@ func (k *stubKeypair) CreationTime() time.Time          { return time.Time{} }
 
 type stubKeychain struct{ kp keychain.Keypair }
 
-func (s *stubKeychain) CreateKeyPair() (keychain.Keypair, error)      { return s.kp, nil }
-func (s *stubKeychain) GetKeyPair([]byte) (keychain.Keypair, error)   { return s.kp, nil }
-func (s *stubKeychain) GetKeyPairs() ([]keychain.Keypair, error)      { return []keychain.Keypair{s.kp}, nil }
+func (s *stubKeychain) CreateKeyPair() (keychain.Keypair, error)    { return s.kp, nil }
+func (s *stubKeychain) GetKeyPair([]byte) (keychain.Keypair, error) { return s.kp, nil }
+func (s *stubKeychain) GetKeyPairs() ([]keychain.Keypair, error) {
+	return []keychain.Keypair{s.kp}, nil
+}
 func (s *stubKeychain) GetKeyPairForRequest([32]byte) (keychain.Keypair, error) {
 	return s.kp, nil
 }

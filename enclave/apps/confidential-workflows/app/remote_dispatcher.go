@@ -356,6 +356,33 @@ func (d *remoteDispatcher) capabilityEntries(
 	return entries, skipped
 }
 
+// requireRelayVerifier returns an error when no verifier or signer set is
+// configured, since no relay response can be trusted without them.
+func (d *remoteDispatcher) requireRelayVerifier(path string, cfg types.EnclaveConfig) error {
+	if d.verifier == nil {
+		d.logger.Errorw("[remoteDispatcher] relay-DON signature verification failed", "path", path, "reason", "verifier not configured")
+		return fmt.Errorf("relay signature verifier not configured")
+	}
+	if len(cfg.Signers) == 0 {
+		d.logger.Errorw("[remoteDispatcher] relay-DON signature verification failed", "path", path, "reason", "signer set not configured")
+		return fmt.Errorf("DON signer set not configured")
+	}
+	return nil
+}
+
+// verifyRelaySigner verifies a relay-DON response signature over sigHash
+// against the configured signers and returns the signer. Callers skip
+// responses that fail.
+func (d *remoteDispatcher) verifyRelaySigner(path string, idx int, sigHash [32]byte, sig confidentialrelay.RelayResponseSignature, cfg types.EnclaveConfig) ([]byte, error) {
+	prefixed := confidentialrelay.RelayResponseSignaturePayload(sigHash)
+	signer, err := d.verifier.VerifySignature(prefixed, sig.Signature, cfg.Signers)
+	if err != nil {
+		d.logger.Debugw("[remoteDispatcher] skipping invalid or foreign relay signature", "path", path, "idx", idx, "err", err)
+		return nil, err
+	}
+	return signer, nil
+}
+
 // selectQuorumResult is the trust anchor on the gateway->enclave hop. The gateway
 // is a dumb fan-in: it forwards every per-node response it collected, unverified,
 // and may include invalid or foreign signatures injected by a compromised relay
@@ -383,13 +410,8 @@ func (d *remoteDispatcher) capabilityEntries(
 // the workflow DON and the relay DON are the same DON wearing two hats. If that
 // ever changes, this is the spot to introduce a separate RelayDON signer set.
 func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize int, skipped []string, entries []relayEntry, cfg types.EnclaveConfig) (int, error) {
-	if d.verifier == nil {
-		d.logger.Errorw("[remoteDispatcher] relay-DON signature verification failed", "path", path, "reason", "verifier not configured")
-		return 0, fmt.Errorf("relay signature verifier not configured")
-	}
-	if len(cfg.Signers) == 0 {
-		d.logger.Errorw("[remoteDispatcher] relay-DON signature verification failed", "path", path, "reason", "signer set not configured")
-		return 0, fmt.Errorf("DON signer set not configured")
+	if err := d.requireRelayVerifier(path, cfg); err != nil {
+		return 0, err
 	}
 	required := int(cfg.F) + 1
 
@@ -402,12 +424,9 @@ func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize int, sk
 	invalidSignatures := 0
 	diags := make([]string, 0, len(entries))
 	for _, e := range entries {
-		prefixed := confidentialrelay.RelayResponseSignaturePayload(e.sigHash)
-		signer, err := d.verifier.VerifySignature(prefixed, e.signature.Signature, cfg.Signers)
+		signer, err := d.verifyRelaySigner(path, e.idx, e.sigHash, e.signature, cfg)
 		if err != nil {
-			// Untrusted gateway / faulty node noise. Skip, do not fail.
 			invalidSignatures++
-			d.logger.Debugw("[remoteDispatcher] skipping invalid or foreign relay signature", "path", path, "idx", e.idx, "err", err)
 			diags = append(diags, e.diag(fmt.Sprintf("signature=invalid(%v) claimedSigner=%s", err, shortBytes(e.signature.Signer))))
 			continue
 		}
