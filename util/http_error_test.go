@@ -117,6 +117,33 @@ func TestSanitizeOutboundHTTPError(t *testing.T) {
 	assert.NoError(t, SanitizeOutboundHTTPError(nil))
 }
 
+func TestSanitizeOutboundHTTPError_ReadFailures(t *testing.T) {
+	const secret = "confidential-canary"
+	for _, tt := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"deadline", context.DeadlineExceeded, "request timed out"},
+		{"net timeout", &net.DNSError{Name: secret, Err: secret, IsTimeout: true}, "request timed out"},
+		{"cancellation", context.Canceled, "request canceled"},
+		{"truncated body", io.ErrUnexpectedEOF, "unexpected end of response"},
+		{"closed connection", io.EOF, "connection closed"},
+		{"connection reset", &net.OpError{Op: "read", Err: syscall.ECONNRESET}, "connection reset"},
+		{"unknown error", errors.New(secret), "transport failure"},
+		{"timeout text is not a sentinel", errors.New(context.DeadlineExceeded.Error() + secret), "transport failure"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := fmt.Errorf("%s: %w", secret, tt.err)
+			safe := SanitizeOutboundHTTPError(raw)
+			require.EqualError(t, safe, tt.want)
+			assert.NotContains(t, fmt.Sprintf("%+v", safe), secret)
+			assert.Nil(t, errors.Unwrap(safe))
+			assert.NotErrorIs(t, safe, tt.err)
+		})
+	}
+}
+
 func TestClassifyOutboundHTTPError(t *testing.T) {
 	tests := map[string]struct {
 		err            error

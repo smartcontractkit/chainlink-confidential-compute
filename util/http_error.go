@@ -17,8 +17,8 @@ import (
 // SanitizeOutboundHTTPError returns a fixed diagnostic for a hard HTTP failure.
 // Neither the message nor the error chain retains the original error: URLs,
 // certificate names, headers and response data may contain confidential values.
-// ClassifyOutboundHTTPError is applied first by callers; sanitizing a hard
-// failure does not turn it into a synthetic HTTP response.
+// Callers apply ClassifyOutboundHTTPError first to client.Do failures, but
+// sanitize response-read failures directly so they remain hard failures.
 func SanitizeOutboundHTTPError(err error) error {
 	if err == nil {
 		return nil
@@ -58,7 +58,21 @@ func SanitizeOutboundHTTPError(err error) error {
 			}
 		}
 	}
-	return errors.New("transport failure")
+	var netErr net.Error
+	switch {
+	case errors.Is(err, context.Canceled):
+		return errors.New("request canceled")
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		return errors.New("request timed out")
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return errors.New("unexpected end of response")
+	case errors.Is(err, io.EOF):
+		return errors.New("connection closed")
+	case errors.Is(err, syscall.ECONNRESET):
+		return errors.New("connection reset")
+	default:
+		return errors.New("transport failure")
+	}
 }
 
 // Like handshakeRejectionAlerts, this allowlist matches crypto/tls's unexported

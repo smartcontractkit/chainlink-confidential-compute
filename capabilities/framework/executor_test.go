@@ -1297,6 +1297,8 @@ func TestExecutor_HTTPRedirectIsUserError(t *testing.T) {
 		{"certificate failure", `execute failed: error executing enclave app request: &{error making http request: tls: failed to verify certificate: x509: certificate signed by unknown authority 400}`, false},
 		{"sanitized certificate failure", "execute failed: error in request 0: error making http request: TLS certificate hostname mismatch", false},
 		{"sanitized TLS alert", "execute failed: error in request 0: error making http request: TLS peer reported bad record MAC", false},
+		{"sanitized read timeout", "execute failed: error in request 0: error reading http response: request timed out", false},
+		{"sanitized truncated response", "execute failed: error in request 0: error reading http response: unexpected end of response", false},
 		{"signature failure", "execute failed: 400 Bad Request - invalid signature", false},
 		{"internal failure", "execute failed: 500 Internal Server Error", false},
 	}

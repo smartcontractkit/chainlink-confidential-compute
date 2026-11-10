@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -981,7 +983,12 @@ func TestHTTPEnclaveApp_Execute_RedactsHTTPFailures(t *testing.T) {
 	}{
 		{name: "transport", err: errors.New(secret), want: "error making http request: transport failure"},
 		{name: "certificate", err: &tls.CertificateVerificationError{Err: x509.HostnameError{Host: secret, Certificate: &x509.Certificate{}}}, want: "error making http request: TLS certificate hostname mismatch"},
-		{name: "read response", body: io.NopCloser(iotest.ErrReader(errors.New(secret))), want: "error reading http response"},
+		{name: "read response", body: io.NopCloser(iotest.ErrReader(errors.New(secret))), want: "error reading http response: transport failure"},
+		{name: "read timeout", body: io.NopCloser(iotest.ErrReader(fmt.Errorf("%s: %w", secret, context.DeadlineExceeded))), want: "error reading http response: request timed out"},
+		{name: "read cancellation", body: io.NopCloser(iotest.ErrReader(fmt.Errorf("%s: %w", secret, context.Canceled))), want: "error reading http response: request canceled"},
+		{name: "read truncated", body: io.NopCloser(iotest.ErrReader(fmt.Errorf("%s: %w", secret, io.ErrUnexpectedEOF))), want: "error reading http response: unexpected end of response"},
+		{name: "read reset", body: io.NopCloser(iotest.ErrReader(fmt.Errorf("%s: %w", secret, syscall.ECONNRESET))), want: "error reading http response: connection reset"},
+		{name: "read TLS alert", body: io.NopCloser(iotest.ErrReader(fmt.Errorf("%s: %w", secret, &net.OpError{Op: "remote error", Err: tls.AlertError(20)}))), want: "error reading http response: TLS peer reported bad record MAC"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			client := httpsmocks.NewMockHTTPClientWithCustomResponse(func(req *http.Request) (*http.Response, error) {
