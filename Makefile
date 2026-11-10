@@ -298,7 +298,7 @@ e2e-local-conf-workflows: chainlink-image jd-image chip-router-image atlas-image
 	  CTF_CONFIGS=configs/workflow-don-engine.toml \
 	  CTF_CHAINLINK_IMAGE=$(CHAINLINK_IMAGE) \
 	  CTF_JD_IMAGE=$(JD_IMAGE) \
-	  go test -tags e2e -v -timeout 60m -run '^TestConfidentialWorkflowsEngineE2E(_DirectSecrets)?$$' .
+	  go test -tags e2e -v -timeout 60m -run '^TestConfidentialWorkflowsEngineE2E$$' .
 
 .PHONY: e2e-local-workflow-capacity
 e2e-local-workflow-capacity:

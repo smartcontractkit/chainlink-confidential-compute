@@ -16,8 +16,8 @@ include the direct GetSecrets path (smartcontractkit/chainlink#23946).
 1. Unit tests: `go test ./app/` in `enclave/apps/confidential-workflows` and
    `go test ./util/`.
 2. E2E: `make e2e-local-conf-workflows` runs
-   `TestConfidentialWorkflowsEngineE2E` (OCR path) and
-   `TestConfidentialWorkflowsEngineE2E_DirectSecrets` (direct path). The pinned
+   `TestConfidentialWorkflowsEngineE2E`, which exercises the OCR path and then
+   enables direct reads at runtime for its direct-read phase. The pinned
    chainlink commit must include the direct GetSecrets path.
 
 ## Validation steps

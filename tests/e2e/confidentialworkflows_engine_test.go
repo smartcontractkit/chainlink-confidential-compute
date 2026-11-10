@@ -40,6 +40,7 @@ import (
 	"github.com/smartcontractkit/chainlink/system-tests/lib/cre/environment/blockchains/evm"
 	confidentialrelay "github.com/smartcontractkit/chainlink/system-tests/lib/cre/features/confidentialrelay"
 	creworkflow "github.com/smartcontractkit/chainlink/system-tests/lib/cre/workflow"
+	systemtests "github.com/smartcontractkit/chainlink/system-tests/tests/test-helpers"
 	ttypes "github.com/smartcontractkit/chainlink/system-tests/tests/test-helpers/configuration"
 
 	"github.com/smartcontractkit/chainlink-confidential-compute/tests"
@@ -448,16 +449,14 @@ func startFakeStorageService(t *testing.T, enclaveHost string) (string, *fakeSto
 	return fmt.Sprintf("%s:%d", enclaveHost, port), svc
 }
 
-// confidentialWorkflowsEngineOptions parameterizes the engine-path E2E for the
-// OCR and direct Vault GetSecrets topologies.
-type confidentialWorkflowsEngineOptions struct {
-	ctfConfigsPath         string
-	testConfigPath         string
-	expectDirectVaultReads bool
-	skipGatewayOutage      bool
-}
+// vaultDirectReadEnabledTOML turns on direct Vault GetSecrets reads for one
+// workflow. The read gate checks the execution timestamp, so execution
+// timestamps must be enabled too.
+const vaultDirectReadEnabledTOML = `[PerWorkflow]
+FeatureVaultGetSecretsDirectlyActivePeriod = '[2000-01-01 00:00:00 +0000 UTC,2100-01-01 00:00:00 +0000 UTC]'
+ExecutionTimestampsEnabled = 'true'`
 
-func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, buildLocalBinaries func() error, opts confidentialWorkflowsEngineOptions) {
+func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, buildLocalBinaries func() error) {
 	t.Helper()
 	if os.Getenv("REMOTE_ENCLAVE_URLS") != "" || tests.UseLegacyEnclaves() {
 		t.Skip("engine test does not run against remote/legacy enclaves")
@@ -468,7 +467,7 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// Engine test needs the multi-DON topology (workflow + capabilities) with the
 	// confidential-workflows capability registered. The http subtest runs first
 	// with workflow-don.toml; override for our scope only.
-	t.Setenv("CTF_CONFIGS", opts.ctfConfigsPath)
+	t.Setenv("CTF_CONFIGS", "configs/workflow-don-engine.toml")
 	// Register docker log dumping FIRST so it runs LAST (cleanups run in reverse
 	// order). Captures workflow-node container logs on failure, which is the
 	// only way to diagnose engine execution errors (GetSecret / http-actions /
@@ -542,7 +541,7 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	secretValues := []string{"s3cret-from-vault"}
 	testEnv := mustInitializeCapabilitySetup(
 		t,
-		opts.testConfigPath,
+		engineDONConfigFile,
 		configURLs,
 		allCaps,
 		buildLocalBinaries,
@@ -656,10 +655,6 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	//    engine-level log.
 	waitForWorkflowExecutionComplete(t, testEnv, testLogger, workflowID, 5*time.Minute)
 
-	if opts.expectDirectVaultReads {
-		requireVaultDirectSecretsRead(t, testEnv, "MOCK_SECRET", 5*time.Minute)
-	}
-
 	require.Equal(t, engineTestBinaryFilename, storageSvc.lastArtifactID(), "unexpected artifact requested from storage")
 	require.Positive(t, cwEngineTestServers.artifactHits.Load(), "enclave never downloaded the artifact URL returned by storage")
 
@@ -690,27 +685,35 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// response cache answers the repeat request without re-executing. The
 	// workflow must ultimately succeed: a second successful execution proves the
 	// triggers that fired during the outage were not lost.
-	if opts.skipGatewayOutage {
-		testLogger.Info().Msg("Gateway-outage phase skipped for this variant")
-	} else {
-		testLogger.Info().Msg("Gateway-outage phase: taking the healthy gateway proxy down for 60s")
-		gwProxy.TakeDown()
-		time.Sleep(60 * time.Second)
-		gwProxy.BringUp()
-		testLogger.Info().Msg("Gateway-outage phase: gateway proxy back up; waiting for a post-outage execution")
+	testLogger.Info().Msg("Gateway-outage phase: taking the healthy gateway proxy down for 60s")
+	gwProxy.TakeDown()
+	time.Sleep(60 * time.Second)
+	gwProxy.BringUp()
+	testLogger.Info().Msg("Gateway-outage phase: gateway proxy back up; waiting for a post-outage execution")
 
-		waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, 2, 5*time.Minute)
+	waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, time.Time{}, 2, 5*time.Minute)
 
-		// The outage must have been real: the enclave's gateway calls during the
-		// window have to have hit the proxy while it was rejecting. Zero downHits
-		// means the outage was never observed (e.g. no trigger fired in the window)
-		// and the resilience assertion above passed vacuously.
-		require.Positive(t, gwProxy.HitsWhileDown(), "no gateway request hit the simulated outage; the resilience phase did not exercise retries")
+	// The outage must have been real: the enclave's gateway calls during the
+	// window have to have hit the proxy while it was rejecting. Zero downHits
+	// means the outage was never observed (e.g. no trigger fired in the window)
+	// and the resilience assertion above passed vacuously.
+	require.Positive(t, gwProxy.HitsWhileDown(), "no gateway request hit the simulated outage; the resilience phase did not exercise retries")
 
-		testLogger.Info().Msg("Gateway-outage resilience validated")
-	}
+	testLogger.Info().Msg("Gateway-outage resilience validated")
 
-	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write validated")
+	// 9. Direct Vault reads: each relay node reads its own subset of shares from
+	// the Vault nodes, so relay nodes sign different share sets and the enclave
+	// has to combine them. Enable direct reads for this workflow, confirm a Vault
+	// node served one, then require further successful executions. Cleanup
+	// restores the original settings.
+	testLogger.Info().Msg("Direct-read phase: enabling direct Vault GetSecrets for the workflow")
+	systemtests.ApplyCRESettings(t, testEnv, systemtests.Workflow(strings.TrimPrefix(workflowID, "0x"), vaultDirectReadEnabledTOML))
+	requireVaultDirectSecretsRead(t, testEnv, "MOCK_SECRET", 5*time.Minute)
+	// Two more executions, so at least one started after direct reads were on.
+	waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, time.Now(), 2, 5*time.Minute)
+	testLogger.Info().Msg("Direct-read phase validated")
+
+	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write + gateway-outage resilience + direct Vault reads validated")
 }
 
 // engineTestFeedID / engineTestPrice are the feed the confidential workflow reports
@@ -824,7 +827,7 @@ func waitForWorkflowExecutionComplete(
 	timeout time.Duration,
 ) {
 	t.Helper()
-	waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, 1, timeout)
+	waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, time.Time{}, 1, timeout)
 }
 
 // waitForWorkflowExecutions waits until at least want distinct successful-execution
@@ -839,11 +842,15 @@ func waitForWorkflowExecutionComplete(
 // during an outage would be silently ignored as long as later triggers succeed),
 // so any "Workflow execution failed*" line carrying the workflowID fails the
 // test immediately.
+//
+// A non-zero since counts only lines logged after that time; otherwise the
+// last 10000 lines are scanned.
 func waitForWorkflowExecutions(
 	t *testing.T,
 	testEnv *ttypes.TestEnvironment,
 	testLogger zerolog.Logger,
 	workflowID string,
+	since time.Time,
 	want int,
 	timeout time.Duration,
 ) {
@@ -851,27 +858,12 @@ func waitForWorkflowExecutions(
 
 	containers := workflowDONContainerNames(testEnv)
 	require.NotEmpty(t, containers, "no workflow-DON containers found to scrape")
-	successMsg := []byte(`"msg":"Workflow execution finished successfully"`)
-	failureMsg := []byte(`"msg":"Workflow execution failed`)
-	needleID := []byte(workflowID)
 	testLogger.Info().Msgf("Waiting for %d successful-trigger log(s) for workflowID %s on %d container(s): %v", want, workflowID, len(containers), containers)
 
 	deadline := time.Now().Add(timeout)
 	for {
 		for _, name := range containers {
-			out, _ := exec.Command("docker", "logs", "--tail", "10000", name).CombinedOutput()
-			count := 0
-			for _, line := range bytes.Split(out, []byte{'\n'}) {
-				if !bytes.Contains(line, needleID) {
-					continue
-				}
-				if bytes.Contains(line, failureMsg) {
-					t.Fatalf("workflow execution failed for workflowID %s (container %s): %s", workflowID, name, line)
-				}
-				if bytes.Contains(line, successMsg) {
-					count++
-				}
-			}
+			count := countWorkflowExecutionSuccesses(t, name, workflowID, since)
 			if count >= want {
 				testLogger.Info().Msgf("Found %d successful-trigger log(s) in container %s for workflowID %s", count, name, workflowID)
 				return
@@ -883,6 +875,34 @@ func waitForWorkflowExecutions(
 		testLogger.Info().Msg("Successful-trigger log(s) not found yet, retrying in 5s...")
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// countWorkflowExecutionSuccesses counts the successful-execution log lines for
+// workflowID in one container, failing the test on any execution failure line.
+func countWorkflowExecutionSuccesses(t *testing.T, container, workflowID string, since time.Time) int {
+	t.Helper()
+	successMsg := []byte(`"msg":"Workflow execution finished successfully"`)
+	failureMsg := []byte(`"msg":"Workflow execution failed`)
+	needleID := []byte(workflowID)
+
+	args := []string{"logs", "--tail", "10000", container}
+	if !since.IsZero() {
+		args = []string{"logs", "--since", since.Format(time.RFC3339Nano), container}
+	}
+	out, _ := exec.Command("docker", args...).CombinedOutput()
+	count := 0
+	for _, line := range bytes.Split(out, []byte{'\n'}) {
+		if !bytes.Contains(line, needleID) {
+			continue
+		}
+		if bytes.Contains(line, failureMsg) {
+			t.Fatalf("workflow execution failed for workflowID %s (container %s): %s", workflowID, container, line)
+		}
+		if bytes.Contains(line, successMsg) {
+			count++
+		}
+	}
+	return count
 }
 
 // workflowDONContainerNames returns the chainlink container names for every
