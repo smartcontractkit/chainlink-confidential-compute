@@ -3,7 +3,6 @@ package util
 import (
 	"crypto/rand"
 	"fmt"
-	"sort"
 
 	"github.com/smartcontractkit/tdh2/go/tdh2/tdh2easy"
 	"golang.org/x/crypto/nacl/box"
@@ -59,7 +58,7 @@ func TDH2AggregateDecryptionShares(ciphertext tdh2easy.Ciphertext, shares [][]by
 	decShares := make([]*tdh2easy.DecryptionShare, 0, len(shares))
 	seenIndexes := make(map[int]struct{}, len(shares))
 	var invalidShares []invalidShare
-	duplicateShares := 0
+	duplicateShareCount := 0
 	for i, s := range shares {
 		var share tdh2easy.DecryptionShare
 		if err := share.Unmarshal(s); err != nil {
@@ -72,7 +71,7 @@ func TDH2AggregateDecryptionShares(ciphertext tdh2easy.Ciphertext, shares [][]by
 			continue
 		}
 		if _, dup := seenIndexes[share.Index()]; dup {
-			duplicateShares++
+			duplicateShareCount++
 			continue
 		}
 		seenIndexes[share.Index()] = struct{}{}
@@ -92,13 +91,8 @@ func TDH2AggregateDecryptionShares(ciphertext tdh2easy.Ciphertext, shares [][]by
 			errDetails = "none"
 		}
 		return nil, fmt.Errorf("not enough valid distinct shares to decrypt (%d/%d, %d duplicate); invalid shares: %s",
-			len(decShares), threshold, duplicateShares, errDetails)
+			len(decShares), threshold, duplicateShareCount, errDetails)
 	}
-
-	// Order by node index for a stable aggregation input.
-	sort.Slice(decShares, func(i, j int) bool {
-		return decShares[i].Index() < decShares[j].Index()
-	})
 
 	// Aggregate threshold of valid shares.
 	decrypted, err := tdh2easy.Aggregate(&ciphertext, decShares, len(decShares))
