@@ -23,7 +23,7 @@ import (
 	"time"
 
 	cllogger "github.com/smartcontractkit/chainlink-common/pkg/logger"
-	proxyserver "github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/host/proxy-server"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/host/proxy-server"
 	signatureverifier "github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/signature-verifier"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/vsock"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -49,11 +49,10 @@ var (
 	requireBFTQuorum = flag.Bool("require-bft-quorum", os.Getenv("REQUIRE_BFT_QUORUM") == "true", "require a 2f+1 BFT quorum instead of f+1. Reads REQUIRE_BFT_QUORUM.")
 
 	// settingsJSON is the runtime settings payload the host injects into the
-	// enclave over vsock, forwarded verbatim. It is opaque to the host: the
-	// enclave app owns the schema and validates it. Endpoints, tunables and the
-	// storage key all travel in here, since a measured EIF can't bake them in.
+	// enclave over vsock, forwarded verbatim. The host owns storage settings;
+	// the enclave app validates the remaining endpoints and tunables.
 	// Empty means nothing is injected. Reads ENCLAVE_SETTINGS (a JSON object).
-	settingsJSON = flag.String("settings", os.Getenv("ENCLAVE_SETTINGS"), "JSON settings object to inject into the enclave over vsock, forwarded verbatim. The enclave app owns the schema. Reads ENCLAVE_SETTINGS.")
+	settingsJSON = flag.String("settings", os.Getenv("ENCLAVE_SETTINGS"), "JSON settings object for host storage and enclave settings, forwarded verbatim over vsock. Reads ENCLAVE_SETTINGS.")
 
 	// readHeaderTimeout bounds how long a client may take to send request headers.
 	readHeaderTimeout = flag.Duration("read-header-timeout", 30*time.Second, "Max duration allowed to read request headers")
@@ -85,9 +84,7 @@ type hostServer struct {
 	verifier             signatureverifier.SignatureVerifier
 	logger               cllogger.SugaredLogger
 	metrics              executionMetrics
-	// binaries fetches workflow binaries for the enclave and caches them on a
-	// node-local volume. nil disables host-side fetching, leaving the enclave
-	// to fetch binaries itself.
+	// binaries is immutable after startup; storage changes require a restart.
 	binaries *binaryProvider
 }
 
@@ -315,6 +312,19 @@ func (h *hostServer) handleInjectSettings(w http.ResponseWriter, r *http.Request
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
+	settings, _, err := parseHostStorageSettings(string(body))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var current hostStorageSettings
+	if h.binaries != nil {
+		current = h.binaries.settings
+	}
+	if settings != current {
+		http.Error(w, "storage settings changes require a host restart", http.StatusConflict)
+		return
+	}
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, vsockPrefix+types.SettingsPath, bytes.NewReader(body))
 	if err != nil {
@@ -338,8 +348,7 @@ func (h *hostServer) handleInjectSettings(w http.ResponseWriter, r *http.Request
 // deliberately NOT exposed on the host's external HTTP ports, so the values only
 // ever travel host->enclave over vsock, never the network. A Nitro EIF is
 // measured, so environment endpoints (storage URL, gateway URL) can't be baked
-// in and are injected here at runtime. The host forwards the payload verbatim;
-// the enclave app owns the schema. Retries while the enclave is still booting.
+// in and are injected here at runtime. Retries while the enclave is still booting.
 func (h *hostServer) injectSettings(ctx context.Context, payload []byte) error {
 	const (
 		initialRetryDelay = 2 * time.Second
@@ -362,13 +371,13 @@ func (h *hostServer) injectSettings(ctx context.Context, payload []byte) error {
 			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
-				slog.Info("injected storage credentials into enclave")
+				slog.Info("injected settings into enclave")
 				return nil
 			}
-			err = fmt.Errorf("enclave rejected credentials: status %d: %s", resp.StatusCode, string(body))
+			err = fmt.Errorf("enclave rejected settings: status %d: %s", resp.StatusCode, string(body))
 		}
 
-		slog.Warn("credentials injection not yet accepted, retrying", "attempt", attempt, "retryIn", retryDelay, "error", err)
+		slog.Warn("settings injection not yet accepted, retrying", "attempt", attempt, "retryIn", retryDelay, "error", err)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -640,25 +649,19 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		h.processRequestMutex.Unlock()
 
 		if shouldProcess {
-			metadata, binary, err := h.publicDataPrehook(reqLog, execReq.AppID, execReq.PublicData)
-			if err != nil {
-				reqLog.Errorw("rejecting batch: prehook failed",
-					"event", "REJECT",
-					"reason", "prehook_failed",
-					"signers", signers,
-					"error", err)
-				h.completeBatch(requestHash, nil, err)
-				http.Error(w, fmt.Sprintf("error processing request: %v", err), http.StatusBadGateway)
-				return
-			}
-
 			quorumWait := time.Since(br.createdAt)
-			finishExecution := h.metrics.startExecution(metadata, quorumWait)
 			reqLog.Infow("quorum reached, dispatching to enclave",
 				"event", "QUORUM",
 				"signers", signers,
 				"signatureCount", len(requests))
 			go func() {
+				metadata, binary, err := h.publicDataPrehook(reqLog, execReq.AppID, execReq.PublicData)
+				finishExecution := h.metrics.startExecution(metadata, quorumWait)
+				if err != nil {
+					finishExecution(executionOutcomeError, executionFailureInternal)
+					h.completeBatch(requestHash, nil, err)
+					return
+				}
 				enclaveStart := time.Now()
 				resp, failureReason, err := h.processBatch(requests, binary)
 				enclaveDuration := time.Since(enclaveStart)
@@ -1023,6 +1026,16 @@ func main() {
 	host := NewHostServer(ctx, nil)
 	host.logger = lggr
 	host.metrics = metrics
+	binaries, err := newBinaryProvider(*settingsJSON, lggr)
+	if err != nil {
+		log.Fatalf("binary fetching misconfigured: %v", err)
+	}
+	host.binaries = binaries
+	defer func() {
+		if cerr := host.binaries.Close(); cerr != nil {
+			lggr.Warnw("closing binary provider", "error", cerr)
+		}
+	}()
 	if telemetryCfg.enabled() {
 		lggr.Infow("polling enclave memory", "interval", telemetryCfg.MemoryPollInterval.String())
 		go metrics.monitorEnclaveMemory(ctx, host.enclaveClient, lggr, telemetryCfg.MemoryPollInterval, enclaveMemoryPollTimeout)
@@ -1054,21 +1067,6 @@ func main() {
 		mainMux.HandleFunc("POST "+types.SettingsPath, host.handleInjectSettings)
 	}
 
-	// Fetch workflow binaries here rather than inside the enclave, caching them
-	// on a node-local volume so they survive a container restart and don't have
-	// to sit in the enclave's fixed memory. The enclave has no fetch path of its
-	// own, so a misconfiguration here fails startup rather than every execution.
-	binaries, err := newBinaryProvider(*settingsJSON, lggr)
-	if err != nil {
-		log.Fatalf("binary fetching misconfigured: %v", err)
-	}
-	host.binaries = binaries
-	defer func() {
-		if cerr := host.binaries.Close(); cerr != nil {
-			lggr.Warnw("closing binary provider", "error", cerr)
-		}
-	}()
-
 	mainMux.HandleFunc("PATCH "+types.SetConfigPath, host.handleUpdateConfig)
 	mainMux.HandleFunc(types.PublicKeyPath, host.handleGetPublicKeys)
 	mainMux.HandleFunc(types.ExecutePath, host.handleExecute)
@@ -1093,9 +1091,8 @@ func main() {
 
 	// Inject the runtime settings into the enclave over vsock: endpoints, tunables
 	// and the storage key, none of which can be baked into the measured EIF. The
-	// payload is opaque here and forwarded verbatim; the enclave app owns the
-	// schema and rejects an incomplete one. The host only checks it is a JSON
-	// object, so a malformed payload is caught before the round trip.
+	// full payload is forwarded verbatim; storage settings were validated above
+	// and the enclave app validates the remaining fields.
 	// TODO: re-inject on enclave restart.
 	if payload := []byte(*settingsJSON); len(payload) > 0 {
 		var obj map[string]json.RawMessage

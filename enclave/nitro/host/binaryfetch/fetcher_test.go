@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/stretchr/testify/assert"
@@ -17,7 +18,7 @@ import (
 // binary (the exact bytes binary_hash covers).
 var testBinary = []byte("fake-brotli-compressed-wasm-binary")
 
-// cacheKeyFor mirrors how the enclave keys entries: by binary hash.
+// cacheKeyFor mirrors how the host keys entries: by binary hash.
 func cacheKeyFor(hash []byte) string { return fmt.Sprintf("%x", hash) }
 
 func testBinaryHash() []byte {
@@ -28,14 +29,18 @@ func testBinaryHash() []byte {
 // stubRawFetcher stands in for the storage-service RawFetcher: it returns
 // pre-configured raw bytes per locator and counts calls.
 type stubRawFetcher struct {
-	mu    sync.Mutex
-	data  map[string][]byte
-	err   error
-	calls atomic.Int32
+	mu      sync.Mutex
+	data    map[string][]byte
+	err     error
+	calls   atomic.Int32
+	release <-chan struct{}
 }
 
 func (s *stubRawFetcher) FetchBinary(_ context.Context, locator string) ([]byte, error) {
 	s.calls.Add(1)
+	if s.release != nil {
+		<-s.release
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -54,7 +59,7 @@ func TestFetch_Success(t *testing.T) {
 	raw := &stubRawFetcher{data: map[string][]byte{"loc": testBinary}}
 	f := NewBinaryFetcher(logger.Test(t))
 
-	got, err := f.Fetch(context.Background(), cacheKeyFor(testBinaryHash()), "loc", testBinaryHash(), raw)
+	got, err := f.Fetch(context.Background(), "loc", testBinaryHash(), raw)
 	require.NoError(t, err)
 	assert.Equal(t, testBinary, got)
 }
@@ -63,11 +68,11 @@ func TestFetch_CacheHit(t *testing.T) {
 	raw := &stubRawFetcher{data: map[string][]byte{"loc": testBinary}}
 	f := NewBinaryFetcher(logger.Test(t))
 
-	_, err := f.Fetch(context.Background(), cacheKeyFor(testBinaryHash()), "loc", testBinaryHash(), raw)
+	_, err := f.Fetch(context.Background(), "loc", testBinaryHash(), raw)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), raw.calls.Load())
 
-	got, err := f.Fetch(context.Background(), cacheKeyFor(testBinaryHash()), "loc", testBinaryHash(), raw)
+	got, err := f.Fetch(context.Background(), "loc", testBinaryHash(), raw)
 	require.NoError(t, err)
 	assert.Equal(t, testBinary, got)
 	assert.Equal(t, int32(1), raw.calls.Load(), "expected cache hit, but fetcher was called again")
@@ -77,7 +82,7 @@ func TestFetch_HashMismatch(t *testing.T) {
 	raw := &stubRawFetcher{data: map[string][]byte{"loc": testBinary}}
 	f := NewBinaryFetcher(logger.Test(t))
 
-	_, err := f.Fetch(context.Background(), cacheKeyFor(make([]byte, 32)), "loc", make([]byte, 32), raw)
+	_, err := f.Fetch(context.Background(), "loc", make([]byte, 32), raw)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hash mismatch")
 }
@@ -86,7 +91,7 @@ func TestFetch_RawError(t *testing.T) {
 	raw := &stubRawFetcher{err: fmt.Errorf("storage down")}
 	f := NewBinaryFetcher(logger.Test(t))
 
-	_, err := f.Fetch(context.Background(), cacheKeyFor(testBinaryHash()), "loc", testBinaryHash(), raw)
+	_, err := f.Fetch(context.Background(), "loc", testBinaryHash(), raw)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "storage down")
 }
@@ -95,14 +100,14 @@ func TestFetch_EmptyHash_Rejected(t *testing.T) {
 	raw := &stubRawFetcher{data: map[string][]byte{"loc": testBinary}}
 	f := NewBinaryFetcher(logger.Test(t))
 
-	_, err := f.Fetch(context.Background(), "key", "loc", nil, raw)
+	_, err := f.Fetch(context.Background(), "loc", nil, raw)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "binary_hash is required")
+	assert.Contains(t, err.Error(), "binary_hash must be a 32-byte")
 }
 
 func TestFetch_NilRawFetcher_Rejected(t *testing.T) {
 	f := NewBinaryFetcher(logger.Test(t))
-	_, err := f.Fetch(context.Background(), cacheKeyFor(testBinaryHash()), "loc", testBinaryHash(), nil)
+	_, err := f.Fetch(context.Background(), "loc", testBinaryHash(), nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credentials not yet provisioned")
 }
@@ -128,7 +133,7 @@ func TestFetch_LRU_EvictsOldest(t *testing.T) {
 
 	fetch := func(i int) {
 		t.Helper()
-		got, err := f.Fetch(context.Background(), cacheKeyFor(hashes[i]), fmt.Sprintf("loc-%d", i), hashes[i], raw)
+		got, err := f.Fetch(context.Background(), fmt.Sprintf("loc-%d", i), hashes[i], raw)
 		require.NoError(t, err)
 		assert.Equal(t, binaries[i], got)
 	}
@@ -154,7 +159,7 @@ func TestFetch_LRU_AccessRefreshesEntry(t *testing.T) {
 
 	fetch := func(i int) {
 		t.Helper()
-		got, err := f.Fetch(context.Background(), cacheKeyFor(hashes[i]), fmt.Sprintf("loc-%d", i), hashes[i], raw)
+		got, err := f.Fetch(context.Background(), fmt.Sprintf("loc-%d", i), hashes[i], raw)
 		require.NoError(t, err)
 		assert.Equal(t, binaries[i], got)
 	}
@@ -176,7 +181,9 @@ func TestFetch_LRU_AccessRefreshesEntry(t *testing.T) {
 // unavailable -- otherwise every execution re-downloads and the workflow breaks
 // outright the moment storage goes away.
 func TestFetch_CorruptedEntryIsReplaced(t *testing.T) {
-	store := NewMemoryStore()
+	dir := t.TempDir()
+	store, err := NewDiskStore(dir)
+	require.NoError(t, err)
 	f := NewBinaryFetcherWithStore(logger.Test(t), store, 1<<20)
 	key := cacheKeyFor(testBinaryHash())
 
@@ -186,7 +193,7 @@ func TestFetch_CorruptedEntryIsReplaced(t *testing.T) {
 	require.Equal(t, len("corrupted-bytes"), f.cache.Bytes())
 
 	raw := &stubRawFetcher{data: map[string][]byte{"loc": testBinary}}
-	got, err := f.Fetch(context.Background(), key, "loc", testBinaryHash(), raw)
+	got, err := f.Fetch(context.Background(), "loc", testBinaryHash(), raw)
 	require.NoError(t, err)
 	assert.Equal(t, testBinary, got)
 	assert.Equal(t, int32(1), raw.calls.Load())
@@ -199,10 +206,36 @@ func TestFetch_CorruptedEntryIsReplaced(t *testing.T) {
 
 	// With storage now unavailable the execution still succeeds from cache.
 	dead := &stubRawFetcher{err: fmt.Errorf("storage unavailable")}
-	got, err = f.Fetch(context.Background(), key, "loc", testBinaryHash(), dead)
+	store, err = NewDiskStore(dir)
+	require.NoError(t, err)
+	f = NewBinaryFetcherWithStore(logger.Test(t), store, 1<<20)
+	got, err = f.Fetch(context.Background(), "loc", testBinaryHash(), dead)
 	require.NoError(t, err, "a repaired cache must serve the binary without storage")
 	assert.Equal(t, testBinary, got)
 	assert.Zero(t, dead.calls.Load(), "storage must not be consulted on a healthy cache hit")
+}
+
+func TestFetch_ConcurrentHashes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		raw := &stubRawFetcher{data: map[string][]byte{"loc": testBinary}, release: release}
+		f := NewBinaryFetcher(logger.Test(t))
+		var wg sync.WaitGroup
+		for i, hash := range [][]byte{testBinaryHash(), make([]byte, sha256.Size)} {
+			wg.Go(func() {
+				got, err := f.Fetch(t.Context(), "loc", hash, raw)
+				if i == 0 {
+					assert.NoError(t, err)
+					assert.Equal(t, testBinary, got)
+				} else {
+					assert.ErrorContains(t, err, "hash mismatch", "each caller's hash must be checked")
+				}
+			})
+			synctest.Wait()
+		}
+		close(release)
+		wg.Wait()
+	})
 }
 
 // If the refetch itself fails, the bad entry is still gone: better to fail
@@ -214,7 +247,7 @@ func TestFetch_CorruptedEntryDroppedWhenRefetchFails(t *testing.T) {
 	f.cache.Put(key, []byte("corrupted-bytes"))
 
 	dead := &stubRawFetcher{err: fmt.Errorf("storage unavailable")}
-	_, err := f.Fetch(context.Background(), key, "loc", testBinaryHash(), dead)
+	_, err := f.Fetch(context.Background(), "loc", testBinaryHash(), dead)
 	require.Error(t, err)
 
 	_, ok := store.Get(key)

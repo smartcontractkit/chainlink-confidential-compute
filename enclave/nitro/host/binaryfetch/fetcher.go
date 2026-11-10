@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
@@ -23,8 +24,7 @@ type BinaryFetcher struct {
 	group singleflight.Group
 }
 
-// NewBinaryFetcher returns a fetcher caching in memory, for use inside the
-// enclave where binaries must never touch disk.
+// NewBinaryFetcher returns a fetcher caching in memory, for tests.
 func NewBinaryFetcher(lggr logger.Logger) *BinaryFetcher {
 	return NewBinaryFetcherWithStore(lggr, NewMemoryStore(), types.DefaultMaxBinaryCacheBytes)
 }
@@ -40,40 +40,26 @@ func NewBinaryFetcherWithStore(lggr logger.Logger, store Store, maxCacheBytes in
 
 // Fetch returns the workflow binary for locator, verified against binaryHash. On
 // a cache miss it fetches the raw bytes via raw (the storage fetcher), verifies
-// the SHA-256, and caches under cacheKey. The bytes returned by raw are the
+// the SHA-256, and caches under that hash. The bytes returned by raw are the
 // exact bytes binaryHash covers (no transport encoding).
 //
-// cacheKey selects what the entry is keyed by: the enclave keys by binary hash,
-// the host by workflow ID. Verification against binaryHash is unconditional
-// either way, so a poisoned cache fails closed rather than executing.
-func (f *BinaryFetcher) Fetch(ctx context.Context, cacheKey, locator string, binaryHash []byte, raw RawFetcher) ([]byte, error) {
-	if cacheKey == "" {
-		return nil, fmt.Errorf("cache key is required")
-	}
-	if len(binaryHash) == 0 {
-		return nil, fmt.Errorf("binary_hash is required for integrity verification")
+// Verification also covers persisted entries, which may have been corrupted.
+func (f *BinaryFetcher) Fetch(ctx context.Context, locator string, binaryHash []byte, raw RawFetcher) ([]byte, error) {
+	if len(binaryHash) != sha256.Size {
+		return nil, fmt.Errorf("binary_hash must be a %d-byte SHA-256 hash", sha256.Size)
 	}
 	if raw == nil {
 		return nil, fmt.Errorf("storage credentials not yet provisioned")
 	}
 
-	if cached, ok := f.cache.Get(cacheKey); ok {
-		// A cache entry keyed by something other than the hash (the host's
-		// workflow ID) is only valid if it still matches the hash the request
-		// carries, so verify on the hit path too.
-		if err := Verify(cached, binaryHash); err != nil {
-			// Drop the bad entry so the refetch below can replace it. Put is a
-			// no-op for a key that already exists, so without this the stale
-			// bytes would survive and every execution would re-download them --
-			// and start failing outright once storage is unavailable.
-			f.logger.Warnf("cached binary %q failed verification, invalidating and re-fetching: %v", cacheKey, err)
-			f.cache.Delete(cacheKey)
-		} else {
-			return cached, nil
-		}
-	}
-
+	cacheKey := hex.EncodeToString(binaryHash)
 	binary, err, _ := f.group.Do(cacheKey, func() (any, error) {
+		if cached, ok := f.cache.Get(cacheKey); ok {
+			if err := Verify(cached, binaryHash); err == nil {
+				return cached, nil
+			}
+			f.cache.Delete(cacheKey)
+		}
 		binary, err := raw.FetchBinary(ctx, locator)
 		if err != nil {
 			return nil, fmt.Errorf("fetching binary: %w", err)
@@ -91,16 +77,8 @@ func (f *BinaryFetcher) Fetch(ctx context.Context, cacheKey, locator string, bin
 	return binary.([]byte), nil
 }
 
-// SetMaxCacheBytes updates the cache size bound, evicting least-recently-used
-// entries if the new bound is smaller than the current usage. A non-positive
-// value is ignored.
-func (f *BinaryFetcher) SetMaxCacheBytes(maxCacheBytes int) {
-	f.cache.SetMaxCacheBytes(maxCacheBytes)
-}
-
-// Verify checks binary against its expected SHA-256. This is the only thing
-// standing between untrusted bytes and execution in the TEE, so it is applied
-// to every binary regardless of where it came from.
+// Verify checks binary against its expected SHA-256. The enclave independently
+// repeats this check before execution; host verification is not trusted.
 func Verify(binary, binaryHash []byte) error {
 	actual := sha256.Sum256(binary)
 	if !bytes.Equal(actual[:], binaryHash) {
