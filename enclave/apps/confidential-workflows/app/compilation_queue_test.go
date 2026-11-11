@@ -72,7 +72,7 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 	require.NoError(t, w.Close())
 	binary := compressed.Bytes()
 	hash := sha256.Sum256(binary)
-	budget, err := memlimit.ForMemory(2248) // Two executions sharing one compile slot.
+	budget, err := memlimit.ForMemory(1792) // Two executions sharing one compile slot.
 	require.NoError(t, err)
 	require.Equal(t, int64(2), budget.MaxConcurrentExecutions)
 	require.Equal(t, int64(1), budget.MaxConcurrentCompilations)

@@ -22,11 +22,13 @@ const (
 	// 128 MiB is a provisional margin, not a measured bound.
 	SafetyMB uint64 = 128
 
-	// PerExecMB estimates 128 MiB linear memory + 128 MiB module/native overhead
-	// + 100 MiB binary/download buffers (5 x the 20 MiB binary limit).
-	// Host defaults for linear memory and compressed binary size:
+	// PerExecMB is a best-effort allowance based on the host's linear-memory default:
 	// https://github.com/smartcontractkit/chainlink-common/blob/f9f63cb65fce/pkg/workflows/wasm/host/module.go#L43-L45
-	PerExecMB uint64 = 356
+	// Native/runtime and download overhead are not fully accounted for.
+	// Wasmtime's resource limiter only covers instance allocations:
+	// https://github.com/bytecodealliance/wasmtime/blob/ebe5e8df1f4e12c5fc2f5954926881d8d61367d8/crates/wasmtime/src/runtime/limits.rs#L21-L25
+	// TODO: Recalibrate execution and compiler allowances with representative x86 workloads.
+	PerExecMB uint64 = 128
 
 	// Additional compiler/decompression allowance, retained even when the pool
 	// is idle. Based on local x86 fixture screening; recheck after Wasmtime changes.

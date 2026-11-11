@@ -257,9 +257,9 @@ func TestWorkflowCapacityBounds(t *testing.T) {
 		total    uint64
 		min, max int
 	}{
-		{1892, 1, 1}, {1992, 1, 1}, {2048, 1, 1},
-		{2248, 1, 2}, {2632, 2, 3}, {3000, 3, 3},
-		{7072, 8, 9}, {9990, 16, 16},
+		{1664, 1, 1}, {1992, 3, 3}, {2048, 3, 4},
+		{1792, 1, 2}, {2176, 2, 4}, {3000, 5, 5},
+		{5248, 8, 10}, {9990, 45, 45},
 	} {
 		t.Run(fmt.Sprint(tc.total), func(t *testing.T) {
 			minCapacity, maxCapacity, err := workflowCapacityBounds(tc.total)
@@ -268,7 +268,7 @@ func TestWorkflowCapacityBounds(t *testing.T) {
 			require.Equal(t, tc.max, maxCapacity)
 		})
 	}
-	for _, total := range []uint64{0, 512, 1024, 1891} {
+	for _, total := range []uint64{0, 512, 1024, 1663} {
 		_, _, err := workflowCapacityBounds(total)
 		require.Error(t, err)
 	}
