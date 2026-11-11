@@ -172,7 +172,7 @@ confidential-compute/
 |------------|------|------------------|
 | `workflow_compilation_queue_wait` | 63-65 | `duration_seconds` |
 | `workflow_compilation` | 74-77 | `success`, `duration_seconds` |
-| `workflow_guest_execution` | 96-100 | `success` (false only when the runtime fails, e.g. a timeout; a workflow error result still counts as success), `outcome` (`success`, `workflow_error` when the workflow returned an error, `error` when the runtime failed), `duration_seconds` |
+| `workflow_guest_execution` | 101-105 | `success` (false only when the runtime fails, e.g. a timeout; a workflow error result still counts as success), `outcome` (`success`, `workflow_error` when the workflow returned an error, `error` when the runtime failed), `duration_seconds` |
 
 ---
 

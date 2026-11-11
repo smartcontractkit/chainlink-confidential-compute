@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -36,7 +37,10 @@ import (
 //
 // emitter receives the compilation queue wait, compilation, and guest execution
 // durations.
-func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter, compileSlot *semaphore.Weighted, binary []byte, execReq *sdkpb.ExecuteRequest, isCompressed bool, helper host.ExecutionHelper, timeout time.Duration) (*sdkpb.ExecutionResult, error) {
+//
+// wasmLimits carries the CRE WASM limits the workflow DON sent; see
+// applyWASMLimits.
+func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter, compileSlot *semaphore.Weighted, binary []byte, execReq *sdkpb.ExecuteRequest, isCompressed bool, helper host.ExecutionHelper, timeout time.Duration, wasmLimits *confworkflowtypes.WASMLimits) (*sdkpb.ExecutionResult, error) {
 	modCfg := &host.ModuleConfig{
 		Logger:         lggr,
 		IsUncompressed: !isCompressed,
@@ -44,6 +48,7 @@ func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter,
 	if timeout > 0 {
 		modCfg.Timeout = &timeout
 	}
+	defer applyWASMLimits(modCfg, wasmLimits, execReq)()
 
 	execCtx, cancel := ctx, func() {}
 	defer func() { cancel() }() // cancel is replaced once the timeout starts

@@ -53,7 +53,7 @@ func TestExecuteWasm_Hello(t *testing.T) {
 	}
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
 	metrics := &recordingEmitter{}
-	result, err := executeWasm(ctx, logger.Test(t), metrics, semaphore.NewWeighted(1), binary, execReq, false, &enclaveExecutionHelper{}, 0)
+	result, err := executeWasm(ctx, logger.Test(t), metrics, semaphore.NewWeighted(1), binary, execReq, false, &enclaveExecutionHelper{}, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
@@ -88,7 +88,7 @@ func TestExecuteWasm_WorkflowErrorOutcome(t *testing.T) {
 	metrics := &recordingEmitter{}
 	// No HTTP fetcher is configured, so the workflow's only HTTP call fails and
 	// the workflow returns that error.
-	result, err := executeWasm(ctx, logger.Test(t), metrics, semaphore.NewWeighted(1), binary, execReq, false, &enclaveExecutionHelper{}, 0)
+	result, err := executeWasm(ctx, logger.Test(t), metrics, semaphore.NewWeighted(1), binary, execReq, false, &enclaveExecutionHelper{}, 0, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, result.GetError())
 
@@ -146,7 +146,7 @@ func TestExecuteWasm_Timeout(t *testing.T) {
 	start := time.Now()
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
 	metrics := &recordingEmitter{}
-	result, err := executeWasm(ctx, logger.Test(t), metrics, semaphore.NewWeighted(1), binary, execReq, false, &enclaveExecutionHelper{}, time.Second)
+	result, err := executeWasm(ctx, logger.Test(t), metrics, semaphore.NewWeighted(1), binary, execReq, false, &enclaveExecutionHelper{}, time.Second, nil)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.ErrorContains(t, err, "executing wasm", "the guest must start before the deadline")
 	require.Nil(t, result)
@@ -186,7 +186,7 @@ func TestExecuteWasm_CompilationQueue(t *testing.T) {
 	done := make(chan error, 1)
 	const budget = 30 * time.Second
 	go func() {
-		_, err := executeWasm(ctx, logger.Test(t), emitter.NewNoOpEmitter(), slot, binary, req, false, helper, budget)
+		_, err := executeWasm(ctx, logger.Test(t), emitter.NewNoOpEmitter(), slot, binary, req, false, helper, budget, nil)
 		done <- err
 	}()
 	select {
@@ -217,7 +217,7 @@ func TestExecuteWasm_CompilationQueue(t *testing.T) {
 func TestExecuteWasm_CompilationFailureReleasesQueue(t *testing.T) {
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
 	slot := semaphore.NewWeighted(1)
-	result, err := executeWasm(ctx, logger.Test(t), emitter.NewNoOpEmitter(), slot, []byte("invalid wasm"), nil, false, nil, 0)
+	result, err := executeWasm(ctx, logger.Test(t), emitter.NewNoOpEmitter(), slot, []byte("invalid wasm"), nil, false, nil, 0, nil)
 	require.ErrorContains(t, err, "creating wasm module")
 	require.Nil(t, result)
 	require.True(t, slot.TryAcquire(1), "failed compilation must release the slot")
@@ -243,7 +243,7 @@ func TestExecuteWasm_CompilationDeadline(t *testing.T) {
 			slot := semaphore.NewWeighted(1)
 			lggr, logs := logger.TestObserved(t, zapcore.InfoLevel)
 			metrics := &recordingEmitter{}
-			result, err := executeWasm(ctx, lggr, metrics, slot, test.binary, req, false, &enclaveExecutionHelper{}, time.Nanosecond)
+			result, err := executeWasm(ctx, lggr, metrics, slot, test.binary, req, false, &enclaveExecutionHelper{}, time.Nanosecond, nil)
 			require.ErrorIs(t, err, context.DeadlineExceeded)
 			require.ErrorContains(t, err, "creating wasm module", "expired compilation must not start the guest")
 			require.Nil(t, result)

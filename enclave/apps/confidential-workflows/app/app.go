@@ -439,7 +439,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		Workflow: execution.WorkflowId,
 	})
 	execTimeout := time.Duration(a.executionTimeout.Load())
-	result, err := executeWasm(execCtx, a.logger, emitter, a.compileSlots.Load(), binary, execution.SdkExecuteRequest, true, helper, execTimeout)
+	result, err := executeWasm(execCtx, a.logger, emitter, a.compileSlots.Load(), binary, execution.SdkExecuteRequest, true, helper, execTimeout, execution.GetLimits().GetWasm())
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to
