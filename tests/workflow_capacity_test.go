@@ -47,7 +47,7 @@ func TestConfidentialWorkflowsCapacityE2E(t *testing.T) {
 	hash := sha256.Sum256(binary)
 
 	// Holding downloads keeps admitted slots occupied independently of CPU speed.
-	// Releasing them together exercises the compilation queue and concurrent guests.
+	// Releasing admitted downloads also exercises compilation and execution.
 	entered := make(chan struct{}, 64)
 	release := make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(release) })
@@ -103,7 +103,8 @@ func TestConfidentialWorkflowsCapacityE2E(t *testing.T) {
 	var memory types.MemoryEstimateResponse
 	require.NoError(t, json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&memory))
 	require.Positive(t, memory.TotalMB, "guest memory must be observable")
-	minCapacity, maxCapacity := workflowCapacityBounds(memory.TotalMB)
+	minCapacity, maxCapacity, err := workflowCapacityBounds(memory.TotalMB)
+	require.NoError(t, err)
 	burst := 2 * maxCapacity
 	require.LessOrEqual(t, burst, cap(entered), "unexpected capacity for the test enclave")
 	t.Logf("guest RAM=%d MiB; reserve=%d MiB; per execution=%d MiB; capacity=%d..%d; burst=%d distinct workflows",
@@ -236,29 +237,39 @@ func buildCapacityWorkflow(t *testing.T, root string) []byte {
 	return compressed.Bytes()
 }
 
-// /memory rounds MiB whereas memlimit truncates; only a boundary can differ by one slot.
-func workflowCapacityBounds(totalMB uint64) (int, int) {
-	capacity := func(total uint64) int {
-		if total <= memlimit.ReserveMB || memlimit.PerExecMB == 0 {
-			return 1
-		}
-		return max(1, int((total-memlimit.ReserveMB)/memlimit.PerExecMB))
+// /memory rounds MiB whereas memlimit truncates. At compile-pool transitions,
+// execution capacity can decrease as memory increases.
+func workflowCapacityBounds(totalMB uint64) (int, int, error) {
+	rounded, err := memlimit.ForMemory(totalMB)
+	if err != nil {
+		return 0, 0, err
 	}
-	if totalMB == 0 {
-		return 1, 1
+	capacity := int(rounded.MaxConcurrentExecutions)
+	lower, err := memlimit.ForMemory(totalMB - 1)
+	if err != nil {
+		return capacity, capacity, nil
 	}
-	return capacity(totalMB - 1), capacity(totalMB)
+	return min(capacity, int(lower.MaxConcurrentExecutions)), max(capacity, int(lower.MaxConcurrentExecutions)), nil
 }
 
 func TestWorkflowCapacityBounds(t *testing.T) {
 	for _, tc := range []struct {
 		total    uint64
 		min, max int
-	}{{0, 1, 1}, {512, 1, 1}, {1024, 1, 1}, {1152, 1, 1}, {1950, 7, 7}, {2024, 7, 7}, {2048, 7, 8}, {2049, 8, 8}} {
+	}{
+		{1664, 1, 1}, {1992, 3, 3}, {2048, 3, 4},
+		{1792, 1, 2}, {2176, 2, 4}, {3000, 5, 5},
+		{5248, 8, 10}, {9990, 45, 45},
+	} {
 		t.Run(fmt.Sprint(tc.total), func(t *testing.T) {
-			minCapacity, maxCapacity := workflowCapacityBounds(tc.total)
+			minCapacity, maxCapacity, err := workflowCapacityBounds(tc.total)
+			require.NoError(t, err)
 			require.Equal(t, tc.min, minCapacity)
 			require.Equal(t, tc.max, maxCapacity)
 		})
+	}
+	for _, total := range []uint64{0, 512, 1024, 1663} {
+		_, _, err := workflowCapacityBounds(total)
+		require.Error(t, err)
 	}
 }

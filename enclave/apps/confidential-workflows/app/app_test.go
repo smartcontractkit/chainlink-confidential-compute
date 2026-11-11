@@ -3,12 +3,15 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/semaphore"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/protobuf/proto"
 
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
@@ -65,6 +69,7 @@ func TestNewConfidentialWorkflowsAppRequiresProductionTransports(t *testing.T) {
 		"HTTP fetcher":              func(c *Config) { c.HTTPFetcher = nil },
 		"storage fetcher factory":   func(c *Config) { c.StorageFetcherFactory = nil },
 		"remote dispatcher factory": func(c *Config) { c.RemoteDispatcherFactory = nil },
+		"negative compile capacity": func(c *Config) { c.CompileCapacity = -1 },
 	}
 	for name, remove := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -549,16 +554,28 @@ func TestInjectSettings_Timeouts(t *testing.T) {
 	})
 }
 
-// The compile gate follows MaxConcurrentCompilations: omitted keeps the
-// default width, a positive value replaces the gate, and a negative payload is
-// rejected before any of it is applied.
+// Only the first successful injection may replace the bootstrap compile gate.
 func TestInjectSettings_MaxConcurrentCompilations(t *testing.T) {
-	newApp := func() *confidentialWorkflowsApp {
-		return NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t),
-			WithRemoteDispatcherFactory(func(GatewayConfig) (RemoteDispatcher, error) {
-				return &testRemoteDispatcher{}, nil
+	newApp := func(t *testing.T, capacity int64) *confidentialWorkflowsApp {
+		t.Helper()
+		app, err := NewConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), Config{
+			CompileCapacity: capacity,
+			HTTPFetcher:     httpfetch.NewFetcher(httpfetch.DefaultPolicy()),
+			StorageFetcherFactory: storageFetcherFactory(func() types.HTTPClient {
+				return util.NewRestrictedHTTPClient()
 			}),
-		).(*confidentialWorkflowsApp)
+			RemoteDispatcherFactory: func(GatewayConfig) (RemoteDispatcher, error) {
+				return &testRemoteDispatcher{}, nil
+			},
+		})
+		require.NoError(t, err)
+		a := app.(*confidentialWorkflowsApp)
+		t.Cleanup(func() {
+			if a.storageFetcher != nil {
+				require.NoError(t, a.storageFetcher.Close())
+			}
+		})
+		return a
 	}
 	inject := func(t *testing.T, a *confidentialWorkflowsApp, mutate func(*WorkflowSettings)) error {
 		t.Helper()
@@ -582,28 +599,221 @@ func TestInjectSettings_MaxConcurrentCompilations(t *testing.T) {
 	}
 
 	t.Run("default gate", func(t *testing.T) {
-		a := newApp()
-		assert.Equal(t, int64(defaultMaxConcurrentCompilations), gateCapacity(t, a.compileSlots.Load()))
+		for _, capacity := range []int64{0, 8} {
+			a := newApp(t, capacity)
+			assert.Equal(t, int64(defaultMaxConcurrentCompilations), gateCapacity(t, a.compileSlots.Load()))
+			require.NoError(t, inject(t, a, func(*WorkflowSettings) {}))
+			assert.Equal(t, int64(defaultMaxConcurrentCompilations), gateCapacity(t, a.compileSlots.Load()))
+		}
 	})
 
 	t.Run("injected value replaces the gate", func(t *testing.T) {
-		a := newApp()
-		require.NoError(t, inject(t, a, func(s *WorkflowSettings) { s.MaxConcurrentCompilations = 9 }))
-		assert.Equal(t, int64(9), gateCapacity(t, a.compileSlots.Load()))
+		for _, tc := range []struct{ capacity, requested, want int64 }{{0, 9, 9}, {2, 9, 2}, {8, 2, 2}} {
+			a := newApp(t, tc.capacity)
+			require.NoError(t, inject(t, a, func(s *WorkflowSettings) { s.MaxConcurrentCompilations = tc.requested }))
+			assert.Equal(t, tc.want, gateCapacity(t, a.compileSlots.Load()))
+		}
 	})
 
 	t.Run("omitted keeps the existing gate", func(t *testing.T) {
-		a := newApp()
+		a := newApp(t, 0)
 		require.NoError(t, inject(t, a, func(s *WorkflowSettings) { s.MaxConcurrentCompilations = 2 }))
+		gate := a.compileSlots.Load()
 		require.NoError(t, inject(t, a, func(*WorkflowSettings) {}))
+		require.Same(t, gate, a.compileSlots.Load())
 		assert.Equal(t, int64(2), gateCapacity(t, a.compileSlots.Load()))
 	})
 
 	t.Run("negative rejected", func(t *testing.T) {
-		a := newApp()
+		a := newApp(t, 0)
 		err := inject(t, a, func(s *WorkflowSettings) { s.MaxConcurrentCompilations = -1 })
 		require.ErrorContains(t, err, "maxConcurrentCompilations")
 		assert.Equal(t, int64(defaultMaxConcurrentCompilations), gateCapacity(t, a.compileSlots.Load()))
+	})
+
+	t.Run("startup capacity bounds bootstrap default and requested concurrency", func(t *testing.T) {
+		a := newApp(t, 2)
+		require.Equal(t, int64(2), gateCapacity(t, a.compileSlots.Load()))
+		require.NoError(t, inject(t, a, func(*WorkflowSettings) {}))
+		gate := a.compileSlots.Load()
+		require.True(t, gate.TryAcquire(2))
+		defer gate.Release(2)
+		for _, concurrency := range []int64{8, 2, 0} {
+			require.NoError(t, inject(t, a, func(s *WorkflowSettings) { s.MaxConcurrentCompilations = concurrency }))
+			require.Same(t, gate, a.compileSlots.Load())
+			require.False(t, a.compileSlots.Load().TryAcquire(1))
+		}
+		old := a.storageFetcher
+		err := inject(t, a, func(s *WorkflowSettings) {
+			s.MaxConcurrentCompilations = 1
+			s.MaxCacheBytes = 1
+			s.ExecutionTimeout = Duration(time.Second)
+		})
+		require.ErrorContains(t, err, "restart the enclave")
+		require.Same(t, gate, a.compileSlots.Load())
+		require.Same(t, old, a.storageFetcher)
+		require.Equal(t, types.DefaultMaxBinaryCacheBytes, a.fetcher.maxCacheBytes)
+		require.Zero(t, a.executionTimeout.Load())
+	})
+
+	t.Run("increasing configured concurrency requires restart too", func(t *testing.T) {
+		a := newApp(t, 8)
+		require.NoError(t, inject(t, a, func(s *WorkflowSettings) { s.MaxConcurrentCompilations = 2 }))
+		gate, old := a.compileSlots.Load(), a.storageFetcher
+		a.storageFactory = func(string, bool, string, int64, time.Duration, logger.Logger) (RawFetcher, ed25519.PublicKey, error) {
+			t.Fatal("rejected concurrency change must not build a storage fetcher")
+			return nil, nil, nil
+		}
+		for _, concurrency := range []int64{3, 9} {
+			err := inject(t, a, func(s *WorkflowSettings) { s.MaxConcurrentCompilations = concurrency })
+			require.ErrorContains(t, err, "restart the enclave")
+			require.Same(t, gate, a.compileSlots.Load())
+			require.Same(t, old, a.storageFetcher)
+		}
+	})
+
+	t.Run("binary settings remain adjustable within budget", func(t *testing.T) {
+		a := newApp(t, 2)
+		for _, limit := range []int64{1 << 40, 1 << 20, 2 << 20, 0} {
+			require.NoError(t, inject(t, a, func(s *WorkflowSettings) {
+				s.MaxCacheBytes, s.MaxBinarySize = limit, limit
+			}))
+			if limit == 0 {
+				require.Equal(t, 2<<20, a.fetcher.maxCacheBytes)
+				require.EqualValues(t, types.DefaultMaxBinarySize, a.storageFetcher.(*StorageFetcher).maxBytes)
+			} else {
+				require.EqualValues(t, min(limit, types.DefaultMaxBinaryCacheBytes), a.fetcher.maxCacheBytes)
+				require.Equal(t, min(limit, types.DefaultMaxBinarySize), a.storageFetcher.(*StorageFetcher).maxBytes)
+			}
+		}
+	})
+
+	t.Run("no startup budget preserves uncapped binary settings", func(t *testing.T) {
+		a := newApp(t, 0)
+		require.NoError(t, inject(t, a, func(s *WorkflowSettings) {
+			s.MaxCacheBytes, s.MaxBinarySize = 1<<30, 1<<30
+		}))
+		require.Equal(t, 1<<30, a.fetcher.maxCacheBytes)
+		require.EqualValues(t, 1<<30, a.storageFetcher.(*StorageFetcher).maxBytes)
+	})
+
+	for _, failure := range []string{"storage", "dispatcher"} {
+		t.Run(failure+" failure does not freeze or apply settings", func(t *testing.T) {
+			a := newApp(t, 2)
+			gate := a.compileSlots.Load()
+			storage, dispatcher := a.storageFactory, a.dispatcherFactory
+			var candidate *StorageFetcher
+			if failure == "storage" {
+				a.storageFactory = func(string, bool, string, int64, time.Duration, logger.Logger) (RawFetcher, ed25519.PublicKey, error) {
+					return nil, nil, errors.New("storage failure")
+				}
+			} else {
+				a.storageFactory = func(url string, tls bool, key string, maxBytes int64, timeout time.Duration, lggr logger.Logger) (RawFetcher, ed25519.PublicKey, error) {
+					f, pub, err := storage(url, tls, key, maxBytes, timeout, lggr)
+					require.NoError(t, err)
+					candidate = f.(*StorageFetcher)
+					t.Cleanup(func() { _ = candidate.Close() })
+					return f, pub, nil
+				}
+				a.dispatcherFactory = func(GatewayConfig) (RemoteDispatcher, error) {
+					return nil, errors.New("dispatcher failure")
+				}
+			}
+			configure := func(s *WorkflowSettings) {
+				s.MaxConcurrentCompilations = 1
+				s.MaxCacheBytes = 1
+				s.ExecutionTimeout = Duration(time.Second)
+				s.WorkflowGracePeriod = Duration(-time.Second)
+			}
+			require.ErrorContains(t, inject(t, a, configure), failure+" failure")
+			require.Same(t, gate, a.compileSlots.Load())
+			require.Zero(t, a.compileConcurrency)
+			require.Nil(t, a.storageFetcher)
+			require.Nil(t, a.dispatcher)
+			require.Zero(t, a.executionTimeout.Load())
+			require.Equal(t, types.DefaultMaxBinaryCacheBytes, a.fetcher.maxCacheBytes)
+			require.Equal(t, int64(types.DefaultWorkflowGracePeriod), a.gracePeriod.Load())
+			if candidate != nil {
+				require.Equal(t, connectivity.Shutdown, candidate.conn.GetState(), "unused fetcher must be closed")
+			}
+			a.storageFactory, a.dispatcherFactory = storage, dispatcher
+			require.NoError(t, inject(t, a, configure))
+			require.Equal(t, int64(1), gateCapacity(t, a.compileSlots.Load()))
+		})
+	}
+
+	t.Run("failed credential rotation preserves active settings", func(t *testing.T) {
+		a := newApp(t, 2)
+		require.NoError(t, inject(t, a, func(s *WorkflowSettings) {
+			s.MaxConcurrentCompilations = 1
+			s.MaxCacheBytes = 2 << 20
+			s.ExecutionTimeout = Duration(3 * time.Second)
+			s.WorkflowGracePeriod = Duration(-time.Second)
+		}))
+		gate, old, dispatcher := a.compileSlots.Load(), a.storageFetcher.(*StorageFetcher), a.dispatcher
+		rotate := func(s *WorkflowSettings) {
+			s.StorageKey = "invalid-key"
+			s.MaxCacheBytes = 1 << 20
+			s.ExecutionTimeout = Duration(time.Second)
+			s.WorkflowGracePeriod = Duration(time.Second)
+		}
+		require.ErrorContains(t, inject(t, a, rotate), "building storage fetcher")
+		require.Same(t, old, a.storageFetcher)
+		require.NotEqual(t, connectivity.Shutdown, old.conn.GetState())
+		require.Same(t, dispatcher, a.dispatcher)
+		require.Same(t, gate, a.compileSlots.Load())
+		require.Equal(t, 2<<20, a.fetcher.maxCacheBytes)
+		require.Equal(t, int64(3*time.Second), a.executionTimeout.Load())
+		require.Equal(t, int64(-time.Second), a.gracePeriod.Load())
+		require.NoError(t, inject(t, a, func(s *WorkflowSettings) {
+			rotate(s)
+			s.StorageKey = fmt.Sprintf("%064x", 2)
+		}))
+		require.NotSame(t, old, a.storageFetcher)
+		require.Equal(t, connectivity.Shutdown, old.conn.GetState())
+		require.Same(t, gate, a.compileSlots.Load())
+		require.Equal(t, int64(1), gateCapacity(t, a.compileSlots.Load()))
+		require.Equal(t, 1<<20, a.fetcher.maxCacheBytes)
+		require.Equal(t, int64(time.Second), a.executionTimeout.Load())
+		require.Equal(t, int64(time.Second), a.gracePeriod.Load())
+	})
+
+	t.Run("concurrent injections install only one final gate", func(t *testing.T) {
+		a := newApp(t, 2)
+		entered, release := make(chan *semaphore.Weighted, 2), make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(release) })
+		var wg sync.WaitGroup
+		defer func() { unblock(); wg.Wait() }()
+		a.storageFactory = func(string, bool, string, int64, time.Duration, logger.Logger) (RawFetcher, ed25519.PublicKey, error) {
+			entered <- a.compileSlots.Load()
+			<-release
+			return &stubRawFetcher{}, nil, nil
+		}
+		settings := testSettings("127.0.0.1:1")
+		settings.MaxConcurrentCompilations = 1
+		raw, err := json.Marshal(settings)
+		require.NoError(t, err)
+		results := make(chan error, 2)
+		wg.Go(func() { results <- a.InjectSettings(raw) })
+		bootstrap := <-entered
+		a.mu.Lock()
+		sf := a.storageFetcher
+		a.mu.Unlock()
+		_, err = a.fetcher.Fetch(t.Context(), "unused", testBinaryHash(), sf)
+		require.ErrorContains(t, err, "credentials not yet provisioned")
+		wg.Go(func() { results <- a.InjectSettings(raw) })
+		select {
+		case <-entered:
+			t.Fatal("settings factories ran concurrently")
+		case <-time.After(100 * time.Millisecond):
+		}
+		unblock()
+		for range 2 {
+			require.NoError(t, <-results)
+		}
+		require.NotSame(t, bootstrap, a.compileSlots.Load())
+		require.Same(t, <-entered, a.compileSlots.Load())
+		require.Equal(t, int64(1), gateCapacity(t, a.compileSlots.Load()))
 	})
 }
 

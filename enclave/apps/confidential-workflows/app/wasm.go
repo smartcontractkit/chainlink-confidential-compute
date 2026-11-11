@@ -28,6 +28,7 @@ import (
 // compute (the ctx deadline alone unblocks host calls but not the guest). It
 // surfaces as context.DeadlineExceeded. Non-positive leaves the host's own
 // default (10 minutes) in place.
+// https://github.com/bytecodealliance/wasmtime/blob/ebe5e8df1f4e12c5fc2f5954926881d8d61367d8/crates/wasmtime/src/config.rs#L697-L732
 //
 // compileSlot bounds simultaneous compilations while guests run concurrently
 // (WorkflowSettings.MaxConcurrentCompilations slots). The timeout starts once
@@ -64,6 +65,7 @@ func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter,
 		compiled, compileErr := host.NewModule(execCtx, modCfg, binary)
 		// Native compilation can't be interrupted, so the timeout may expire
 		// meanwhile. Expiry decides the result; the log keeps any compile error.
+		// https://github.com/bytecodealliance/wasmtime-go/blob/ffa812f9c8c85ffbd8de9194bcfc4ebab807307d/module_feat_cranelift.go#L11-L32
 		ctxErr := execCtx.Err()
 		duration := time.Since(started)
 		emitter.Emit("workflow_compilation", map[string]any{
