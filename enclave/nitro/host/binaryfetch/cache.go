@@ -60,12 +60,10 @@ func (c *Cache) Get(key string) ([]byte, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	el, ok := c.items[key]
-	if ok {
-		c.evictList.MoveToFront(el)
-	}
 	if !ok {
 		return nil, false
 	}
+	c.evictList.MoveToFront(el)
 
 	value, found := c.store.Get(key)
 	if !found {

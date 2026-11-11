@@ -76,7 +76,12 @@ func TestDiskStore_RejectsUnsafeKeys(t *testing.T) {
 	s, err := NewDiskStore(dir)
 	require.NoError(t, err)
 
-	for _, key := range []string{"", "../escape", "a/b", "a.b", "with space"} {
+	for _, key := range []string{
+		"", "../escape", "a/b", "a.b", "with space",
+		"../../etc/passwd", "sub/dir", "..", ".", "with\x00null",
+	} {
+		_, err := s.path(key)
+		assert.Error(t, err, "key %q must not resolve to a path", key)
 		require.Error(t, s.Put(key, testBinary), "key %q should be rejected", key)
 		_, ok := s.Get(key)
 		assert.False(t, ok, "key %q should not be readable", key)
@@ -86,6 +91,10 @@ func TestDiskStore_RejectsUnsafeKeys(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	assert.Empty(t, entries)
+
+	resolved, err := s.path("abc123")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(dir, "abc123"+binaryFileExt), resolved)
 }
 
 func TestDiskStore_PersistsAcrossInstances(t *testing.T) {
@@ -256,29 +265,4 @@ func (s *failingStore) Put(key string, value []byte) error {
 		return s.Store.Put(key, value)
 	}
 	return fmt.Errorf("disk full")
-}
-
-// Keys that could escape the cache directory must be refused at path
-// resolution, independent of the character allowlist in safeKey.
-func TestDiskStore_PathContainsKeysToCacheDir(t *testing.T) {
-	dir := t.TempDir()
-	s, err := NewDiskStore(dir)
-	require.NoError(t, err)
-
-	for _, key := range []string{
-		"../escape",
-		"../../etc/passwd",
-		"sub/dir",
-		"..",
-		".",
-		"with\x00null",
-	} {
-		_, err := s.path(key)
-		assert.Error(t, err, "key %q must not resolve to a path", key)
-	}
-
-	// A legitimate key resolves inside the directory.
-	resolved, err := s.path("abc123")
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(dir, "abc123"+binaryFileExt), resolved)
 }

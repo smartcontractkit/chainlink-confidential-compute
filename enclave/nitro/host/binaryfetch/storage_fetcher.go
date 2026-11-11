@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	neturl "net/url"
 	"path"
@@ -45,16 +44,6 @@ type StorageFetcher struct {
 	maxBytes   int64
 	timeout    time.Duration
 	lggr       logger.Logger
-}
-
-type storageFetcherConfig struct {
-	dialContext func(context.Context, string, string) (net.Conn, error)
-}
-
-type StorageFetcherOption func(*storageFetcherConfig)
-
-func WithStorageDialer(dialContext func(context.Context, string, string) (net.Conn, error)) StorageFetcherOption {
-	return func(config *storageFetcherConfig) { config.dialContext = dialContext }
 }
 
 var _ RawFetcher = (*StorageFetcher)(nil)
@@ -97,16 +86,12 @@ func newJWTGenerator(privKeyHex string) (nodeauthjwt.JWTGenerator, ed25519.Publi
 // NewStorageFetcher parses the ed25519 key, dials the storage service, and
 // prepares the JWT generator. It returns the derived public key so the caller
 // can log which identity is being used (the pubkey whitelisted by storage).
-func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes int64, timeout time.Duration, lggr logger.Logger, httpClient types.HTTPClient, opts ...StorageFetcherOption) (*StorageFetcher, ed25519.PublicKey, error) {
+func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes int64, timeout time.Duration, lggr logger.Logger, httpClient types.HTTPClient) (*StorageFetcher, ed25519.PublicKey, error) {
 	if storageURL == "" {
 		return nil, nil, fmt.Errorf("storage service url is required")
 	}
 	if httpClient == nil {
 		return nil, nil, fmt.Errorf("artifact HTTP client is required")
-	}
-	config := storageFetcherConfig{}
-	for _, opt := range opts {
-		opt(&config)
 	}
 
 	jwtGen, pub, err := newJWTGenerator(privKeyHex)
@@ -121,19 +106,8 @@ func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes 
 		creds = insecure.NewCredentials()
 	}
 
-	grpcOptions := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
-	// Preserve the hostname for custom dialers.
 	target := "passthrough:///" + storageURL
-	if config.dialContext != nil {
-		grpcOptions = append(grpcOptions,
-			grpc.WithNoProxy(),
-			grpc.WithAuthority(storageURL),
-			grpc.WithContextDialer(func(ctx context.Context, address string) (net.Conn, error) {
-				return config.dialContext(ctx, "tcp", address)
-			}),
-		)
-	}
-	conn, err := grpc.NewClient(target, grpcOptions...)
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, nil, fmt.Errorf("dialing storage service %q: %w", storageURL, err)
 	}

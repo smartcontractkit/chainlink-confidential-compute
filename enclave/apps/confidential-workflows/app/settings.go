@@ -3,7 +3,6 @@ package app
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -73,15 +72,11 @@ const defaultMaxConcurrentCompilations = 4
 
 // validate rejects missing gateway settings and invalid compilation limits.
 func (s *WorkflowSettings) validate() error {
-	var missing []string
-	if s.GatewayURL == "" {
-		missing = append(missing, "gatewayUrl")
-	}
 	if s.MaxConcurrentCompilations < 0 {
 		return fmt.Errorf("maxConcurrentCompilations must be non-negative; 0 means the default of %d (got %d)", defaultMaxConcurrentCompilations, s.MaxConcurrentCompilations)
 	}
-	if len(missing) > 0 {
-		return fmt.Errorf("missing required settings: %s", strings.Join(missing, ", "))
+	if s.GatewayURL == "" {
+		return fmt.Errorf("missing required settings: gatewayUrl")
 	}
 	return nil
 }

@@ -76,7 +76,7 @@ func TestNewConfidentialWorkflowsAppRequiresProductionTransports(t *testing.T) {
 }
 
 func TestExecute_HelloWasm(t *testing.T) {
-	// Build the test WASM binary, brotli-compress it, and serve over HTTP.
+	// Build the host-supplied, brotli-compressed WASM binary.
 	raw := buildTestWasm(t, "hello")
 	var compressed bytes.Buffer
 	w := brotli.NewWriter(&compressed)
@@ -87,8 +87,8 @@ func TestExecute_HelloWasm(t *testing.T) {
 	binary := compressed.Bytes()
 	hash := sha256.Sum256(binary)
 
-	app, locator := newStorageBackedApp(t, binary)
-	execution := makeExecution(t, "wf-hello", locator, hash[:])
+	app := newConfiguredApp(t, nil)
+	execution := makeExecution(t, "wf-hello", testLocator, hash[:])
 	data, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
@@ -167,7 +167,7 @@ func TestExecute_HttpCallWasm(t *testing.T) {
 		MaxResponseBodyBytes: 10 << 20,
 	}, util.NewUnrestrictedClient())
 
-	app, _ := newStorageBackedApp(t, binary, WithHTTPFetcher(fetcher))
+	app := newConfiguredApp(t, nil, WithHTTPFetcher(fetcher))
 	output, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, binary, nil, emitter.NewNoOpEmitter())
 	require.Nil(t, execErr, "expected no error, got: %+v", execErr)
 
@@ -233,7 +233,7 @@ func TestExecute_HttpCallWasm_EmitsCapabilityMetric(t *testing.T) {
 	data, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
-	app, _ := newStorageBackedApp(t, binary, WithHTTPFetcher(permissiveFetcher()))
+	app := newConfiguredApp(t, nil, WithHTTPFetcher(permissiveFetcher()))
 
 	em := &recordingEmitter{}
 	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, binary, nil, em)
@@ -320,12 +320,11 @@ func TestExecute_MissingExecuteRequest(t *testing.T) {
 }
 
 func TestExecute_WasmExecutionFailure(t *testing.T) {
-	// A fake binary that is not valid brotli/WASM: it fetches and hash-verifies
-	// fine, then fails at wasm execution.
+	// The host-supplied bytes match the signed hash but are not valid brotli/WASM.
 	fakeBinary := []byte("fake-wasm-binary-for-test")
 	hash := sha256.Sum256(fakeBinary)
 
-	app, _ := newStorageBackedApp(t, fakeBinary)
+	app := newConfiguredApp(t, nil)
 	execution := makeExecution(t, "wf-123", testLocator, hash[:])
 	data, err := proto.Marshal(execution)
 	require.NoError(t, err)
@@ -399,7 +398,7 @@ func TestExecute_EngineTestWasm_RemoteGetSecrets(t *testing.T) {
 		},
 	}
 
-	app, _ := newStorageBackedApp(t, binary, WithRemoteDispatcher(stubDispatcher))
+	app := newConfiguredApp(t, nil, WithRemoteDispatcher(stubDispatcher))
 
 	output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialWorkflows, data, binary, nil, emitter.NewNoOpEmitter())
 	require.Nil(t, execErr, "expected no error, got: %+v", execErr)
@@ -442,11 +441,11 @@ func TestExecute_ExecutionTimeout(t *testing.T) {
 	binary := compressed.Bytes()
 	hash := sha256.Sum256(binary)
 
-	app, locator := newStorageBackedAppWithSettings(t, binary, func(s *WorkflowSettings) {
+	app := newConfiguredApp(t, func(s *WorkflowSettings) {
 		s.ExecutionTimeout = Duration(time.Second)
 	})
 
-	execution := makeExecution(t, "wf-spin", locator, hash[:])
+	execution := makeExecution(t, "wf-spin", testLocator, hash[:])
 	data, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
@@ -481,11 +480,11 @@ func TestExecute_GracePeriod(t *testing.T) {
 
 	run := func(t *testing.T, grace time.Duration) time.Duration {
 		t.Helper()
-		app, locator := newStorageBackedAppWithSettings(t, binary, func(s *WorkflowSettings) {
+		app := newConfiguredApp(t, func(s *WorkflowSettings) {
 			s.WorkflowGracePeriod = Duration(grace)
 		})
 
-		execution := makeExecution(t, "wf-grace", locator, hash[:])
+		execution := makeExecution(t, "wf-grace", testLocator, hash[:])
 		data, err := proto.Marshal(execution)
 		require.NoError(t, err)
 
@@ -616,8 +615,9 @@ func TestInjectSettings_RequiredFields(t *testing.T) {
 	).(*confidentialWorkflowsApp)
 
 	err := a.InjectSettings([]byte(`{"requestTimeout":"80s"}`))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "gatewayUrl")
+	require.EqualError(t, err, "missing required settings: gatewayUrl")
+	err = a.InjectSettings([]byte(`{"maxConcurrentCompilations":-1}`))
+	require.EqualError(t, err, "maxConcurrentCompilations must be non-negative; 0 means the default of 4 (got -1)")
 
 	a.mu.Lock()
 	dispatcher := a.dispatcher
