@@ -79,7 +79,7 @@ func TestGetSecrets_RetryOnNewEnclaveKeyFetchesFreshResult(t *testing.T) {
 			&stubKeychain{kp: &stubKeypair{pub: []byte(enclaveKey)}},
 			&stubCombiner{aggregateFn: func([]byte, [][]byte, []byte, int) ([]byte, error) { return []byte("value"), nil }},
 			signatureverifier.NewEd25519SignatureVerifier(),
-			0, 0,
+			0, 0, 0,
 		)
 		resp, err := d.GetSecrets(
 			context.Background(),

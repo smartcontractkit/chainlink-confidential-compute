@@ -78,7 +78,7 @@ func TestGetSecrets_ResharePublicKeyFromResponse(t *testing.T) {
 			&stubKeychain{kp: &stubKeypair{pub: []byte("enclave-ephemeral-pub")}},
 			comb,
 			signatureverifier.NewEd25519SignatureVerifier(),
-			0, 0,
+			0, 0, 0,
 		)
 
 		resp, err := d.GetSecrets(

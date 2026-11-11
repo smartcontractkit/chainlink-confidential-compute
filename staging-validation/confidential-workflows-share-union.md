@@ -53,9 +53,10 @@ include the direct GetSecrets path (smartcontractkit/chainlink#23946).
   different keys, it fails with
   `relay-DON secrets results disagree on vault public key`. The enclave does
   not retry either error; the next workflow execution does.
-- Each signer contributes at most 128 encrypted shares per secret. Extra shares
-  are dropped with a `truncating oversized relay share list` warning. Raise the
-  cap if honest responses exceed it.
+- Each signer contributes at most 128 encrypted shares per secret by default.
+  Extra shares are dropped with a `truncating oversized relay share list`
+  warning. Raise the cap with the injected `maxEncryptedSharesPerRelayResult`
+  setting if honest responses exceed it.
 - To roll back, disable `PerWorkflow.FeatureVaultGetSecretsDirectlyActivePeriod`.
   No enclave rollback is needed.
 

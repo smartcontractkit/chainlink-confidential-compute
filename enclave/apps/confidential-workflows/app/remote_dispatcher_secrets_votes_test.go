@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialrelay"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 var (
@@ -26,9 +27,13 @@ func secretEntry(id confidentialrelay.SecretIdentifier, ciphertext string, share
 	return confidentialrelay.SecretEntry{ID: id, Ciphertext: ciphertext, EncryptedShares: shares}
 }
 
+func testSecretVotes(requested []confidentialrelay.SecretIdentifier) *secretVotes {
+	return newSecretVotes(requested, types.DefaultMaxEncryptedSharesPerRelayResult)
+}
+
 func TestSecretVotes_ValidateNodeResponse(t *testing.T) {
 	t.Parallel()
-	votes := newSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA, votesSecretB, votesSecretA})
+	votes := testSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA, votesSecretB, votesSecretA})
 	secretC := confidentialrelay.SecretIdentifier{Key: "C", Namespace: "main"}
 
 	require.NoError(t, votes.validateNodeResponse(nodeResponse("pk", secretEntry(votesSecretB, "ct"), secretEntry(votesSecretA, "ct"))),
@@ -40,7 +45,7 @@ func TestSecretVotes_ValidateNodeResponse(t *testing.T) {
 
 func TestSecretVotes_SignerCountsOncePerCandidate(t *testing.T) {
 	t.Parallel()
-	votes := newSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA})
+	votes := testSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA})
 	votes.addVote(signerKeyHash(1), nodeResponse("pk", secretEntry(votesSecretA, "ct", "s1")))
 	votes.addVote(signerKeyHash(1), nodeResponse("pk", secretEntry(votesSecretA, "ct", "extra")))
 
@@ -57,8 +62,9 @@ func TestSecretVotes_SignerCountsOncePerCandidate(t *testing.T) {
 
 func TestSecretVotes_CapsSharesPerSigner(t *testing.T) {
 	t.Parallel()
-	votes := newSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA})
-	flood := make([]string, maxEncryptedSharesPerRelayResult+10)
+	const maxSharesPerSigner = 8
+	votes := newSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA}, maxSharesPerSigner)
+	flood := make([]string, maxSharesPerSigner+10)
 	for i := range flood {
 		flood[i] = fmt.Sprintf("junk-%d", i)
 	}
@@ -68,12 +74,12 @@ func TestSecretVotes_CapsSharesPerSigner(t *testing.T) {
 
 	combined, err := votes.selectWinners(2)
 	require.NoError(t, err)
-	assert.Len(t, combined.Secrets[0].EncryptedShares, maxEncryptedSharesPerRelayResult+1)
+	assert.Len(t, combined.Secrets[0].EncryptedShares, maxSharesPerSigner+1)
 }
 
 func TestSecretVotes_RemovesExactDuplicateShares(t *testing.T) {
 	t.Parallel()
-	votes := newSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA})
+	votes := testSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA})
 	votes.addVote(signerKeyHash(1), nodeResponse("pk", secretEntry(votesSecretA, "ct", "s0", "s1")))
 	votes.addVote(signerKeyHash(2), nodeResponse("pk", secretEntry(votesSecretA, "ct", "s1", "s2")))
 
@@ -85,7 +91,7 @@ func TestSecretVotes_RemovesExactDuplicateShares(t *testing.T) {
 
 func TestSecretVotes_MostSignersWinsThenTieBreak(t *testing.T) {
 	t.Parallel()
-	votes := newSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA})
+	votes := testSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA})
 	votes.addVote(signerKeyHash(1), nodeResponse("pk", secretEntry(votesSecretA, "ct-b")))
 	votes.addVote(signerKeyHash(2), nodeResponse("pk", secretEntry(votesSecretA, "ct-b")))
 	votes.addVote(signerKeyHash(3), nodeResponse("pk", secretEntry(votesSecretA, "ct-a")))
@@ -103,7 +109,7 @@ func TestSecretVotes_MostSignersWinsThenTieBreak(t *testing.T) {
 
 func TestSecretVotes_WinnersMustShareVaultPublicKey(t *testing.T) {
 	t.Parallel()
-	votes := newSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA, votesSecretB})
+	votes := testSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA, votesSecretB})
 	// A reaches quorum only under key "aa", B only under key "bb".
 	votes.addVote(signerKeyHash(1), nodeResponse("aa", secretEntry(votesSecretA, "ct-a"), secretEntry(votesSecretB, "ct-b0")))
 	votes.addVote(signerKeyHash(2), nodeResponse("aa", secretEntry(votesSecretA, "ct-a"), secretEntry(votesSecretB, "ct-b1")))
@@ -116,7 +122,7 @@ func TestSecretVotes_WinnersMustShareVaultPublicKey(t *testing.T) {
 
 func TestSecretVotes_TiedSecretsResolveToSameVaultPublicKey(t *testing.T) {
 	t.Parallel()
-	votes := newSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA, votesSecretB})
+	votes := testSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretA, votesSecretB})
 	// Signers split 2-2 between keys "aa" and "bb", and each key has its own
 	// ciphertexts. Ordering ties by ciphertext would pick "bb" for A and "aa" for B.
 	votes.addVote(signerKeyHash(1), nodeResponse("aa", secretEntry(votesSecretA, "ct-z"), secretEntry(votesSecretB, "ct-a")))
@@ -133,7 +139,7 @@ func TestSecretVotes_TiedSecretsResolveToSameVaultPublicKey(t *testing.T) {
 
 func TestSecretVotes_ResultFollowsRequestOrder(t *testing.T) {
 	t.Parallel()
-	votes := newSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretB, votesSecretA})
+	votes := testSecretVotes([]confidentialrelay.SecretIdentifier{votesSecretB, votesSecretA})
 	for signer := byte(1); signer <= 2; signer++ {
 		votes.addVote(signerKeyHash(signer), nodeResponse("pk", secretEntry(votesSecretA, "ct-a"), secretEntry(votesSecretB, "ct-b")))
 	}

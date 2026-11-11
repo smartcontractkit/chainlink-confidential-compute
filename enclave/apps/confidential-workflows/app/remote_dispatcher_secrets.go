@@ -30,11 +30,6 @@ const defaultSecretsNamespace = "main"
 // other hashes. Its version changes whenever the derivation does.
 const relaySecretsCallbackIDDomain = "chainlink-confidential-compute/relay-secrets-callback-id/v1\n"
 
-// maxEncryptedSharesPerRelayResult caps the encrypted shares taken from one
-// signer's result for one secret. Extra shares are dropped, so a faulty signer
-// cannot fail the request or inflate decryption work.
-const maxEncryptedSharesPerRelayResult = 128
-
 // relaySecretsCallbackID derives the callback ID sent to the relay DON for a
 // secrets request. The relay DON memoizes signed results, and the vault DON
 // deduplicates requests, by (workflow, execution, callback ID), while the signed
@@ -371,7 +366,7 @@ func (d *remoteDispatcher) selectSecretsQuorumResult(
 		unhashable:    len(skippedEntries),
 	}
 
-	votes := newSecretVotes(params.Secrets)
+	votes := newSecretVotes(params.Secrets, d.maxEncryptedSharesPerRelayResult)
 	entryDiagnostics := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		signer, err := d.verifyRelaySigner(path, entry.bundleIndex, entry.signedHash, entry.signature, cfg)
@@ -392,7 +387,7 @@ func (d *remoteDispatcher) selectSecretsQuorumResult(
 
 		if dropped := votes.addVote(sha256.Sum256(signer), entry.result); dropped > 0 {
 			d.logger.Warnw("[remoteDispatcher] truncating oversized relay share list",
-				"path", path, "idx", entry.bundleIndex, "droppedShares", dropped, "max", maxEncryptedSharesPerRelayResult)
+				"path", path, "idx", entry.bundleIndex, "droppedShares", dropped, "max", d.maxEncryptedSharesPerRelayResult)
 		}
 		entryDiagnostics = append(entryDiagnostics, fmt.Sprintf("[idx=%d signature=valid signer=%s %s]",
 			entry.bundleIndex, shortBytes(signer), entry.description))
@@ -434,17 +429,18 @@ func (k secretCandidateKey) tieBreakKey() string {
 // secretCandidate is one candidate answer for a secret: the signers that voted
 // for it and the encrypted shares they sent.
 type secretCandidate struct {
-	key     secretCandidateKey
-	signers map[[32]byte]struct{}
-	shares  []string
+	key                secretCandidateKey
+	signers            map[[32]byte]struct{}
+	shares             []string
+	maxSharesPerSigner int
 }
 
-// addShares appends one signer's shares, capped at
-// maxEncryptedSharesPerRelayResult, and returns how many were dropped.
+// addShares appends one signer's shares, capped at maxSharesPerSigner, and
+// returns how many were dropped.
 func (c *secretCandidate) addShares(signerShares []string) (dropped int) {
-	if len(signerShares) > maxEncryptedSharesPerRelayResult {
-		dropped = len(signerShares) - maxEncryptedSharesPerRelayResult
-		signerShares = signerShares[:maxEncryptedSharesPerRelayResult]
+	if len(signerShares) > c.maxSharesPerSigner {
+		dropped = len(signerShares) - c.maxSharesPerSigner
+		signerShares = signerShares[:c.maxSharesPerSigner]
 	}
 	c.shares = append(c.shares, signerShares...)
 	return dropped
@@ -470,9 +466,10 @@ type secretVotes struct {
 	requestedSecrets   []confidentialrelay.SecretIdentifier
 	secretIndexByID    map[confidentialrelay.SecretIdentifier]int
 	candidatesBySecret []map[secretCandidateKey]*secretCandidate
+	maxSharesPerSigner int
 }
 
-func newSecretVotes(requested []confidentialrelay.SecretIdentifier) *secretVotes {
+func newSecretVotes(requested []confidentialrelay.SecretIdentifier, maxSharesPerSigner int) *secretVotes {
 	requestedSecrets := uniqueSecretIDs(requested)
 	secretIndexByID := make(map[confidentialrelay.SecretIdentifier]int, len(requestedSecrets))
 	candidatesBySecret := make([]map[secretCandidateKey]*secretCandidate, len(requestedSecrets))
@@ -484,6 +481,7 @@ func newSecretVotes(requested []confidentialrelay.SecretIdentifier) *secretVotes
 		requestedSecrets:   requestedSecrets,
 		secretIndexByID:    secretIndexByID,
 		candidatesBySecret: candidatesBySecret,
+		maxSharesPerSigner: maxSharesPerSigner,
 	}
 }
 
@@ -515,7 +513,11 @@ func (v *secretVotes) addVote(signerKeyHash [32]byte, result confidentialrelay.S
 		key := secretCandidateKey{ciphertext: secret.Ciphertext, vaultPublicKey: result.RawVaultPublicKey}
 		candidate, ok := candidates[key]
 		if !ok {
-			candidate = &secretCandidate{key: key, signers: make(map[[32]byte]struct{})}
+			candidate = &secretCandidate{
+				key:                key,
+				signers:            make(map[[32]byte]struct{}),
+				maxSharesPerSigner: v.maxSharesPerSigner,
+			}
 			candidates[key] = candidate
 		}
 		if _, counted := candidate.signers[signerKeyHash]; counted {

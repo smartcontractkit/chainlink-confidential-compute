@@ -70,7 +70,7 @@ func runSecretsDispatcherFor(
 	t.Helper()
 	cfg := relayDONConfig(signers, f)
 	cfg.MasterPublicKey = []byte("configured-master-public-key")
-	return runSecretsDispatcherWithConfig(t, signers, cfg, comb, kp, requests, resultsFor)
+	return runSecretsDispatcherWithConfig(t, signers, cfg, comb, kp, requests, 0, resultsFor)
 }
 
 func runSecretsDispatcherWithConfig(
@@ -80,6 +80,7 @@ func runSecretsDispatcherWithConfig(
 	comb combiner.Combiner,
 	kp keychain.Keypair,
 	requests []*sdkpb.SecretRequest,
+	maxSharesPerSigner int64,
 	resultsFor func(params confidentialrelay.SecretsRequestParams) []confidentialrelay.SecretsResponseResult,
 ) ([]*sdkpb.SecretResponse, error) {
 	t.Helper()
@@ -101,6 +102,7 @@ func runSecretsDispatcherWithConfig(
 		comb,
 		signatureverifier.NewEd25519SignatureVerifier(),
 		0, 0,
+		maxSharesPerSigner,
 	)
 
 	return d.GetSecrets(
@@ -256,7 +258,7 @@ func TestGetSecrets_OversizedShareListIsTruncatedNotFatal(t *testing.T) {
 		return []byte("value"), nil
 	}}
 
-	flood := make([]string, maxEncryptedSharesPerRelayResult+50)
+	flood := make([]string, types.DefaultMaxEncryptedSharesPerRelayResult+50)
 	for i := range flood {
 		flood[i] = b64(fmt.Sprintf("junk-%d", i))
 	}
@@ -271,9 +273,43 @@ func TestGetSecrets_OversizedShareListIsTruncatedNotFatal(t *testing.T) {
 	require.NoError(t, err, "one signer flooding shares must not fail the request")
 	require.Len(t, resp, 1)
 	assert.Equal(t, "value", resp[0].GetSecret().GetValue())
-	assert.Len(t, captured, maxEncryptedSharesPerRelayResult+2, "flooding signer is capped, honest shares are kept")
+	assert.Len(t, captured, types.DefaultMaxEncryptedSharesPerRelayResult+2, "flooding signer is capped, honest shares are kept")
 	assert.Contains(t, captured, []byte("honest-1"))
 	assert.Contains(t, captured, []byte("honest-2"))
+}
+
+func TestGetSecrets_InjectedShareCapIsApplied(t *testing.T) {
+	t.Parallel()
+	signers := newRelaySigners(t, 3)
+	secretID := confidentialrelay.SecretIdentifier{Key: "API_KEY", Namespace: "main"}
+	var captured [][]byte
+	comb := &stubCombiner{aggregateFn: func(_ []byte, shares [][]byte, _ []byte, _ int) ([]byte, error) {
+		captured = shares
+		return []byte("value"), nil
+	}}
+
+	const maxSharesPerSigner = 5
+	flood := make([]string, maxSharesPerSigner+10)
+	for i := range flood {
+		flood[i] = b64(fmt.Sprintf("junk-%d", i))
+	}
+
+	cfg := relayDONConfig(signers, 1)
+	cfg.MasterPublicKey = []byte("configured-master-public-key")
+	resp, err := runSecretsDispatcherWithConfig(t, signers, cfg, comb, &stubKeypair{pub: []byte("enclave-pub")},
+		[]*sdkpb.SecretRequest{{Id: secretID.Key, Namespace: secretID.Namespace}},
+		maxSharesPerSigner,
+		func(confidentialrelay.SecretsRequestParams) []confidentialrelay.SecretsResponseResult {
+			return []confidentialrelay.SecretsResponseResult{
+				secretResult(secretID, "ciphertext", flood),
+				secretResult(secretID, "ciphertext", []string{b64("honest-1")}),
+				secretResult(secretID, "ciphertext", []string{b64("honest-2")}),
+			}
+		})
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, "value", resp[0].GetSecret().GetValue())
+	assert.Len(t, captured, maxSharesPerSigner+2, "injected cap truncates the flooding signer")
 }
 
 func TestGetSecrets_SignerContributesSharesOncePerGroup(t *testing.T) {
@@ -459,6 +495,7 @@ func TestGetSecrets_InvalidShareDoesNotShadowValidShareForSameIndex(t *testing.T
 	resp, err := runSecretsDispatcherWithConfig(t, signers, cfg, combiner.NewTDH2EasyCombiner(),
 		&stubKeypair{pub: []byte("enclave-pub")},
 		[]*sdkpb.SecretRequest{{Id: "API_KEY", Namespace: "main"}},
+		0,
 		func(confidentialrelay.SecretsRequestParams) []confidentialrelay.SecretsResponseResult {
 			result := func(shares ...string) confidentialrelay.SecretsResponseResult {
 				return confidentialrelay.SecretsResponseResult{

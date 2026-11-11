@@ -124,6 +124,9 @@ type remoteDispatcher struct {
 	// or secret fetch (all attempts, including backoffs), independent of the
 	// per-attempt HTTP timeout on the gateway client.
 	retryTimeout time.Duration
+	// maxEncryptedSharesPerRelayResult caps the encrypted shares taken from one
+	// relay-DON signer's result for one secret.
+	maxEncryptedSharesPerRelayResult int
 }
 
 var _ RemoteDispatcher = (*remoteDispatcher)(nil)
@@ -156,6 +159,7 @@ func NewRemoteDispatcher(
 	comb combiner.Combiner,
 	verifier signatureverifier.SignatureVerifier,
 	retryBackoff, retryTimeout time.Duration,
+	maxEncryptedSharesPerRelayResult int64,
 ) RemoteDispatcher {
 	if retryBackoff <= 0 {
 		retryBackoff = types.DefaultGatewayRetryBackoff
@@ -163,16 +167,20 @@ func NewRemoteDispatcher(
 	if retryTimeout <= 0 {
 		retryTimeout = types.DefaultGatewayRetryTimeout
 	}
+	if maxEncryptedSharesPerRelayResult <= 0 {
+		maxEncryptedSharesPerRelayResult = types.DefaultMaxEncryptedSharesPerRelayResult
+	}
 	return &remoteDispatcher{
-		client:       client,
-		attestor:     att,
-		config:       config,
-		logger:       lggr,
-		keychain:     kc,
-		combiner:     comb,
-		verifier:     verifier,
-		retryBackoff: retryBackoff,
-		retryTimeout: retryTimeout,
+		client:                           client,
+		attestor:                         att,
+		config:                           config,
+		logger:                           lggr,
+		keychain:                         kc,
+		combiner:                         comb,
+		verifier:                         verifier,
+		retryBackoff:                     retryBackoff,
+		retryTimeout:                     retryTimeout,
+		maxEncryptedSharesPerRelayResult: int(maxEncryptedSharesPerRelayResult),
 	}
 }
 
