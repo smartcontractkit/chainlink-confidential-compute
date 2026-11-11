@@ -416,6 +416,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		emitter:          emitter,
 		remoteDispatcher: dispatcher,
 		httpFetcher:      a.httpFetcher,
+		httpLimits:       newHTTPActionLimits(execution.GetLimits()),
 	}
 
 	if !host.CheckRequirements(context.Background(), a.requirementsHandler, execution.Requirements) {

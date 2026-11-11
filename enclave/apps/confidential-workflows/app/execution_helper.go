@@ -47,6 +47,8 @@ type enclaveExecutionHelper struct {
 	emitter          types.Emitter
 	remoteDispatcher RemoteDispatcher
 	httpFetcher      *httpfetch.Fetcher
+	// httpLimits is nil unless the workflow DON sent HTTP action limits.
+	httpLimits *httpActionLimits
 }
 
 var _ host.ExecutionHelper = (*enclaveExecutionHelper)(nil)
@@ -142,6 +144,17 @@ func (h *enclaveExecutionHelper) callCapability(ctx context.Context, req *sdkpb.
 }
 
 func (h *enclaveExecutionHelper) handleHTTPAction(ctx context.Context, req *sdkpb.CapabilityRequest) (*sdkpb.CapabilityResponse, error) {
+	var fetchLimits *httpfetch.Limits
+	if l := h.httpLimits; l != nil {
+		if l.countCall() {
+			h.emitLimitEvent("cre_limit_exceeded", httpCallLimitKey)
+			return errResponse(fmt.Sprintf("http-actions: capability call limit exceeded (%s: %d)", httpCallLimitKey, *l.callLimit)), nil
+		}
+		fl := l.fetch
+		fl.Exceeded = func(key string) { h.emitLimitEvent("cre_limit_exceeded", key) }
+		fl.Clamped = func(key string) { h.emitLimitEvent("cre_limit_clamped", key) }
+		fetchLimits = &fl
+	}
 	if h.httpFetcher == nil {
 		return errResponse("http-actions: no HTTP fetcher configured"), nil
 	}
@@ -149,7 +162,7 @@ func (h *enclaveExecutionHelper) handleHTTPAction(ctx context.Context, req *sdkp
 	if err := req.GetPayload().UnmarshalTo(input); err != nil {
 		return errResponse("http-actions: unmarshalling request failed"), nil
 	}
-	resp, err := h.httpFetcher.Fetch(ctx, input)
+	resp, err := h.httpFetcher.Fetch(ctx, input, fetchLimits)
 	if err != nil {
 		return errResponse(fmt.Sprintf("http-actions: %v", err)), nil
 	}
@@ -160,6 +173,17 @@ func (h *enclaveExecutionHelper) handleHTTPAction(ctx context.Context, req *sdkp
 	return &sdkpb.CapabilityResponse{
 		Response: &sdkpb.CapabilityResponse_Payload{Payload: payload},
 	}, nil
+}
+
+// emitLimitEvent records a CRE limit the execution exceeded (cre_limit_exceeded)
+// or a response the enclave's fixed cap rejected although the CRE limit allowed
+// it (cre_limit_clamped). Limit errors reach the engine as workflow errors,
+// which count as user errors, so these events are the platform-side signal.
+func (h *enclaveExecutionHelper) emitLimitEvent(event, key string) {
+	h.emit(event, map[string]any{
+		"limit_key":     key,
+		"capability_id": httpserver.ClientID,
+	})
 }
 
 func (h *enclaveExecutionHelper) handleConsensusSimple(req *sdkpb.CapabilityRequest) (*sdkpb.CapabilityResponse, error) {

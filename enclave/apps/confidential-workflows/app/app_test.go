@@ -881,3 +881,48 @@ func (d *testRemoteDispatcher) GetSecrets(_ context.Context, _ string, _ [32]byt
 	}
 	return responses, nil
 }
+
+// The workflow DON's signed limits travel inside WorkflowExecution and must
+// reach the http-actions path of a real WASM run.
+func TestExecute_HttpCallWasm_AppliesSignedLimits(t *testing.T) {
+	echoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer echoSrv.Close()
+
+	raw := buildTestWasm(t, "http-call")
+	var compressed bytes.Buffer
+	bw := brotli.NewWriter(&compressed)
+	_, err := bw.Write(raw)
+	require.NoError(t, err)
+	require.NoError(t, bw.Close())
+	binary := compressed.Bytes()
+	hash := sha256.Sum256(binary)
+
+	triggerPayload, err := anypb.New(&basictrigger.Outputs{CoolOutput: "cool"})
+	require.NoError(t, err)
+	execution := &confworkflowtypes.WorkflowExecution{
+		WorkflowId: "wf-http-call",
+		BinaryUrl:  testLocator,
+		BinaryHash: hash[:],
+		SdkExecuteRequest: &sdkpb.ExecuteRequest{
+			Config:  []byte(echoSrv.URL),
+			Request: &sdkpb.ExecuteRequest_Trigger{Trigger: &sdkpb.Trigger{Id: 0, Payload: triggerPayload}},
+		},
+		Limits: &confworkflowtypes.ExecutionLimits{
+			HttpAction: &confworkflowtypes.HTTPActionLimits{CallLimit: proto.Uint32(0)},
+		},
+	}
+	data, err := proto.Marshal(execution)
+	require.NoError(t, err)
+
+	app, _ := newStorageBackedApp(t, binary, WithHTTPFetcher(permissiveFetcher()))
+	em := &recordingEmitter{}
+	out, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, em)
+	require.Nil(t, execErr, "expected no error, got: %+v", execErr)
+
+	var resp confworkflowtypes.ConfidentialWorkflowResponse
+	require.NoError(t, proto.Unmarshal(out, &resp))
+	assert.Contains(t, resp.GetSdkExecutionResult().GetError(), "capability call limit exceeded (PerWorkflow.HTTPAction.CallLimit: 0)")
+	assert.Equal(t, 1, em.countOf("cre_limit_exceeded"))
+}

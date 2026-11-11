@@ -66,6 +66,9 @@ var allowedMetricAttributes = map[string]struct{}{
 	"workflow.name":   {},
 	"workflow.owner":  {},
 	"org.id":          {},
+	// limit_key labels cre_limit_exceeded/cre_limit_clamped with a CRE setting
+	// key from a fixed set.
+	"limit_key": {},
 }
 
 // allowedAttribute returns true if k is a low-cardinality key that may become an
