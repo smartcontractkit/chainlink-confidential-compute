@@ -76,7 +76,8 @@ func (m *mockCombiner) VerifyShare(ciphertext []byte, masterPublicKey []byte, sh
 
 // mockEnclaveApp is a mock implementation of types.EnclaveApp for server testing
 type mockEnclaveApp struct {
-	executeFunc func([32]byte, string, []byte, map[string][]byte, types.Emitter) ([]byte, *types.ExecuteError)
+	executeFunc    func([32]byte, string, []byte, map[string][]byte, types.Emitter) ([]byte, *types.ExecuteError)
+	receivedBinary chan []byte
 }
 
 var _ types.EnclaveApp = (*mockEnclaveApp)(nil)
@@ -91,7 +92,10 @@ func newMockEnclaveApp() *mockEnclaveApp {
 	}
 }
 
-func (m *mockEnclaveApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, _ ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
+func (m *mockEnclaveApp) Execute(requestID [32]byte, appID string, inputData []byte, binary []byte, secretsMap map[string][]byte, emitter types.Emitter, _ ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
+	if m.receivedBinary != nil {
+		m.receivedBinary <- binary
+	}
 	return m.executeFunc(requestID, appID, inputData, secretsMap, emitter)
 }
 
@@ -728,9 +732,11 @@ func TestHandleExecute_QuorumValidation(t *testing.T) {
 		requestSigners []ed25519.PrivateKey
 		expectedStatus int
 		expectedError  string
+		hostBinary     []byte
 	}{
 		{
 			name:           "F=0, 1 signer required (0+1=1), 1 provided - should pass",
+			hostBinary:     []byte("host binary"),
 			configF:        0,
 			signers:        []ed25519.PublicKey{signer1Pub},
 			requestSigners: []ed25519.PrivateKey{signer1Priv},
@@ -752,6 +758,7 @@ func TestHandleExecute_QuorumValidation(t *testing.T) {
 		},
 		{
 			name:           "F=1, 2 signers required (1+1=2), 1 provided - should fail",
+			hostBinary:     []byte("host binary"),
 			configF:        1,
 			signers:        []ed25519.PublicKey{signer1Pub, signer2Pub, signer3Pub},
 			requestSigners: []ed25519.PrivateKey{signer1Priv},
@@ -773,6 +780,7 @@ func TestHandleExecute_QuorumValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Each subtest gets its own server since config can only be set once.
 			mockApp := newMockEnclaveApp()
+			mockApp.receivedBinary = make(chan []byte, 1)
 			serverURL := setupTestServerWithMockApp(t, mockApp)
 
 			// Set up config with the specified F value and signers
@@ -866,7 +874,7 @@ func TestHandleExecute_QuorumValidation(t *testing.T) {
 				}
 			}
 
-			bodyBytes, err := json.Marshal(signedReqs)
+			bodyBytes, err := types.MarshalExecuteBatch(types.ExecuteBatch{Requests: signedReqs, UnauthenticatedData: tt.hostBinary})
 			require.NoError(t, err)
 
 			req, err := http.NewRequest(http.MethodPost, serverURL+"/requests", bytes.NewReader(bodyBytes))
@@ -881,7 +889,9 @@ func TestHandleExecute_QuorumValidation(t *testing.T) {
 
 			if tt.expectedError != "" {
 				assertErrorResponse(t, resp, tt.expectedError)
+				assert.Empty(t, mockApp.receivedBinary, "unauthorized envelopes must not reach the app")
 			} else if tt.expectedStatus == http.StatusOK {
+				assert.Equal(t, tt.hostBinary, <-mockApp.receivedBinary)
 				var responseBody types.ExecuteResponse
 				err = json.NewDecoder(resp.Body).Decode(&responseBody)
 				require.NoError(t, err)

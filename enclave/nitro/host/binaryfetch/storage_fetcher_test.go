@@ -1,4 +1,4 @@
-package app
+package binaryfetch
 
 import (
 	"bytes"
@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -28,6 +29,10 @@ type trustedKeyProvider struct {
 func (p trustedKeyProvider) IsNodePubKeyTrusted(_ context.Context, key ed25519.PublicKey) (bool, error) {
 	return bytes.Equal(p.key, key), nil
 }
+
+// testStorageKeyHex is a deterministic ed25519 seed used to authenticate to the
+// storage service in tests.
+const testStorageKeyHex = "0000000000000000000000000000000000000000000000000000000000000001"
 
 // TestArtifactID guards the locator -> storage-service id extraction. A full
 // BinaryUrl must collapse to the bare artifact id; a value that is already an id
@@ -86,7 +91,6 @@ type recordingStorage struct {
 }
 
 func (r *recordingStorage) DownloadArtifact(ctx context.Context, req *storage_service.DownloadArtifactRequest) (*storage_service.DownloadArtifactResponse, error) {
-	// Capture the authority and authorization header for the proxy-path assertions.
 	md, _ := metadata.FromIncomingContext(ctx)
 	r.mu.Lock()
 	r.lastReq = req
@@ -129,7 +133,7 @@ func TestStorageFetcher_SendsBareArtifactID(t *testing.T) {
 	go func() { _ = grpcSrv.Serve(lis) }()
 	t.Cleanup(grpcSrv.Stop)
 
-	f, _, err := NewStorageFetcher(
+	f, pub, err := NewStorageFetcher(
 		lis.Addr().String(), false, testStorageKeyHex, 0, 5*time.Second, logger.Test(t), httpSrv.Client(),
 	)
 	require.NoError(t, err)
@@ -141,8 +145,17 @@ func TestStorageFetcher_SendsBareArtifactID(t *testing.T) {
 
 	req := fake.request()
 	require.NotNil(t, req)
-	require.Equal(t, id, req.GetId(), "enclave must send the bare artifact id, not the full URL")
+	require.Equal(t, id, req.GetId(), "host must send the bare artifact id, not the full URL")
 	require.Equal(t, storage_service.ArtifactType_ARTIFACT_TYPE_BINARY, req.GetType())
+
+	md := fake.requestMetadata()
+	require.Equal(t, []string{lis.Addr().String()}, md.Get(":authority"))
+	token, err := nodeauthgrpc.ExtractBearerToken(metadata.NewIncomingContext(context.Background(), md))
+	require.NoError(t, err)
+	authenticator := (nodeauthjwt.NodeJWTAuthenticatorConfig{}).New(trustedKeyProvider{key: pub})
+	valid, _, err := authenticator.AuthenticateJWT(context.Background(), token, req)
+	require.NoError(t, err)
+	require.True(t, valid)
 }
 
 func TestNewStorageFetcherRequiresArtifactHTTPClient(t *testing.T) {
@@ -153,63 +166,22 @@ func TestNewStorageFetcherRequiresArtifactHTTPClient(t *testing.T) {
 	require.EqualError(t, err, "artifact HTTP client is required")
 }
 
-func TestStorageFetcher_ProxyDialerPreservesAuthorityAndAuthorization(t *testing.T) {
-	const storageAuthority = "storage.example.test:2222"
-
-	// Start a local storage server behind a fake external authority.
-	fake := &recordingStorage{url: "https://artifact.example/binary.wasm"}
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	grpcSrv := grpc.NewServer()
-	storage_service.RegisterNodeServiceServer(grpcSrv, fake)
-	go func() { _ = grpcSrv.Serve(lis) }()
-	t.Cleanup(grpcSrv.Stop)
-
-	// Record the requested authority while forwarding to the local server.
-	type dialAttempt struct {
-		network string
-		address string
+func TestStorageFetcher_DownloadSizeBound(t *testing.T) {
+	for _, size := range []int{3, 4, 5} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			binary := bytes.Repeat([]byte("x"), size)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(binary)))
+			}))
+			defer srv.Close()
+			fetcher := &StorageFetcher{httpClient: srv.Client(), maxBytes: 4, lggr: logger.Test(t)}
+			got, err := fetcher.Download(t.Context(), srv.URL)
+			if size > 4 {
+				require.ErrorContains(t, err, "exceeds max size")
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, binary, got)
+			}
+		})
 	}
-	dialed := make(chan dialAttempt, 1)
-	dialContext := func(ctx context.Context, network, address string) (net.Conn, error) {
-		select {
-		case dialed <- dialAttempt{network: network, address: address}:
-		default:
-		}
-		return (&net.Dialer{}).DialContext(ctx, "tcp", lis.Addr().String())
-	}
-
-	// Build the storage fetcher with the injected proxy dialer.
-	f, pub, err := NewStorageFetcher(
-		storageAuthority, false, testStorageKeyHex, 0, 5*time.Second, logger.Test(t), http.DefaultClient,
-		WithStorageDialer(dialContext),
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = f.Close() })
-
-	// Resolve an artifact URL over the proxied gRPC connection.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	gotURL, err := f.resolveURL(ctx, "artifact-id")
-	require.NoError(t, err)
-	require.Equal(t, fake.url, gotURL)
-
-	// Confirm the dialer received the unresolved configured authority.
-	select {
-	case attempt := <-dialed:
-		require.Equal(t, "tcp", attempt.network)
-		require.Equal(t, storageAuthority, attempt.address)
-	case <-time.After(time.Second):
-		t.Fatal("storage dialer was not called")
-	}
-
-	// Confirm gRPC preserved the authority and sent a valid request-bound JWT.
-	md := fake.requestMetadata()
-	require.Equal(t, []string{storageAuthority}, md.Get(":authority"))
-	token, err := nodeauthgrpc.ExtractBearerToken(metadata.NewIncomingContext(context.Background(), md))
-	require.NoError(t, err)
-	authenticator := (nodeauthjwt.NodeJWTAuthenticatorConfig{}).New(trustedKeyProvider{key: pub})
-	valid, _, err := authenticator.AuthenticateJWT(context.Background(), token, fake.request())
-	require.NoError(t, err)
-	require.True(t, valid)
 }

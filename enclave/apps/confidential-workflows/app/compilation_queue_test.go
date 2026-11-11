@@ -67,11 +67,10 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 	require.NoError(t, w.Close())
 	binary := compressed.Bytes()
 	hash := sha256.Sum256(binary)
-	enclave, locator := newStorageBackedAppWithSettings(t, binary, func(s *WorkflowSettings) {
+	a := newConfiguredApp(t, func(s *WorkflowSettings) {
 		s.WorkflowGracePeriod = Duration(-time.Second)
 		s.MaxConcurrentCompilations = 1
 	}, WithMaxConcurrentExecutions(2))
-	a := enclave.(*confidentialWorkflowsApp)
 	lggr, _ := logger.TestObserved(t, zapcore.DebugLevel)
 	a.logger = lggr
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
@@ -83,15 +82,15 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 	var wg sync.WaitGroup
 	defer func() { release(); wg.Wait() }()
 	for i := range 2 {
-		input, err := proto.Marshal(makeExecution(t, fmt.Sprintf("workflow-%d", i), locator, hash[:]))
+		input, err := proto.Marshal(makeExecution(t, fmt.Sprintf("workflow-%d", i), testLocator, hash[:]))
 		require.NoError(t, err)
 		wg.Go(func() {
-			_, err := a.Execute([32]byte{byte(i)}, types.AppIDConfidentialWorkflows, input, nil, emitter.NewNoOpEmitter())
+			_, err := a.Execute([32]byte{byte(i)}, types.AppIDConfidentialWorkflows, input, binary, nil, emitter.NewNoOpEmitter())
 			results <- err
 		})
 	}
 	require.Eventually(t, func() bool { return len(a.limiter.slots) == 2 }, 5*time.Second, time.Millisecond)
-	_, rejected := a.Execute([32]byte{3}, types.AppIDConfidentialWorkflows, nil, nil, emitter.NewNoOpEmitter())
+	_, rejected := a.Execute([32]byte{3}, types.AppIDConfidentialWorkflows, nil, nil, nil, emitter.NewNoOpEmitter())
 	require.NotNil(t, rejected)
 	require.Equal(t, http.StatusTooManyRequests, rejected.Code)
 	select {

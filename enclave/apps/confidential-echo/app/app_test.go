@@ -69,7 +69,7 @@ func TestEchoEnclaveApp_Execute(t *testing.T) {
 	echoApp := app.NewEchoEnclaveApp()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			output, execErr := echoApp.Execute(requestID, tt.appID, []byte(tt.input), tt.secrets, emitter.NewNoOpEmitter())
+			output, execErr := echoApp.Execute(requestID, tt.appID, []byte(tt.input), nil, tt.secrets, emitter.NewNoOpEmitter())
 			if tt.wantErr {
 				require.NotNil(t, execErr)
 				assert.Equal(t, http.StatusBadRequest, execErr.Code)

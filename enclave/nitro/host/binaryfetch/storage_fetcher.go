@@ -1,4 +1,4 @@
-package app
+package binaryfetch
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	neturl "net/url"
 	"path"
@@ -34,12 +33,9 @@ type RawFetcher interface {
 	Close() error
 }
 
-// StorageFetcher fetches the workflow binary directly from the CRE storage
-// service, from inside the enclave: it calls NodeService.DownloadArtifact over
-// JWT-authed gRPC (the JWT is EdDSA-signed with the injected ed25519 storage
-// key) to obtain a pre-signed URL, then downloads that URL. This is the code
-// that previously lived in the host-agent sidecar; it now runs in the TEE so
-// the fetch is authenticated by the enclave itself.
+// StorageFetcher calls NodeService.DownloadArtifact from the host over JWT-authed
+// gRPC, then downloads the pre-signed URL. The enclave verifies binary integrity
+// independently of the storage service and host.
 type StorageFetcher struct {
 	conn       *grpc.ClientConn
 	client     storage_service.NodeServiceClient
@@ -48,16 +44,6 @@ type StorageFetcher struct {
 	maxBytes   int64
 	timeout    time.Duration
 	lggr       logger.Logger
-}
-
-type storageFetcherConfig struct {
-	dialContext func(context.Context, string, string) (net.Conn, error)
-}
-
-type StorageFetcherOption func(*storageFetcherConfig)
-
-func WithStorageDialer(dialContext func(context.Context, string, string) (net.Conn, error)) StorageFetcherOption {
-	return func(config *storageFetcherConfig) { config.dialContext = dialContext }
 }
 
 var _ RawFetcher = (*StorageFetcher)(nil)
@@ -100,16 +86,12 @@ func newJWTGenerator(privKeyHex string) (nodeauthjwt.JWTGenerator, ed25519.Publi
 // NewStorageFetcher parses the ed25519 key, dials the storage service, and
 // prepares the JWT generator. It returns the derived public key so the caller
 // can log which identity is being used (the pubkey whitelisted by storage).
-func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes int64, timeout time.Duration, lggr logger.Logger, httpClient types.HTTPClient, opts ...StorageFetcherOption) (*StorageFetcher, ed25519.PublicKey, error) {
+func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes int64, timeout time.Duration, lggr logger.Logger, httpClient types.HTTPClient) (*StorageFetcher, ed25519.PublicKey, error) {
 	if storageURL == "" {
 		return nil, nil, fmt.Errorf("storage service url is required")
 	}
 	if httpClient == nil {
 		return nil, nil, fmt.Errorf("artifact HTTP client is required")
-	}
-	config := storageFetcherConfig{}
-	for _, opt := range opts {
-		opt(&config)
 	}
 
 	jwtGen, pub, err := newJWTGenerator(privKeyHex)
@@ -124,19 +106,8 @@ func NewStorageFetcher(storageURL string, tls bool, privKeyHex string, maxBytes 
 		creds = insecure.NewCredentials()
 	}
 
-	grpcOptions := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
-	// Preserve the hostname so the parent-side SOCKS proxy performs DNS resolution.
 	target := "passthrough:///" + storageURL
-	if config.dialContext != nil {
-		grpcOptions = append(grpcOptions,
-			grpc.WithNoProxy(),
-			grpc.WithAuthority(storageURL),
-			grpc.WithContextDialer(func(ctx context.Context, address string) (net.Conn, error) {
-				return config.dialContext(ctx, "tcp", address)
-			}),
-		)
-	}
-	conn, err := grpc.NewClient(target, grpcOptions...)
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, nil, fmt.Errorf("dialing storage service %q: %w", storageURL, err)
 	}
@@ -170,7 +141,7 @@ func (f *StorageFetcher) FetchBinary(ctx context.Context, locator string) ([]byt
 	if err != nil {
 		return nil, fmt.Errorf("resolving artifact %q: %w", locator, err)
 	}
-	return f.download(ctx, url)
+	return f.Download(ctx, url)
 }
 
 // artifactID extracts the storage-service artifact id from a binary locator.
@@ -227,8 +198,10 @@ func (f *StorageFetcher) withJWT(ctx context.Context, req any) (context.Context,
 	return metadata.AppendToOutgoingContext(ctx, nodeauthgrpc.AuthorizationHeader, nodeauthgrpc.BearerPrefix+token), nil
 }
 
-// download GETs the pre-signed URL and returns the body, size-limited.
-func (f *StorageFetcher) download(ctx context.Context, url string) ([]byte, error) {
+// Download GETs the pre-signed artifact URL and returns the decoded body,
+// size-limited. Exposed so callers can exercise the artifact HTTP client's
+// policy (HTTPS-only, no redirects) without a storage service.
+func (f *StorageFetcher) Download(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("building download request: %w", err)
@@ -262,6 +235,9 @@ func (f *StorageFetcher) download(ctx context.Context, url string) ([]byte, erro
 	decoded, err := base64.StdEncoding.DecodeString(string(encoded))
 	if err != nil {
 		return nil, fmt.Errorf("base64 decoding binary: %w", err)
+	}
+	if int64(len(decoded)) > f.maxBytes {
+		return nil, fmt.Errorf("binary exceeds max size of %d bytes", f.maxBytes)
 	}
 	return decoded, nil
 }

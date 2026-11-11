@@ -46,23 +46,8 @@ func TestConfidentialWorkflowsCapacityE2E(t *testing.T) {
 	binary := buildCapacityWorkflow(t, root)
 	hash := sha256.Sum256(binary)
 
-	// Holding downloads keeps admitted slots occupied independently of CPU speed.
-	// Releasing them together exercises the compilation queue and concurrent guests.
-	entered := make(chan struct{}, 64)
-	release := make(chan struct{})
-	unblock := sync.OnceFunc(func() { close(release) })
-	defer unblock()
-	artifact := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case entered <- struct{}{}:
-		case <-r.Context().Done():
-			return
-		}
-		select {
-		case <-release:
-			_, _ = io.WriteString(w, base64.StdEncoding.EncodeToString(binary))
-		case <-r.Context().Done():
-		}
+	artifact := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, base64.StdEncoding.EncodeToString(binary))
 	}))
 	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	require.NoError(t, err)
@@ -78,10 +63,12 @@ func TestConfidentialWorkflowsCapacityE2E(t *testing.T) {
 	t.Cleanup(storageServer.Stop)
 
 	t.Setenv("OUTBOUND_ALLOW_LOCAL_FOR_TESTS", "true")
+	t.Setenv("BINARY_CACHE_DIR", t.TempDir())
 	t.Setenv("ENCLAVE_MEMORY_MIB", "2048")
 	t.Setenv("TOTAL_MEMORY_MIB", "4096")
+	// The grace period holds enclave admission slots while the warm-cache burst arrives.
 	t.Setenv("ENCLAVE_SETTINGS", fmt.Sprintf(
-		`{"storageKey":%q,"storageServiceUrl":%q,"gatewayUrl":%q,"binaryFetchTimeout":"2m","executionTimeout":"2m","workflowGracePeriod":"-1s"}`,
+		`{"storageKey":%q,"storageServiceUrl":%q,"gatewayUrl":%q,"binaryFetchTimeout":"2m","executionTimeout":"2m","workflowGracePeriod":"30s"}`,
 		fmt.Sprintf("%064x", 1),
 		fmt.Sprintf("127.0.0.1:%d", storageListener.Addr().(*net.TCPAddr).Port), artifactURL))
 	local := testhelpers.SetupLocalEnclaves(t, testhelpers.LocalEnclaveSetupConfig{
@@ -105,7 +92,7 @@ func TestConfidentialWorkflowsCapacityE2E(t *testing.T) {
 	require.Positive(t, memory.TotalMB, "guest memory must be observable")
 	minCapacity, maxCapacity := workflowCapacityBounds(memory.TotalMB)
 	burst := 2 * maxCapacity
-	require.LessOrEqual(t, burst, cap(entered), "unexpected capacity for the test enclave")
+	require.LessOrEqual(t, burst, 64, "unexpected capacity for the test enclave")
 	t.Logf("guest RAM=%d MiB; reserve=%d MiB; per execution=%d MiB; capacity=%d..%d; burst=%d distinct workflows",
 		memory.TotalMB, memlimit.ReserveMB, memlimit.PerExecMB, minCapacity, maxCapacity, burst)
 
@@ -166,47 +153,42 @@ func TestConfidentialWorkflowsCapacityE2E(t *testing.T) {
 		return nil
 	}
 
+	require.NoError(t, execute(t.Context(), -1), "warm the host binary cache before testing enclave admission")
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	var wg sync.WaitGroup
-	defer func() { unblock(); cancel(); wg.Wait() }()
+	defer func() { cancel(); wg.Wait() }()
 	results := make(chan error, burst)
+	start := make(chan struct{})
 	for i := range burst {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-start
 			results <- execute(ctx, i)
 		}()
 	}
+	close(start)
 	admitted, rejected := 0, 0
-	admissionDeadline := time.NewTimer(30 * time.Second)
-	defer admissionDeadline.Stop()
 	for admitted+rejected < burst {
 		select {
-		case <-entered:
-			admitted++
 		case err := <-results:
-			// The enclave server wraps app errors (including Code 429) in HTTP 500.
-			require.ErrorContains(t, err, "enclave at capacity: too many concurrent executions",
-				"only explicit capacity rejection is acceptable before release")
-			rejected++
-		case <-admissionDeadline.C:
-			t.Fatalf("admission did not settle: admitted=%d rejected=%d burst=%d", admitted, rejected, burst)
+			if err == nil {
+				admitted++
+			} else {
+				// The enclave server wraps app errors (including Code 429) in HTTP 500.
+				require.ErrorContains(t, err, "enclave at capacity: too many concurrent executions",
+					"admitted workflows must return their attested WASM result; only capacity rejection is acceptable")
+				rejected++
+			}
+		case <-ctx.Done():
+			t.Fatalf("burst did not finish: admitted=%d rejected=%d burst=%d: %v", admitted, rejected, burst, ctx.Err())
 		}
 	}
 	require.GreaterOrEqual(t, admitted, minCapacity)
 	require.LessOrEqual(t, admitted, maxCapacity)
 	require.Positive(t, rejected, "burst never exercised overload protection")
-	t.Logf("admitted=%d rejected=%d; releasing downloads for concurrent WASM execution", admitted, rejected)
-	unblock()
-	for range admitted {
-		select {
-		case err := <-results:
-			require.NoError(t, err, "admitted workflow must survive the burst and return its attested WASM result")
-		case <-ctx.Done():
-			t.Fatal("admitted workflows did not finish: ", ctx.Err())
-		}
-	}
-	require.NoError(t, execute(ctx, burst), "fresh workflow must succeed after draining; slots must be released")
+	t.Logf("admitted=%d rejected=%d; all admitted workflows returned their attested WASM result", admitted, rejected)
+	require.NoError(t, execute(t.Context(), burst), "fresh workflow must succeed after draining; slots must be released")
 }
 
 type capacityStorageService struct {
