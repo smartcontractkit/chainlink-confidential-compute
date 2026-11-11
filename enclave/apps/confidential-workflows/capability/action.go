@@ -10,6 +10,8 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/settings"
+	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
 
@@ -48,6 +50,9 @@ func (a *EnclaveActionInputAdapter) GetVaultDonSecrets() []*frameworktypes.Secre
 type ConfidentialWorkflowAction struct {
 	framework.ConfidentialAction[*EnclaveActionInputAdapter, *confworkflowtypes.ConfidentialWorkflowResponse]
 	lggr logger.SugaredLogger
+	// settings is the node's CRE settings, the source of the limits sent to
+	// the enclave with each execution.
+	settings settings.Getter
 }
 
 func validateExecutionIdentity(metadata capabilities.RequestMetadata, execution *confworkflowtypes.WorkflowExecution) string {
@@ -87,6 +92,10 @@ func (a *ConfidentialWorkflowAction) Execute(ctx context.Context, metadata capab
 		return nil, caperrors.NewPublicUserError(errors.New(errStr), caperrors.InvalidArgument)
 	}
 	ctx = metadata.ContextWithCRE(ctx)
+	input.Execution.Limits = nil
+	if executionLimitsActive(ctx, a.settings, cresettings.Default.PerWorkflow.FeatureConfidentialWorkflowExecutionLimitsActivePeriod, metadata.ExecutionTimestamp, a.lggr) {
+		input.Execution.Limits = resolveExecutionLimits(ctx, a.settings, a.lggr)
+	}
 	out, err := a.ConfidentialAction.Execute(ctx, metadata, &EnclaveActionInputAdapter{input})
 	if err != nil {
 		// Preserve typed errors from the underlying framework (matches confidential-http's
@@ -141,6 +150,10 @@ func (a *ConfidentialWorkflowAction) Initialise(ctx context.Context, dependencie
 }
 
 func NewService(lggr logger.Logger, limitsFactory limits.Factory) *ConfidentialWorkflowAction {
+	if limitsFactory.Settings == nil {
+		// loopserver always supplies a getter; without one no limits can be sent.
+		logger.Sugared(lggr).Warn("CRE settings unavailable: no CRE limits will be sent to the enclave")
+	}
 	return &ConfidentialWorkflowAction{
 		ConfidentialAction: framework.NewConfidentialAction[*EnclaveActionInputAdapter](
 			lggr,
@@ -154,6 +167,7 @@ func NewService(lggr logger.Logger, limitsFactory limits.Factory) *ConfidentialW
 				return &confworkflowtypes.ConfidentialWorkflowResponse{}
 			},
 		),
-		lggr: logger.Sugared(logger.Named(lggr, ServiceName)),
+		lggr:     logger.Sugared(logger.Named(lggr, ServiceName)),
+		settings: limitsFactory.Settings,
 	}
 }

@@ -107,6 +107,7 @@ func TestExecute_RejectsNilExecution(t *testing.T) {
 
 type mockConfidentialAction struct {
 	enclaves []cctypes.Enclave
+	executed *EnclaveActionInputAdapter
 }
 
 func (m *mockConfidentialAction) GetEnclaves() []cctypes.Enclave {
@@ -125,7 +126,8 @@ func (m *mockConfidentialAction) Initialise(context.Context, core.StandardCapabi
 func (m *mockConfidentialAction) EnsureExecutorReady(context.Context) error {
 	return nil
 }
-func (m *mockConfidentialAction) Execute(context.Context, capabilities.RequestMetadata, *EnclaveActionInputAdapter) (*capabilities.ResponseAndMetadata[*confworkflowtypes.ConfidentialWorkflowResponse], error) {
+func (m *mockConfidentialAction) Execute(_ context.Context, _ capabilities.RequestMetadata, input *EnclaveActionInputAdapter) (*capabilities.ResponseAndMetadata[*confworkflowtypes.ConfidentialWorkflowResponse], error) {
+	m.executed = input
 	return nil, nil
 }
 
