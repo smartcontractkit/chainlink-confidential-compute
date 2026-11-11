@@ -31,8 +31,11 @@ const (
 	PerExecMB uint64 = 128
 
 	// Additional compiler/decompression allowance, retained even when the pool
-	// is idle. Based on local x86 fixture screening; recheck after Wasmtime changes.
-	PerCompilationMB   uint64 = 384
+	// is idle. Estimated from local x86 fixture screening, not a Wasmtime limit.
+	// Recheck after Wasmtime changes.
+	PerCompilationMB uint64 = 384
+	// TargetCompilations is a policy ceiling for the reserved compile pool, not a
+	// Wasmtime limit. Guest RAM or injected settings can lower actual concurrency.
 	TargetCompilations uint64 = 8
 )
 
