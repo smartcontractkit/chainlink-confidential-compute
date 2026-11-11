@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
-	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"github.com/stretchr/testify/require"
 )
@@ -19,29 +18,18 @@ const testLocator = "test-artifact-id"
 // so nothing dials this.
 const testGatewayURL = "http://gateway.invalid"
 
-// newStorageBackedApp returns an app with a complete settings payload injected.
-// The host (not the enclave) fetches workflow binaries, so no storage service is
-// stood up; the rawBinary argument is ignored and kept only so existing call
-// sites read naturally.
-func newStorageBackedApp(t *testing.T, rawBinary []byte, opts ...Option) (types.EnclaveApp, string) {
-	t.Helper()
-	return newStorageBackedAppWithSettings(t, rawBinary, nil, opts...)
-}
-
-// newStorageBackedAppWithSettings is newStorageBackedApp with the injected
-// settings tweaked by mutate.
-func newStorageBackedAppWithSettings(t *testing.T, rawBinary []byte, mutate func(*WorkflowSettings), opts ...Option) (types.EnclaveApp, string) {
+func newConfiguredApp(t *testing.T, mutate func(*WorkflowSettings), opts ...Option) *confidentialWorkflowsApp {
 	t.Helper()
 
-	a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), opts...)
+	a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t), opts...).(*confidentialWorkflowsApp)
 	settings := testSettings()
 	if mutate != nil {
 		mutate(&settings)
 	}
 	raw, err := json.Marshal(settings)
 	require.NoError(t, err)
-	require.NoError(t, a.(*confidentialWorkflowsApp).InjectSettings(raw))
-	return a, testLocator
+	require.NoError(t, a.InjectSettings(raw))
+	return a
 }
 
 // testSettings is a complete settings payload, satisfying the fields the app

@@ -383,23 +383,8 @@ func TestHandleExecuteRecordsOneExecutionAfterQuorum(t *testing.T) {
 		signers[i] = publicKey
 	}
 
-	execution := &confworkflowtypes.WorkflowExecution{
-		WorkflowId: "workflow-id",
-		BinaryUrl:  "artifact-id",
-		BinaryHash: sha256Sum([]byte("binary")),
-		SdkExecuteRequest: &sdkpb.ExecuteRequest{
-			Request: &sdkpb.ExecuteRequest_Trigger{Trigger: &sdkpb.Trigger{Id: 7}},
-		},
-	}
-	publicData, err := proto.Marshal(execution)
-	require.NoError(t, err)
-	requestID := sha256.Sum256([]byte("execution-metrics-success"))
-	request := types.ComputeRequest{
-		RequestID:  requestID,
-		PublicData: publicData,
-		AppID:      types.AppIDConfidentialWorkflows,
-	}
-	responseBody := util.MustMarshal(t, types.ExecuteResponse{RequestID: requestID})
+	request := workflowExecuteRequest(t, "execution-metrics-success")
+	responseBody := util.MustMarshal(t, types.ExecuteResponse{RequestID: request.RequestID})
 	transport := newControlledRoundTripper(responseBody, nil)
 	recordedMetrics := newRecordingExecutionMetrics()
 	host := NewHostServer(context.Background(), &http.Client{Transport: transport})
