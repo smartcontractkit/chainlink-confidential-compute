@@ -87,7 +87,8 @@ func main() {
 			Transport: tunnelTransport(dialer, true),
 		}))
 		verifier := signatureverifier.NewEd25519SignatureVerifier()
-		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier, gw.RetryBackoff, gw.RetryTimeout), nil
+		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier, gw.RetryBackoff, gw.RetryTimeout,
+			gw.MaxEncryptedSharesPerRelayResult), nil
 	}
 
 	storageFactory := func(storageURL string, useTLS bool, privateKey string, maxBytes int64, timeout time.Duration, lggr cllogger.Logger) (app.RawFetcher, ed25519.PublicKey, error) {

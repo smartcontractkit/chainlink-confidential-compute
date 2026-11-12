@@ -67,6 +67,13 @@ const (
 	// settings (gatewayRetryTimeout).
 	DefaultGatewayRetryTimeout = 2 * time.Minute
 
+	// DefaultMaxEncryptedSharesPerRelayResult caps the encrypted shares taken
+	// from one relay-DON signer's result for one secret. Extra shares are
+	// dropped, so a faulty signer cannot fail the request or inflate decryption
+	// work. Overridable per-deployment via the injected settings
+	// (maxEncryptedSharesPerRelayResult).
+	DefaultMaxEncryptedSharesPerRelayResult = 128
+
 	// DefaultWorkflowGracePeriod is how long a validated execution waits before
 	// it starts running. Overridable per-deployment via the injected settings
 	// (workflowGracePeriod); a negative setting disables the wait.
