@@ -74,7 +74,8 @@ func main() {
 			Transport: tunnelTransport(dialer, true),
 		}))
 		verifier := signatureverifier.NewEd25519SignatureVerifier()
-		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier, gw.RetryBackoff, gw.RetryTimeout), nil
+		return app.NewRemoteDispatcher(client, att, types.EnclaveConfig{}, appLogger, kc, comb, verifier, gw.RetryBackoff, gw.RetryTimeout,
+			gw.MaxEncryptedSharesPerRelayResult), nil
 	}
 
 	// allow-reconfig is measured into the PCR, so the host cannot enable the fixture profile.

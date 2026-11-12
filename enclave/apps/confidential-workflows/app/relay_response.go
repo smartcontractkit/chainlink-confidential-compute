@@ -129,7 +129,7 @@ func describeSecretsResult(result confidentialrelay.SecretsResponseResult) strin
 		entries = append(entries, fmt.Sprintf("%s/%s:ct=%s,shares=%d",
 			s.ID.Namespace, s.ID.Key, digestOf([]byte(s.Ciphertext)), len(s.EncryptedShares)))
 	}
-	return fmt.Sprintf("secrets=%d[%s]", len(result.Secrets), strings.Join(entries, " "))
+	return fmt.Sprintf("secrets=%d pk=%s[%s]", len(result.Secrets), digestOf([]byte(result.RawVaultPublicKey)), strings.Join(entries, " "))
 }
 
 // digestOf renders a short SHA-256 prefix for comparing values across responses
