@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -96,4 +98,55 @@ func TestRetryWithBackoff_Success_NoRetry(t *testing.T) {
 
 	assert.Equal(t, 1, calls)
 	assert.NoError(t, err)
+}
+
+func TestRetryWithBackoff_TimingAndCancellation(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		maxRetries   int
+		timeout      time.Duration
+		cancelInCall bool
+		wantCalls    int
+		wantDelay    time.Duration
+		wantErr      error
+	}{
+		{"single failure", 1, time.Minute, false, 1, 0, nil},
+		{"exhausted retries", 3, time.Minute, false, 3, 30 * time.Second, nil},
+		{"already expired", 3, 0, false, 0, 0, context.DeadlineExceeded},
+		{"during backoff", 3, 5 * time.Second, false, 1, 5 * time.Second, context.DeadlineExceeded},
+		{"during attempt", 3, time.Minute, true, 1, 0, context.Canceled},
+		{"during final attempt", 1, time.Minute, true, 1, 0, context.Canceled},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				e := newTestExecutor(t, tt.maxRetries)
+				e.capConfig.RetryBackoffSeconds = 10
+				ctx, cancel := context.WithTimeout(context.Background(), tt.timeout)
+				defer cancel()
+				start := time.Now()
+				attempts := []time.Duration{}
+				var attemptErrors []error
+				err := e.retryWithBackoff(ctx, func() error {
+					attempts = append(attempts, time.Since(start))
+					if tt.cancelInCall {
+						cancel()
+					}
+					attemptErr := errors.New("attempt failed")
+					attemptErrors = append(attemptErrors, attemptErr)
+					return attemptErr
+				})
+
+				assert.Equal(t, tt.wantDelay, time.Since(start))
+				assert.Equal(t, []time.Duration{0, 10 * time.Second, 30 * time.Second}[:tt.wantCalls], attempts)
+				if tt.wantErr != nil {
+					assert.True(t, err == tt.wantErr, "got %v, want %v", err, tt.wantErr)
+				} else {
+					require.ErrorContains(t, err, "failed after")
+					for _, attemptErr := range attemptErrors {
+						assert.ErrorIs(t, err, attemptErr)
+					}
+				}
+			})
+		})
+	}
 }
