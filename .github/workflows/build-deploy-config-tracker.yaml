@@ -96,6 +96,8 @@ jobs:
             region: "us-west-2"
           - account: "129896631554"
             region: "us-east-2"
+          - account: "008732161165"
+            region: "us-east-2"
     runs-on: ubuntu-latest
     permissions:
       contents: read
