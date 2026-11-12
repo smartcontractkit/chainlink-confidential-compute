@@ -40,6 +40,7 @@ import (
 	"github.com/smartcontractkit/chainlink/system-tests/lib/cre/environment/blockchains/evm"
 	confidentialrelay "github.com/smartcontractkit/chainlink/system-tests/lib/cre/features/confidentialrelay"
 	creworkflow "github.com/smartcontractkit/chainlink/system-tests/lib/cre/workflow"
+	systemtests "github.com/smartcontractkit/chainlink/system-tests/tests/test-helpers"
 	ttypes "github.com/smartcontractkit/chainlink/system-tests/tests/test-helpers/configuration"
 
 	"github.com/smartcontractkit/chainlink-confidential-compute/tests"
@@ -448,6 +449,13 @@ func startFakeStorageService(t *testing.T, enclaveHost string) (string, *fakeSto
 	return fmt.Sprintf("%s:%d", enclaveHost, port), svc
 }
 
+// vaultDirectReadEnabledTOML turns on direct Vault GetSecrets reads for one
+// workflow. The read gate checks the execution timestamp, so execution
+// timestamps must be enabled too.
+const vaultDirectReadEnabledTOML = `[PerWorkflow]
+FeatureVaultGetSecretsDirectlyActivePeriod = '[2000-01-01 00:00:00 +0000 UTC,2100-01-01 00:00:00 +0000 UTC]'
+ExecutionTimestampsEnabled = 'true'`
+
 func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, buildLocalBinaries func() error) {
 	t.Helper()
 	if os.Getenv("REMOTE_ENCLAVE_URLS") != "" || tests.UseLegacyEnclaves() {
@@ -683,7 +691,7 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	gwProxy.BringUp()
 	testLogger.Info().Msg("Gateway-outage phase: gateway proxy back up; waiting for a post-outage execution")
 
-	waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, 2, 5*time.Minute)
+	waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, time.Time{}, 2, 5*time.Minute)
 
 	// The outage must have been real: the enclave's gateway calls during the
 	// window have to have hit the proxy while it was rejecting. Zero downHits
@@ -691,7 +699,21 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	// and the resilience assertion above passed vacuously.
 	require.Positive(t, gwProxy.HitsWhileDown(), "no gateway request hit the simulated outage; the resilience phase did not exercise retries")
 
-	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write + gateway-outage resilience validated")
+	testLogger.Info().Msg("Gateway-outage resilience validated")
+
+	// 9. Direct Vault reads: each relay node reads its own subset of shares from
+	// the Vault nodes, so relay nodes sign different share sets and the enclave
+	// has to combine them. Enable direct reads for this workflow, confirm a Vault
+	// node served one, then require further successful executions. Cleanup
+	// restores the original settings.
+	testLogger.Info().Msg("Direct-read phase: enabling direct Vault GetSecrets for the workflow")
+	systemtests.ApplyCRESettings(t, testEnv, systemtests.Workflow(strings.TrimPrefix(workflowID, "0x"), vaultDirectReadEnabledTOML))
+	requireVaultDirectSecretsRead(t, testEnv, "MOCK_SECRET", 5*time.Minute)
+	// Two more executions, so at least one started after direct reads were on.
+	waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, time.Now(), 2, 5*time.Minute)
+	testLogger.Info().Msg("Direct-read phase validated")
+
+	testLogger.Info().Msg("Engine-path E2E test passed: VaultDON remote dispatch + in-enclave http-actions interception + DON-signed chain write + gateway-outage resilience + direct Vault reads validated")
 }
 
 // engineTestFeedID / engineTestPrice are the feed the confidential workflow reports
@@ -805,7 +827,7 @@ func waitForWorkflowExecutionComplete(
 	timeout time.Duration,
 ) {
 	t.Helper()
-	waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, 1, timeout)
+	waitForWorkflowExecutions(t, testEnv, testLogger, workflowID, time.Time{}, 1, timeout)
 }
 
 // waitForWorkflowExecutions waits until at least want distinct successful-execution
@@ -820,11 +842,15 @@ func waitForWorkflowExecutionComplete(
 // during an outage would be silently ignored as long as later triggers succeed),
 // so any "Workflow execution failed*" line carrying the workflowID fails the
 // test immediately.
+//
+// A non-zero since counts only lines logged after that time; otherwise the
+// last 10000 lines are scanned.
 func waitForWorkflowExecutions(
 	t *testing.T,
 	testEnv *ttypes.TestEnvironment,
 	testLogger zerolog.Logger,
 	workflowID string,
+	since time.Time,
 	want int,
 	timeout time.Duration,
 ) {
@@ -832,27 +858,12 @@ func waitForWorkflowExecutions(
 
 	containers := workflowDONContainerNames(testEnv)
 	require.NotEmpty(t, containers, "no workflow-DON containers found to scrape")
-	successMsg := []byte(`"msg":"Workflow execution finished successfully"`)
-	failureMsg := []byte(`"msg":"Workflow execution failed`)
-	needleID := []byte(workflowID)
 	testLogger.Info().Msgf("Waiting for %d successful-trigger log(s) for workflowID %s on %d container(s): %v", want, workflowID, len(containers), containers)
 
 	deadline := time.Now().Add(timeout)
 	for {
 		for _, name := range containers {
-			out, _ := exec.Command("docker", "logs", "--tail", "10000", name).CombinedOutput()
-			count := 0
-			for _, line := range bytes.Split(out, []byte{'\n'}) {
-				if !bytes.Contains(line, needleID) {
-					continue
-				}
-				if bytes.Contains(line, failureMsg) {
-					t.Fatalf("workflow execution failed for workflowID %s (container %s): %s", workflowID, name, line)
-				}
-				if bytes.Contains(line, successMsg) {
-					count++
-				}
-			}
+			count := countWorkflowExecutionSuccesses(t, name, workflowID, since)
 			if count >= want {
 				testLogger.Info().Msgf("Found %d successful-trigger log(s) in container %s for workflowID %s", count, name, workflowID)
 				return
@@ -866,6 +877,34 @@ func waitForWorkflowExecutions(
 	}
 }
 
+// countWorkflowExecutionSuccesses counts the successful-execution log lines for
+// workflowID in one container, failing the test on any execution failure line.
+func countWorkflowExecutionSuccesses(t *testing.T, container, workflowID string, since time.Time) int {
+	t.Helper()
+	successMsg := []byte(`"msg":"Workflow execution finished successfully"`)
+	failureMsg := []byte(`"msg":"Workflow execution failed`)
+	needleID := []byte(workflowID)
+
+	args := []string{"logs", "--tail", "10000", container}
+	if !since.IsZero() {
+		args = []string{"logs", "--since", since.Format(time.RFC3339Nano), container}
+	}
+	out, _ := exec.Command("docker", args...).CombinedOutput()
+	count := 0
+	for _, line := range bytes.Split(out, []byte{'\n'}) {
+		if !bytes.Contains(line, needleID) {
+			continue
+		}
+		if bytes.Contains(line, failureMsg) {
+			t.Fatalf("workflow execution failed for workflowID %s (container %s): %s", workflowID, container, line)
+		}
+		if bytes.Contains(line, successMsg) {
+			count++
+		}
+	}
+	return count
+}
+
 // workflowDONContainerNames returns the chainlink container names for every
 // nodeset whose DON hosts the workflow DON flag.
 func workflowDONContainerNames(testEnv *ttypes.TestEnvironment) []string {
@@ -875,10 +914,25 @@ func workflowDONContainerNames(testEnv *ttypes.TestEnvironment) []string {
 			workflowDONNames[don.Name] = true
 		}
 	}
+	return nodeSetContainerNames(testEnv, workflowDONNames)
+}
 
-	var names []string
+// vaultDONContainerNames returns the chainlink container names for the nodeset
+// hosting the vault capability.
+func vaultDONContainerNames(testEnv *ttypes.TestEnvironment) []string {
+	vaultDONNames := map[string]bool{}
+	for _, don := range testEnv.Dons.List() {
+		if don.HasFlag(crelib.VaultCapability) {
+			vaultDONNames[don.Name] = true
+		}
+	}
+	return nodeSetContainerNames(testEnv, vaultDONNames)
+}
+
+func nodeSetContainerNames(testEnv *ttypes.TestEnvironment, names map[string]bool) []string {
+	var containers []string
 	for _, ns := range testEnv.Config.NodeSets {
-		if !workflowDONNames[ns.Name] {
+		if !names[ns.Name] {
 			continue
 		}
 		if ns.Out == nil {
@@ -888,10 +942,40 @@ func workflowDONContainerNames(testEnv *ttypes.TestEnvironment) []string {
 			if cl == nil || cl.Node == nil || cl.Node.ContainerName == "" {
 				continue
 			}
-			names = append(names, cl.Node.ContainerName)
+			containers = append(containers, cl.Node.ContainerName)
 		}
 	}
-	return names
+	return containers
+}
+
+// requireVaultDirectSecretsRead waits until a vault node logs a direct
+// GetSecrets request for secretID.
+func requireVaultDirectSecretsRead(t *testing.T, testEnv *ttypes.TestEnvironment, secretID string, timeout time.Duration) {
+	t.Helper()
+	containers := vaultDONContainerNames(testEnv)
+	require.NotEmpty(t, containers, "no vault DON containers found to scrape")
+
+	require.Eventually(t, func() bool {
+		for _, name := range containers {
+			out, err := exec.Command("docker", "logs", "--tail", "10000", name).CombinedOutput()
+			if err != nil {
+				continue
+			}
+			for _, line := range bytes.Split(out, []byte{'\n'}) {
+				if !bytes.Contains(line, []byte("received workflow get secrets request")) {
+					continue
+				}
+				if !bytes.Contains(line, []byte(secretID)) {
+					continue
+				}
+				if bytes.Contains(line, []byte("get_secrets_directly: true")) ||
+					bytes.Contains(line, []byte("get_secrets_directly:true")) {
+					return true
+				}
+			}
+		}
+		return false
+	}, timeout, 5*time.Second, "vault never logged a direct GetSecrets request for %s", secretID)
 }
 
 // deployConfidentialWorkflowForEngine registers a confidential workflow with the
