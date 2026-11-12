@@ -1,68 +1,79 @@
 package app
 
 import (
-	"cmp"
+	"io"
 	"math"
+	"time"
 
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
+	"github.com/smartcontractkit/chainlink-common/pkg/config"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/memlimit"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 )
 
-// The enclave's own WASM limits, which are the WASM host's built-in defaults.
-const (
-	enclaveResponseSizeBytes      = uint64(5 * 1024 * 1024)
-	enclaveLogLenBytes            = uint64(1024 * 1024)
-	enclaveLogCount               = uint32(10_000)
-	enclaveCapabilityConcurrency  = uint32(30)
-	enclaveUserMetricPayloadBytes = uint64(4096)
-	enclaveUserMetricNameLength   = uint32(128)
-	enclaveUserMetricLabels       = uint32(20)
-	enclaveUserMetricLabelValue   = uint32(256)
-)
+const enclaveResponseSizeBytes = uint64(5 * 1024 * 1024)
 
-// applyWASMLimits sets the WASM host limits for one execution from the CRE
-// limits the workflow DON sent, taking the more lenient of each sent value and
-// the enclave's own. CRE defaults are stricter than the enclave's, so in
-// practice only an override above the enclave's value takes effect; moving
-// towards CRE's values later only needs this policy to change.
-//
-// Some sent limits are not applied. WASMMemoryLimit is not, because memory stays
-// at the per-execution budget the enclave admits executions against
-// (memlimit.PerExecMB). ExecutionTimeout is not, because the injected
-// executionTimeout is both the enclave's value and its ceiling.
-// ExecutionResponseLimitEnforced is not, because not enforcing is the more
-// lenient choice.
-//
-// The returned func releases the limiters it created and must run after the
-// module is closed.
-func applyWASMLimits(modCfg *host.ModuleConfig, l *confworkflowtypes.WASMLimits, execReq *sdkpb.ExecuteRequest) func() {
-	modCfg.MaxResponseSizeBytes = enclaveResponseSizeBytes
-	if l != nil {
-		modCfg.MaxResponseSizeBytes = lenient(enclaveResponseSizeBytes, execReq.GetMaxResponseSize())
+// applyWASMLimits applies only provided values. Nil preserves host defaults;
+// fixed-value limiters preserve explicit zero without resolving settings again.
+// Admission memory, response buffering and the operator timeout remain ceilings.
+// The returned cleanup must run after the module is closed.
+func applyWASMLimits(cfg *host.ModuleConfig, l *confworkflowtypes.WASMLimits, req *sdkpb.ExecuteRequest) func() {
+	if l == nil {
+		return func() {}
 	}
-	// The host compares the log length as an int32.
-	modCfg.MaxLogLenBytes = uint32(min(lenient(enclaveLogLenBytes, l.GetLogLineLimitBytes()), math.MaxInt32))
-	modCfg.MaxLogCountDONMode = lenient(enclaveLogCount, l.GetLogEventLimit())
-	modCfg.MaxLogCountNodeMode = modCfg.MaxLogCountDONMode
-	modCfg.MaxUserMetricPayloadBytes = uint32(min(lenient(enclaveUserMetricPayloadBytes, l.GetUserMetricPayloadLimitBytes()), math.MaxUint32))
-	modCfg.MaxUserMetricNameLength = lenient(enclaveUserMetricNameLength, l.GetUserMetricNameLengthLimit())
-	modCfg.MaxUserMetricLabelsPerMetric = lenient(enclaveUserMetricLabels, l.GetUserMetricLabelsPerMetric())
-	modCfg.MaxUserMetricLabelValueLength = lenient(enclaveUserMetricLabelValue, l.GetUserMetricLabelValueLength())
-
-	userMetrics := limits.NewGateLimiter(l.GetUserMetricEnabled())
-	pendingCalls := limits.WorkflowResourcePoolLimiter(int(lenient(enclaveCapabilityConcurrency, l.GetCapabilityConcurrencyLimit())))
-	modCfg.EnableUserMetricsLimiter = userMetrics
-	modCfg.PendingCallsLimiter = pendingCalls
+	if l.MemoryLimitBytes != nil {
+		cfg.MemoryLimiter = limits.NewUpperBoundLimiter(config.Size(min(l.GetMemoryLimitBytes(), uint64(memlimit.PerExecMB)*uint64(config.MByte))))
+	}
+	if d := l.ExecutionTimeout; d != nil && d.CheckValid() == nil && d.AsDuration() >= 0 {
+		ceiling := 10 * time.Minute // Matches the host default when no operator timeout is injected.
+		if cfg.Timeout != nil {
+			ceiling = *cfg.Timeout
+		}
+		timeout := min(d.AsDuration(), ceiling)
+		cfg.Timeout = &timeout
+	}
+	if req != nil {
+		cfg.MaxResponseSizeLimiter = limits.NewUpperBoundLimiter(config.Size(min(req.GetMaxResponseSize(), enclaveResponseSizeBytes)))
+	}
+	if l.ResponseLimitEnforced != nil {
+		cfg.EnforceResponseSizeLimiter = limits.NewGateLimiter(l.GetResponseLimitEnforced())
+	}
+	if l.CapabilityConcurrencyLimit != nil {
+		cfg.PendingCallsLimiter = limits.WorkflowResourcePoolLimiter(int(l.GetCapabilityConcurrencyLimit()))
+	}
+	if l.LogLineLimitBytes != nil {
+		cfg.MaxLogLenBytes = uint32(min(l.GetLogLineLimitBytes(), math.MaxInt32))
+	}
+	if l.LogEventLimit != nil {
+		cfg.MaxLogCountDONMode = l.GetLogEventLimit()
+		cfg.MaxLogCountNodeMode = l.GetLogEventLimit()
+	}
+	// User metrics stay disabled until bounded, end-to-end forwarding exists.
+	// Opening the host gate today would buffer events that customers never receive.
+	if l.UserMetricPayloadLimitBytes != nil {
+		cfg.MaxUserMetricPayloadLimiter = limits.NewUpperBoundLimiter(config.Size(min(l.GetUserMetricPayloadLimitBytes(), math.MaxInt64)))
+	}
+	if l.UserMetricNameLengthLimit != nil {
+		cfg.MaxUserMetricNameLengthLimiter = limits.NewUpperBoundLimiter(int(l.GetUserMetricNameLengthLimit()))
+	}
+	if l.UserMetricLabelsPerMetric != nil {
+		cfg.MaxUserMetricLabelsPerMetricLimiter = limits.NewUpperBoundLimiter(int(l.GetUserMetricLabelsPerMetric()))
+	}
+	if l.UserMetricLabelValueLength != nil {
+		cfg.MaxUserMetricLabelValueLengthLimiter = limits.NewUpperBoundLimiter(int(l.GetUserMetricLabelValueLength()))
+	}
 	return func() {
-		_ = userMetrics.Close()
-		_ = pendingCalls.Close()
+		for _, c := range []io.Closer{
+			cfg.MemoryLimiter, cfg.MaxResponseSizeLimiter, cfg.EnforceResponseSizeLimiter,
+			cfg.PendingCallsLimiter, cfg.MaxUserMetricPayloadLimiter,
+			cfg.MaxUserMetricNameLengthLimiter, cfg.MaxUserMetricLabelsPerMetricLimiter,
+			cfg.MaxUserMetricLabelValueLengthLimiter,
+		} {
+			if c != nil {
+				_ = c.Close()
+			}
+		}
 	}
-}
-
-// lenient returns the more permissive of the enclave's limit and the sent one.
-// An unsent value reads as zero, which keeps the enclave's.
-func lenient[T cmp.Ordered](ours, sent T) T {
-	return max(ours, sent)
 }

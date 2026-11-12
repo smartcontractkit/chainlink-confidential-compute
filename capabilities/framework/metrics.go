@@ -51,6 +51,8 @@ var allowedMetricAttributes = map[string]struct{}{
 	"enclave.id":      {},
 	"endpoint":        {},
 	"outcome":         {},
+	"enforced":        {},
+	"limits_present":  {},
 	"status_code":     {},
 	"capability_id":   {},
 	"method":          {},

@@ -49,6 +49,9 @@ func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter,
 		modCfg.Timeout = &timeout
 	}
 	defer applyWASMLimits(modCfg, wasmLimits, execReq)()
+	if modCfg.Timeout != nil {
+		timeout = *modCfg.Timeout
+	}
 
 	execCtx, cancel := ctx, func() {}
 	defer func() { cancel() }() // cancel is replaced once the timeout starts
@@ -63,7 +66,7 @@ func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter,
 		emitter.Emit("workflow_compilation_queue_wait", map[string]any{
 			"duration_seconds": started.Sub(queued).Seconds(),
 		})
-		if timeout > 0 {
+		if modCfg.Timeout != nil {
 			execCtx, cancel = context.WithTimeout(ctx, timeout)
 		}
 		compiled, compileErr := host.NewModule(execCtx, modCfg, binary)

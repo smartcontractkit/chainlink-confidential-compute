@@ -193,7 +193,7 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
 	// keeps the test's assumptions local to the test.
 	host := enclaveHostAddr()
 	t.Setenv("ENCLAVE_SETTINGS", fmt.Sprintf(
-		`{"storageKey":%q,"storageServiceUrl":%q,"storageServiceTls":false,"gatewayUrl":%q,"gatewayRetryBackoff":"5s","gatewayRetryTimeout":"3m"}`,
+		`{"enforceCRELimits":true,"storageKey":%q,"storageServiceUrl":%q,"storageServiceTls":false,"gatewayUrl":%q,"gatewayRetryBackoff":"5s","gatewayRetryTimeout":"3m"}`,
 		engineTestStorageKeyHex, storageAddr, fmt.Sprintf("http://%s:9998,http://%s:9999", host, host)))
 	if !tests.UseFakeEnclave() {
 		// confidential-workflows EIF is larger than confidential-http (wasmtime/CGO),

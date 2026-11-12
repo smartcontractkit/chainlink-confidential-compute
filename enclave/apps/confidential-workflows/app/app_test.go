@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -884,8 +885,10 @@ func (d *testRemoteDispatcher) GetSecrets(_ context.Context, _ string, _ [32]byt
 
 // The workflow DON's signed limits travel inside WorkflowExecution and must
 // reach the http-actions path of a real WASM run.
-func TestExecute_HttpCallWasm_AppliesSignedLimits(t *testing.T) {
+func TestExecute_HttpCallWasm_EnforcementGate(t *testing.T) {
+	var calls atomic.Int32
 	echoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer echoSrv.Close()
@@ -916,13 +919,58 @@ func TestExecute_HttpCallWasm_AppliesSignedLimits(t *testing.T) {
 	data, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
-	app, _ := newStorageBackedApp(t, binary, WithHTTPFetcher(permissiveFetcher()))
+	var settings WorkflowSettings
+	app, _ := newStorageBackedAppWithSettings(t, binary, func(s *WorkflowSettings) { settings = *s }, WithHTTPFetcher(permissiveFetcher()))
+	a := app.(*confidentialWorkflowsApp)
+	for _, tc := range []struct {
+		name                string
+		enabled             bool
+		toggleAfterSnapshot bool
+	}{
+		{name: "default off"},
+		{name: "on", enabled: true},
+		{name: "rollback"},
+		{name: "in flight keeps on", enabled: true, toggleAfterSnapshot: true},
+		{name: "in flight keeps off", toggleAfterSnapshot: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settings.EnforceCRELimits = tc.enabled
+			injectTestSettings(t, a, settings)
+			before := calls.Load()
+			em := &policyTestEmitter{afterSnapshot: func() {
+				if tc.toggleAfterSnapshot {
+					settings.EnforceCRELimits = !tc.enabled
+					injectTestSettings(t, a, settings)
+				}
+			}}
+			original := bytes.Clone(data)
+			out, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, em)
+			require.Nil(t, execErr, "expected no error, got: %+v", execErr)
+			assert.Equal(t, original, data, "policy must not mutate signed input")
+			var resp confworkflowtypes.ConfidentialWorkflowResponse
+			require.NoError(t, proto.Unmarshal(out, &resp))
+			if tc.enabled {
+				assert.Contains(t, resp.GetSdkExecutionResult().GetError(), "capability call limit exceeded (PerWorkflow.HTTPAction.CallLimit: 0)")
+				assert.Equal(t, 1, em.countOf("cre_limit_exceeded"))
+				assert.Equal(t, before, calls.Load())
+			} else {
+				assert.Empty(t, resp.GetSdkExecutionResult().GetError())
+				assert.Zero(t, em.countOf("cre_limit_exceeded"))
+				assert.Greater(t, calls.Load(), before)
+			}
+			assert.Equal(t, map[string]any{"enforced": tc.enabled, "limits_present": true}, em.lastDetails("cre_limits_policy"))
+		})
+	}
+	settings.EnforceCRELimits = true
+	injectTestSettings(t, a, settings)
+	execution.Limits = nil
+	data, err = proto.Marshal(execution)
+	require.NoError(t, err)
 	em := &recordingEmitter{}
 	out, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, em)
-	require.Nil(t, execErr, "expected no error, got: %+v", execErr)
-
+	require.Nil(t, execErr)
 	var resp confworkflowtypes.ConfidentialWorkflowResponse
 	require.NoError(t, proto.Unmarshal(out, &resp))
-	assert.Contains(t, resp.GetSdkExecutionResult().GetError(), "capability call limit exceeded (PerWorkflow.HTTPAction.CallLimit: 0)")
-	assert.Equal(t, 1, em.countOf("cre_limit_exceeded"))
+	assert.Empty(t, resp.GetSdkExecutionResult().GetError(), "gate on without limits preserves legacy behavior")
+	assert.Equal(t, map[string]any{"enforced": true, "limits_present": false}, em.lastDetails("cre_limits_policy"))
 }

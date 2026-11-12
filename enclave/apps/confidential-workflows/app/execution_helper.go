@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
+	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	httpcap "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http"
 	httpserver "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http/server"
 	consensusserver "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/consensus/server"
@@ -47,8 +49,10 @@ type enclaveExecutionHelper struct {
 	emitter          types.Emitter
 	remoteDispatcher RemoteDispatcher
 	httpFetcher      *httpfetch.Fetcher
-	// httpLimits is nil unless the workflow DON sent HTTP action limits.
+	// Limits are nil unless both request inclusion and enclave enforcement are on.
 	httpLimits *httpActionLimits
+	wasmLimits *confworkflowtypes.WASMLimits
+	userLogs   atomic.Uint64
 }
 
 var _ host.ExecutionHelper = (*enclaveExecutionHelper)(nil)
@@ -274,6 +278,16 @@ func (h *enclaveExecutionHelper) GetDONTime() (time.Time, error) { return time.N
 // per-execution count are already bounded by the WASM host (MaxLogLenBytes /
 // MaxLogCountNodeMode) before this is called, so the response stays bounded.
 func (h *enclaveExecutionHelper) EmitUserLog(msg string) error {
+	// The host treats zero numeric log settings as defaults. These checks keep
+	// explicit zero restrictive, including on direct helper calls.
+	if l := h.wasmLimits; l != nil {
+		if l.LogEventLimit != nil && h.userLogs.Add(1) > uint64(l.GetLogEventLimit()) {
+			return nil
+		}
+		if l.LogLineLimitBytes != nil && uint64(len(msg)) > l.GetLogLineLimitBytes() {
+			return nil
+		}
+	}
 	h.emit("user_log", map[string]any{
 		"message":      msg,
 		"workflow_id":  h.workflowID,

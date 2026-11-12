@@ -111,6 +111,7 @@ func (s *enclaveServer) Handler() http.Handler {
 	mux.HandleFunc("POST /config", s.handleSetConfig)
 	mux.HandleFunc("PATCH /config", s.handleUpdateConfig)
 	mux.HandleFunc("POST "+types.SettingsPath, s.handleInjectSettings)
+	mux.HandleFunc("GET "+types.SettingsPath, s.handleSettingsStatus)
 	mux.HandleFunc("/requests", s.handleExecute)
 	mux.HandleFunc("GET "+types.MemoryPath, s.handleMemory)
 	return mux
@@ -366,15 +367,25 @@ func (s *enclaveServer) handleInjectSettings(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err := c.InjectSettings(json.RawMessage(body)); err != nil {
-		// A rejected payload leaves the app unconfigured, so it serves nothing
-		// useful until a valid one arrives: log it here as well, since the only
-		// other record is the host's own log of the failed POST.
+		// A rejected update may leave the previous policy active. Logging here
+		// preserves a record alongside the host's failed POST.
 		s.logger.Printf("settings injection rejected: %v", err)
 		http.Error(w, fmt.Sprintf("injecting settings: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *enclaveServer) handleSettingsStatus(w http.ResponseWriter, _ *http.Request) {
+	provider, ok := s.app.(interface{ SettingsStatus() map[string]any })
+	if !ok {
+		http.Error(w, "app does not expose runtime settings status", http.StatusNotImplemented)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(provider.SettingsStatus())
 }
 
 // handleUpdateConfig handles PATCH on the /config endpoint. It accepts a config-update
