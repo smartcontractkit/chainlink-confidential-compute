@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 // WorkflowSettings is the runtime config + secrets contract of this app. The
@@ -50,6 +52,16 @@ import (
 //   - WorkflowGracePeriod: how long each validated execution waits before it
 //     starts running. Zero falls back to types.DefaultWorkflowGracePeriod; a
 //     negative value disables the wait.
+//   - MaxConcurrentCompilations: how many executions may hold a WASM module
+//     under compilation simultaneously. Capping this bounds peak compilation
+//     memory; raising it bounds queue wait when many workflows compile at
+//     once. Zero falls back to defaultMaxConcurrentCompilations; negative
+//     values are rejected so a typo can't fully stall execution.
+//   - MaxEncryptedSharesPerRelayResult: cap on encrypted shares taken from one
+//     relay-DON signer's result for one secret. Extra shares are dropped, so a
+//     faulty signer cannot fail the request or inflate decryption work. Zero
+//     falls back to types.DefaultMaxEncryptedSharesPerRelayResult; negative
+//     values are rejected.
 type WorkflowSettings struct {
 	StorageKey            string   `json:"storageKey"`
 	StorageServiceURL     string   `json:"storageServiceUrl"`
@@ -70,9 +82,20 @@ type WorkflowSettings struct {
 	// per-attempt GatewayRequestTimeout. Zero falls back to the enclave's
 	// built-in default.
 	GatewayRetryTimeout Duration `json:"gatewayRetryTimeout,omitempty"`
-	ExecutionTimeout      Duration `json:"executionTimeout,omitempty"`
-	WorkflowGracePeriod   Duration `json:"workflowGracePeriod,omitempty"`
+	ExecutionTimeout    Duration `json:"executionTimeout,omitempty"`
+	WorkflowGracePeriod Duration `json:"workflowGracePeriod,omitempty"`
+	// MaxConcurrentCompilations caps simultaneous WASM compilations; zero means
+	// defaultMaxConcurrentCompilations.
+	MaxConcurrentCompilations int64 `json:"maxConcurrentCompilations,omitempty"`
+	// MaxEncryptedSharesPerRelayResult caps the encrypted shares taken from one
+	// relay-DON signer's result for one secret; zero means
+	// types.DefaultMaxEncryptedSharesPerRelayResult.
+	MaxEncryptedSharesPerRelayResult int64 `json:"maxEncryptedSharesPerRelayResult,omitempty"`
 }
+
+// defaultMaxConcurrentCompilations is the compile-slot count applied when the
+// injected settings omit MaxConcurrentCompilations.
+const defaultMaxConcurrentCompilations = 4
 
 // validate reports the required settings the payload left empty. The enclave
 // cannot fetch a workflow binary without the storage endpoint and key, and
@@ -89,6 +112,12 @@ func (s *WorkflowSettings) validate() error {
 	}
 	if s.GatewayURL == "" {
 		missing = append(missing, "gatewayUrl")
+	}
+	if s.MaxConcurrentCompilations < 0 {
+		return fmt.Errorf("maxConcurrentCompilations must be non-negative; 0 means the default of %d (got %d)", defaultMaxConcurrentCompilations, s.MaxConcurrentCompilations)
+	}
+	if s.MaxEncryptedSharesPerRelayResult < 0 {
+		return fmt.Errorf("maxEncryptedSharesPerRelayResult must be non-negative; 0 means the default of %d (got %d)", types.DefaultMaxEncryptedSharesPerRelayResult, s.MaxEncryptedSharesPerRelayResult)
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required settings: %s", strings.Join(missing, ", "))

@@ -1671,8 +1671,13 @@ func TestHandleMemory(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		assert.Positive(t, mem.TotalMB)
 		assert.Contains(t, string(body), "totalMB")
+		assert.Positive(t, mem.GuestCPUTotalSeconds)
+		assert.LessOrEqual(t, mem.GuestCPUBusySeconds, mem.GuestCPUTotalSeconds)
+		assert.Contains(t, string(body), "guestCPUTotalSeconds")
 	} else {
 		assert.Zero(t, mem.TotalMB)
+		assert.Zero(t, mem.GuestCPUBusySeconds)
+		assert.Zero(t, mem.GuestCPUTotalSeconds)
 	}
 
 	// Non-GET methods are rejected.

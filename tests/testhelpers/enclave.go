@@ -128,6 +128,10 @@ type LocalEnclaveResult struct {
 	// terminate the enclave and its host server. Call them in order or use
 	// CleanupAll.
 	Cleanups []func()
+
+	// Restarts holds one function per enclave that starts it again on the same
+	// CID and ports after its cleanup has run, and returns the new cleanup.
+	Restarts []func(t *testing.T) func()
 }
 
 // CleanupAll runs every registered cleanup function in order.
@@ -245,6 +249,14 @@ func SetupLocalEnclaves(t *testing.T, config LocalEnclaveSetupConfig) *LocalEncl
 			config.ExtraEnv,
 		)
 		result.Cleanups = append(result.Cleanups, cleanup)
+		result.Restarts = append(result.Restarts, func(t *testing.T) func() {
+			return MustSetupEnclaveWithEnv(
+				t, config.RepoRoot, enclaveCID,
+				httpPorts[i], configPorts[i],
+				config.AppName, enclaveName, false,
+				config.ExtraEnv,
+			)
+		})
 
 		measurements, err := EnsureEnclaveAndGetMeasurements(config.BaseCID + i)
 		require.NoError(t, err, "failed to get enclave measurements for CID %s", enclaveCID)

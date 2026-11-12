@@ -19,6 +19,7 @@ import (
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -41,6 +42,16 @@ type confidentialWorkflowsApp struct {
 	// enclave memory and wedge the VM. Unbounded unless WithMaxConcurrentExecutions
 	// is set (the nitro entrypoint derives a limit from enclave memory).
 	limiter *executionLimiter
+
+	// compileSlots bounds how many admitted executions compile simultaneously,
+	// capping peak compilation memory while guests run concurrently. Waiting
+	// executions keep their limiter slot; the wait doesn't count against
+	// executionTimeout. Sized by WorkflowSettings.MaxConcurrentCompilations
+	// (default defaultMaxConcurrentCompilations) and swapped whole on
+	// reinjection: executions already holding a slot release it back to the
+	// gate they acquired, so a shrink takes effect as in-flight compilations
+	// finish rather than preempting them.
+	compileSlots atomic.Pointer[semaphore.Weighted]
 
 	// executionTimeout bounds a single WASM run (nanoseconds; 0 = the WASM
 	// host's own default). Injected via InjectSettings, read on every Execute,
@@ -81,9 +92,9 @@ type Option func(*confidentialWorkflowsApp)
 
 type StorageFetcherFactory func(storageURL string, tls bool, privateKey string, maxBytes int64, timeout time.Duration, lggr logger.Logger) (RawFetcher, ed25519.PublicKey, error)
 
-// GatewayConfig carries the injected gateway tunables to the dispatcher
-// factory. Zero values mean "use the built-in default" (resolved by the
-// factory or the dispatcher).
+// GatewayConfig carries the injected dispatcher tunables to the remote
+// dispatcher factory. Zero values mean "use the built-in default" (resolved by
+// the factory or the dispatcher).
 type GatewayConfig struct {
 	// URL is the Gateway endpoint(s) for remote dispatch, comma-separated.
 	URL string
@@ -95,6 +106,10 @@ type GatewayConfig struct {
 	// RetryTimeout bounds the full gateway retry window for one capability call
 	// or secret fetch (all attempts, including backoffs).
 	RetryTimeout time.Duration
+	// MaxEncryptedSharesPerRelayResult caps the encrypted shares taken from one
+	// relay-DON signer's result for one secret. Zero means the dispatcher's
+	// built-in default.
+	MaxEncryptedSharesPerRelayResult int64
 }
 
 // RemoteDispatcherFactory defers construction until the host injects the gateway URL.
@@ -189,6 +204,9 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	if req.ExecutionTimeout > 0 {
 		a.executionTimeout.Store(int64(req.ExecutionTimeout))
 	}
+	if req.MaxConcurrentCompilations > 0 {
+		a.compileSlots.Store(semaphore.NewWeighted(req.MaxConcurrentCompilations))
+	}
 	if req.WorkflowGracePeriod != 0 {
 		a.gracePeriod.Store(int64(req.WorkflowGracePeriod))
 	}
@@ -219,10 +237,11 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	a.mu.Lock()
 	if a.dispatcher == nil && a.dispatcherFactory != nil {
 		d, err := a.dispatcherFactory(GatewayConfig{
-			URL:            req.GatewayURL,
-			RequestTimeout: time.Duration(req.GatewayRequestTimeout),
-			RetryBackoff:   time.Duration(req.GatewayRetryBackoff),
-			RetryTimeout:   time.Duration(req.GatewayRetryTimeout),
+			URL:                              req.GatewayURL,
+			RequestTimeout:                   time.Duration(req.GatewayRequestTimeout),
+			RetryBackoff:                     time.Duration(req.GatewayRetryBackoff),
+			RetryTimeout:                     time.Duration(req.GatewayRetryTimeout),
+			MaxEncryptedSharesPerRelayResult: req.MaxEncryptedSharesPerRelayResult,
 		})
 		if err != nil {
 			a.mu.Unlock()
@@ -277,6 +296,7 @@ func NewConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, config C
 		storageFactory:    config.StorageFetcherFactory,
 		dispatcherFactory: config.RemoteDispatcherFactory,
 	}
+	a.compileSlots.Store(semaphore.NewWeighted(defaultMaxConcurrentCompilations))
 	a.gracePeriod.Store(int64(types.DefaultWorkflowGracePeriod))
 	a.requirementsHandler.Tee = a.validTee
 	return a, nil
@@ -294,6 +314,7 @@ func NewTestConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, opts
 			return util.NewRestrictedHTTPClient()
 		}),
 	}
+	a.compileSlots.Store(semaphore.NewWeighted(defaultMaxConcurrentCompilations))
 	a.gracePeriod.Store(int64(types.DefaultWorkflowGracePeriod))
 	a.requirementsHandler.Tee = a.validTee
 	for _, opt := range opts {
@@ -416,16 +437,8 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		Owner:    execution.GetOwner(),
 		Workflow: execution.WorkflowId,
 	})
-	// Both bounds come from the same setting: the ctx deadline unblocks host-side
-	// capability and secrets calls, while the module timeout is what actually
-	// interrupts the guest.
 	execTimeout := time.Duration(a.executionTimeout.Load())
-	if execTimeout > 0 {
-		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(execCtx, execTimeout)
-		defer cancel()
-	}
-	result, err := executeWasm(execCtx, a.logger, binary, execution.SdkExecuteRequest, true, helper, execTimeout)
+	result, err := executeWasm(execCtx, a.logger, emitter, a.compileSlots.Load(), binary, execution.SdkExecuteRequest, true, helper, execTimeout)
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to

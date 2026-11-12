@@ -148,8 +148,10 @@ func (f *Fetcher) Fetch(ctx context.Context, in *httpcap.Request) (*httpcap.Resp
 	}
 
 	return &httpcap.Response{
-		StatusCode:   uint32(resp.StatusCode), //nolint:gosec // status codes are always in-range
-		Headers:      flattenHeaders(resp.Header),
+		StatusCode: uint32(resp.StatusCode), //nolint:gosec // status codes are always in-range
+		// Headers is deprecated in favor of MultiHeaders; kept as a dual-write for
+		// backward compatibility with older consumers during the migration window.
+		Headers:      flattenHeaders(resp.Header), //nolint:staticcheck // SA1019: intentional backward-compat dual-write; MultiHeaders is the replacement
 		MultiHeaders: multiHeaders(resp.Header),
 		Body:         body,
 	}, nil

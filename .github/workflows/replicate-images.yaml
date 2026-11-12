@@ -35,13 +35,12 @@ on:
 # A pull_request run has no inputs, so it falls back to these. Edit the
 # fallbacks on the branch to choose what a PR run copies.
 #
-# Current set: the stage enclave and workflows-secondary images, which the
+# Current set: the stage images for release 1.4.11 (sha-58113cc), which the
 # us-east-2 stage account needs for the PRIV-706 replicas.
 env:
   TAGS: >-
-    ${{ inputs.tags || 'enclave-sha-bb337f4 host-sha-bb337f4
-    on-chain-config-tracker-sha-bb337f4 enclave-workflows-sha-9016dfc
-    host-sha-9016dfc on-chain-config-tracker-sha-9016dfc' }}
+    ${{ inputs.tags || 'enclave-sha-58113cc enclave-workflows-sha-58113cc
+    host-sha-58113cc on-chain-config-tracker-sha-58113cc' }}
   SOURCE_ACCOUNT: ${{ inputs.source_account || '816722353863' }}
   SOURCE_REGION: ${{ inputs.source_region || 'us-west-2' }}
   ECR_REPOSITORY: ${{ inputs.repository || 'containers/enclave' }}
@@ -56,7 +55,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The us-east-2 stage account has no image history yet. The other
+          # The us-east-2 stage account, which the build workflows now push to
+          # by default; this job backfills tags published before that. The other
           # accounts already hold these tags; add them back here for a full
           # backfill: 312157985241, 816722353863 and 648030273096 (us-west-2),
           # 129896631554 (us-east-2).

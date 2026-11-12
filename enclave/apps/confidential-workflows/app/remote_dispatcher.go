@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,14 +28,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// defaultSecretsNamespace mirrors core/capabilities/vault/vaulttypes/types.go:
-// DefaultNamespace in chainlink, which is what
-// core/capabilities/confidentialrelay/handler.go uses when handing an empty
-// namespace from a SecretsRequest to vault. We default at the sender so the
-// relay-DON's params.Validate sees a non-empty namespace and the canonical
-// hash binds to the same value on both sides.
-const defaultSecretsNamespace = "main"
-
 // sendWithRetry sends a JSON-RPC relay request and decodes/verifies the
 // response bundle via verify, retrying on transient failures (gateway
 // rotation, per-request timeout, transport error). The retry window is bounded
@@ -47,7 +38,12 @@ const defaultSecretsNamespace = "main"
 // verify returns the quorum-verified result, or an error that is terminal: a
 // well-formed JSON-RPC error from the relay, a bundle that does not decode, or
 // a quorum-not-reached verdict — the relay answered, and an immediate retry
-// won't change which signatures arrived.
+// won't change which signatures arrived. A JSON-RPC error reporting that the
+// gateway could not reach the relay DON is an exception: no quorum result can
+// exist yet, and the condition clears once the DON reconnects, so it is
+// retried. So is the gateway's request-expiry error: the relay nodes
+// memoize in-flight and completed responses, so a retry can still collect the
+// signatures the expired attempt was still waiting on.
 //
 // Transient failures across attempts are gathered with errors.Join so the
 // final error carries the full history, not just the last failure.
@@ -77,9 +73,10 @@ func sendWithRetry[T any](d *remoteDispatcher, ctx context.Context, what, method
 		}
 
 		// A well-formed JSON-RPC error means the relay answered with a terminal
-		// condition; don't retry.
+		// condition; don't retry. The exception is a gateway that could not reach the
+		// relay DON, which clears on its own once the node websockets are back.
 		var rpcErr *gateway.RPCError
-		if errors.As(err, &rpcErr) {
+		if errors.As(err, &rpcErr) && !rpcErr.Retryable() {
 			var zero T
 			return zero, wrapErr(err)
 		}
@@ -127,6 +124,9 @@ type remoteDispatcher struct {
 	// or secret fetch (all attempts, including backoffs), independent of the
 	// per-attempt HTTP timeout on the gateway client.
 	retryTimeout time.Duration
+	// maxEncryptedSharesPerRelayResult caps the encrypted shares taken from one
+	// relay-DON signer's result for one secret.
+	maxEncryptedSharesPerRelayResult int
 }
 
 var _ RemoteDispatcher = (*remoteDispatcher)(nil)
@@ -159,6 +159,7 @@ func NewRemoteDispatcher(
 	comb combiner.Combiner,
 	verifier signatureverifier.SignatureVerifier,
 	retryBackoff, retryTimeout time.Duration,
+	maxEncryptedSharesPerRelayResult int64,
 ) RemoteDispatcher {
 	if retryBackoff <= 0 {
 		retryBackoff = types.DefaultGatewayRetryBackoff
@@ -166,16 +167,20 @@ func NewRemoteDispatcher(
 	if retryTimeout <= 0 {
 		retryTimeout = types.DefaultGatewayRetryTimeout
 	}
+	if maxEncryptedSharesPerRelayResult <= 0 {
+		maxEncryptedSharesPerRelayResult = types.DefaultMaxEncryptedSharesPerRelayResult
+	}
 	return &remoteDispatcher{
-		client:       client,
-		attestor:     att,
-		config:       config,
-		logger:       lggr,
-		keychain:     kc,
-		combiner:     comb,
-		verifier:     verifier,
-		retryBackoff: retryBackoff,
-		retryTimeout: retryTimeout,
+		client:                           client,
+		attestor:                         att,
+		config:                           config,
+		logger:                           lggr,
+		keychain:                         kc,
+		combiner:                         comb,
+		verifier:                         verifier,
+		retryBackoff:                     retryBackoff,
+		retryTimeout:                     retryTimeout,
+		maxEncryptedSharesPerRelayResult: int(maxEncryptedSharesPerRelayResult),
 	}
 }
 
@@ -289,205 +294,6 @@ func toRelaySignedComputeRequests(reqs []types.SignedComputeRequest) []confident
 	return out
 }
 
-func (d *remoteDispatcher) GetSecrets(ctx context.Context, workflowID string, requestID [32]byte, req *sdkpb.GetSecretsRequest, owner string, executionID string, orgID string, signedRequests []types.SignedComputeRequest) ([]*sdkpb.SecretResponse, error) {
-	kp, err := d.keychain.GetKeyPairForRequest(requestID)
-	if err != nil {
-		return nil, fmt.Errorf("getting keypair for request: %w", err)
-	}
-
-	cfg := d.getConfig()
-
-	// See CallCapability for the rationale; mirror executor.go's normalization
-	// so the relay-DON's strict params.Validate accepts what we send.
-	owner = util.HexToAddress(owner).String()
-
-	secrets := make([]confidentialrelay.SecretIdentifier, 0, len(req.GetRequests()))
-	for _, sr := range req.GetRequests() {
-		// Default empty namespace to "main", mirroring what chainlink's
-		// core/capabilities/confidentialrelay/handler.go does when handing
-		// to vault (core/capabilities/vault/vaulttypes/types.go:
-		// DefaultNamespace = "main"). The relay-DON's params.Validate
-		// (chainlink-common pkg/capabilities/v2/actions/confidentialrelay/
-		// types.go:228) rejects empty namespace, and the WASM SDK lets
-		// users call rt.GetSecret without specifying one.
-		namespace := sr.GetNamespace()
-		if namespace == "" {
-			namespace = defaultSecretsNamespace
-		}
-		secrets = append(secrets, confidentialrelay.SecretIdentifier{
-			Key:       sr.GetId(),
-			Namespace: namespace,
-		})
-	}
-
-	params := confidentialrelay.SecretsRequestParams{
-		WorkflowID:       workflowID,
-		Owner:            owner,
-		ExecutionID:      executionID,
-		OrgID:            orgID,
-		CallbackID:       req.GetCallbackId(),
-		Secrets:          secrets,
-		EnclavePublicKey: hex.EncodeToString(kp.Public()),
-		EnclaveConfig:    enclaveConfigFor(cfg),
-		// Forwarded to the relay DON as the authorization for this secrets request.
-		SignedComputeRequests: toRelaySignedComputeRequests(signedRequests),
-	}
-
-	att, err := d.attest(confidentialrelay.DomainSecretsGet, params)
-	if err != nil {
-		return nil, fmt.Errorf("creating attestation: %w", err)
-	}
-	params.Attestation = att
-
-	paramsJSON, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("marshalling params: %w", err)
-	}
-
-	// Retry the gateway round-trip on a transient failure. See sendWithRetry.
-	result, err := sendWithRetry(d, ctx, "secrets request", confidentialrelay.MethodSecretsGet, paramsJSON,
-		func(resultJSON json.RawMessage) (confidentialrelay.SecretsResponseResult, error) {
-			var bundle confidentialrelay.SignedSecretsResponseBundle
-			if err := json.Unmarshal(resultJSON, &bundle); err != nil {
-				return confidentialrelay.SecretsResponseResult{}, fmt.Errorf("unmarshalling secrets response bundle: %w", err)
-			}
-			d.logger.Debugw("[remoteDispatcher] received secrets response bundle", "rawBundleSize", len(bundle.Responses))
-			entries, skipped := d.secretsEntries(bundle, params)
-			idx, qErr := d.selectQuorumResult("GetSecrets", len(bundle.Responses), skipped, entries, cfg)
-			if qErr != nil {
-				return confidentialrelay.SecretsResponseResult{}, fmt.Errorf("verifying secrets response: %w", qErr)
-			}
-			return bundle.Responses[idx].Result, nil
-		})
-	if err != nil {
-		return nil, err
-	}
-
-	// Use the enclave's own master public key from config, not the relay response.
-	// The enclave already knows this from the on-chain DON config (populated after DKG).
-	masterPK := cfg.MasterPublicKey
-
-	// Validate the relay's secrets against the request and rebuild the slice
-	// in request order: reject unexpected or duplicated IDs, and emit one
-	// response per requested secret in order. Downstream WASM consumers index
-	// secrets positionally, so a reordered, padded, or trimmed response could
-	// otherwise deliver the wrong secret to the wrong consumer. [CL112-16]
-	ordered, err := orderRelaySecrets(secrets, result.Secrets)
-	if err != nil {
-		return nil, fmt.Errorf("validating secrets response: %w", err)
-	}
-
-	responses := make([]*sdkpb.SecretResponse, 0, len(ordered))
-	for _, os := range ordered {
-		if os.entry == nil {
-			responses = append(responses, &sdkpb.SecretResponse{
-				Response: &sdkpb.SecretResponse_Error{
-					Error: &sdkpb.SecretError{
-						Id:        os.id.Key,
-						Namespace: os.id.Namespace,
-						Error:     "secret missing from relay response",
-					},
-				},
-			})
-			continue
-		}
-		entry := *os.entry
-		plaintext, err := d.decryptSecret(kp, entry, masterPK, int(cfg.T))
-		if err != nil {
-			responses = append(responses, &sdkpb.SecretResponse{
-				Response: &sdkpb.SecretResponse_Error{
-					Error: &sdkpb.SecretError{
-						Id:        entry.ID.Key,
-						Namespace: entry.ID.Namespace,
-						Error:     err.Error(),
-					},
-				},
-			})
-			continue
-		}
-		responses = append(responses, &sdkpb.SecretResponse{
-			Response: &sdkpb.SecretResponse_Secret{
-				Secret: &sdkpb.Secret{
-					Id:        entry.ID.Key,
-					Namespace: entry.ID.Namespace,
-					Value:     string(plaintext),
-				},
-			},
-		})
-	}
-	return responses, nil
-}
-
-type orderedSecret struct {
-	id    confidentialrelay.SecretIdentifier
-	entry *confidentialrelay.SecretEntry // nil when the relay omitted this secret
-}
-
-// orderRelaySecrets validates the relay's secret entries against the requested
-// identifiers and returns them in request order. It rejects entries whose ID
-// was not requested and duplicate IDs; a requested secret the relay omitted is
-// returned with a nil entry so the caller can surface a per-secret error while
-// keeping positional alignment. [CL112-16]
-func orderRelaySecrets(requested []confidentialrelay.SecretIdentifier, got []confidentialrelay.SecretEntry) ([]orderedSecret, error) {
-	type idKey struct{ namespace, key string }
-	want := make(map[idKey]bool, len(requested))
-	order := make([]confidentialrelay.SecretIdentifier, 0, len(requested))
-	for _, s := range requested {
-		k := idKey{s.Namespace, s.Key}
-		if !want[k] {
-			want[k] = true
-			order = append(order, s)
-		}
-	}
-
-	byID := make(map[idKey]confidentialrelay.SecretEntry, len(got))
-	for i := range got {
-		k := idKey{got[i].ID.Namespace, got[i].ID.Key}
-		if !want[k] {
-			return nil, fmt.Errorf("unexpected secret %s/%s not in request", got[i].ID.Namespace, got[i].ID.Key)
-		}
-		if _, dup := byID[k]; dup {
-			return nil, fmt.Errorf("duplicate secret %s/%s in response", got[i].ID.Namespace, got[i].ID.Key)
-		}
-		byID[k] = got[i]
-	}
-
-	ordered := make([]orderedSecret, 0, len(order))
-	for _, id := range order {
-		k := idKey{id.Namespace, id.Key}
-		if e, ok := byID[k]; ok {
-			e := e
-			ordered = append(ordered, orderedSecret{id: id, entry: &e})
-		} else {
-			ordered = append(ordered, orderedSecret{id: id})
-		}
-	}
-	return ordered, nil
-}
-
-// decryptSecret NaCl-decrypts the TDH2 shares, then aggregates them to recover plaintext.
-func (d *remoteDispatcher) decryptSecret(kp keychain.Keypair, entry confidentialrelay.SecretEntry, masterPK []byte, threshold int) ([]byte, error) {
-	ciphertext, err := base64.StdEncoding.DecodeString(entry.Ciphertext)
-	if err != nil {
-		return nil, fmt.Errorf("decoding ciphertext: %w", err)
-	}
-
-	var shares [][]byte
-	for i, encShare := range entry.EncryptedShares {
-		encBytes, err := base64.StdEncoding.DecodeString(encShare)
-		if err != nil {
-			return nil, fmt.Errorf("decoding share %d: %w", i, err)
-		}
-		share, err := kp.Decrypt(encBytes)
-		if err != nil {
-			return nil, fmt.Errorf("decrypting share %d: %w", i, err)
-		}
-		shares = append(shares, share)
-	}
-
-	return d.combiner.AggregateShares(ciphertext, shares, masterPK, threshold)
-}
-
 // relayEntry is one decoded per-node response from the gateway bundle: the two
 // hashes of its logical result, the node's single signature, its index in the
 // original bundle so the caller can recover the chosen result, and a rendering
@@ -558,32 +364,31 @@ func (d *remoteDispatcher) capabilityEntries(
 	return entries, skipped
 }
 
-// secretsEntries decodes a secrets response bundle into quorum entries. A secrets
-// result has no per-node ordering to normalize, so it groups on the hash the node
-// signed.
-func (d *remoteDispatcher) secretsEntries(
-	bundle confidentialrelay.SignedSecretsResponseBundle,
-	params confidentialrelay.SecretsRequestParams,
-) ([]relayEntry, []string) {
-	entries := make([]relayEntry, 0, len(bundle.Responses))
-	var skipped []string
-	for i, r := range bundle.Responses {
-		desc := describeSecretsResult(r.Result)
-		h, err := r.Result.Hash(params)
-		if err != nil {
-			d.logger.Debugw("[remoteDispatcher] skipping relay response with unhashable result", "path", "GetSecrets", "idx", i, "err", err)
-			skipped = append(skipped, fmt.Sprintf("[idx=%d unhashable=%v %s]", i, err, desc))
-			continue
-		}
-		entries = append(entries, relayEntry{
-			sigHash:   h,
-			groupHash: h,
-			signature: r.Signature,
-			desc:      desc,
-			idx:       i,
-		})
+// requireRelayVerifier returns an error when no verifier or signer set is
+// configured, since no relay response can be trusted without them.
+func (d *remoteDispatcher) requireRelayVerifier(path string, cfg types.EnclaveConfig) error {
+	if d.verifier == nil {
+		d.logger.Errorw("[remoteDispatcher] relay-DON signature verification failed", "path", path, "reason", "verifier not configured")
+		return fmt.Errorf("relay signature verifier not configured")
 	}
-	return entries, skipped
+	if len(cfg.Signers) == 0 {
+		d.logger.Errorw("[remoteDispatcher] relay-DON signature verification failed", "path", path, "reason", "signer set not configured")
+		return fmt.Errorf("DON signer set not configured")
+	}
+	return nil
+}
+
+// verifyRelaySigner verifies a relay-DON response signature over sigHash
+// against the configured signers and returns the signer. Callers skip
+// responses that fail.
+func (d *remoteDispatcher) verifyRelaySigner(path string, idx int, sigHash [32]byte, sig confidentialrelay.RelayResponseSignature, cfg types.EnclaveConfig) ([]byte, error) {
+	prefixed := confidentialrelay.RelayResponseSignaturePayload(sigHash)
+	signer, err := d.verifier.VerifySignature(prefixed, sig.Signature, cfg.Signers)
+	if err != nil {
+		d.logger.Debugw("[remoteDispatcher] skipping invalid or foreign relay signature", "path", path, "idx", idx, "err", err)
+		return nil, err
+	}
+	return signer, nil
 }
 
 // selectQuorumResult is the trust anchor on the gateway->enclave hop. The gateway
@@ -613,13 +418,8 @@ func (d *remoteDispatcher) secretsEntries(
 // the workflow DON and the relay DON are the same DON wearing two hats. If that
 // ever changes, this is the spot to introduce a separate RelayDON signer set.
 func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize int, skipped []string, entries []relayEntry, cfg types.EnclaveConfig) (int, error) {
-	if d.verifier == nil {
-		d.logger.Errorw("[remoteDispatcher] relay-DON signature verification failed", "path", path, "reason", "verifier not configured")
-		return 0, fmt.Errorf("relay signature verifier not configured")
-	}
-	if len(cfg.Signers) == 0 {
-		d.logger.Errorw("[remoteDispatcher] relay-DON signature verification failed", "path", path, "reason", "signer set not configured")
-		return 0, fmt.Errorf("DON signer set not configured")
+	if err := d.requireRelayVerifier(path, cfg); err != nil {
+		return 0, err
 	}
 	required := int(cfg.F) + 1
 
@@ -632,12 +432,9 @@ func (d *remoteDispatcher) selectQuorumResult(path string, rawBundleSize int, sk
 	invalidSignatures := 0
 	diags := make([]string, 0, len(entries))
 	for _, e := range entries {
-		prefixed := confidentialrelay.RelayResponseSignaturePayload(e.sigHash)
-		signer, err := d.verifier.VerifySignature(prefixed, e.signature.Signature, cfg.Signers)
+		signer, err := d.verifyRelaySigner(path, e.idx, e.sigHash, e.signature, cfg)
 		if err != nil {
-			// Untrusted gateway / faulty node noise. Skip, do not fail.
 			invalidSignatures++
-			d.logger.Debugw("[remoteDispatcher] skipping invalid or foreign relay signature", "path", path, "idx", e.idx, "err", err)
 			diags = append(diags, e.diag(fmt.Sprintf("signature=invalid(%v) claimedSigner=%s", err, shortBytes(e.signature.Signer))))
 			continue
 		}

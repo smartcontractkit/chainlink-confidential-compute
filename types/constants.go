@@ -67,6 +67,13 @@ const (
 	// settings (gatewayRetryTimeout).
 	DefaultGatewayRetryTimeout = 2 * time.Minute
 
+	// DefaultMaxEncryptedSharesPerRelayResult caps the encrypted shares taken
+	// from one relay-DON signer's result for one secret. Extra shares are
+	// dropped, so a faulty signer cannot fail the request or inflate decryption
+	// work. Overridable per-deployment via the injected settings
+	// (maxEncryptedSharesPerRelayResult).
+	DefaultMaxEncryptedSharesPerRelayResult = 128
+
 	// DefaultWorkflowGracePeriod is how long a validated execution waits before
 	// it starts running. Overridable per-deployment via the injected settings
 	// (workflowGracePeriod); a negative setting disables the wait.
@@ -122,12 +129,13 @@ const (
 	ErrEncryptionRequestedNoKey = "encryption requested but no AES-GCM key in secrets"
 	ErrKeyPresentNoEncryption   = "AES-GCM key present but encryption not requested"
 	ErrResponseBodyTooLarge     = "response body exceeds maximum allowed size"
+	ErrHTTPRedirectNotAllowed   = "redirects are not allowed"
 	ErrQuorumTimeout            = "quorum_timeout"
 	// ErrWasmExecutionTimeout marks a WASM execution that exceeded its deadline.
 	// The enclave app sets this on the ExecuteError when the guest hits the
 	// execution-timeout context; the executor matches it to classify the failure
 	// as a user error (workflow ran over budget) rather than infrastructure.
-	ErrWasmExecutionTimeout     = "wasm execution deadline exceeded"
+	ErrWasmExecutionTimeout = "wasm execution deadline exceeded"
 
 	// ErrVaultSystemErrorFallback is the literal string the chainlink core vault plugin returns
 	// in SecretResponse.Error for any non-user-classified failure. See userFacingError() in

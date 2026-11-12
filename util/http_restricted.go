@@ -11,13 +11,14 @@ import (
 	"net/http"
 
 	"github.com/doyensec/safeurl"
+	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
 type networkPolicyBlockedError interface{ NetworkPolicyBlocked() bool }
 
 // disableRedirects prevents the HTTP client from following any redirects.
 func disableRedirects(*http.Request, []*http.Request) error {
-	return errors.New("redirects are not allowed")
+	return errors.New(types.ErrHTTPRedirectNotAllowed)
 }
 
 // newSafeurlClient builds a safeurl-based HTTP client that enforces:

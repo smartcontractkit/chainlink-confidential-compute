@@ -37,12 +37,15 @@ main() {
 
     # Keep the container running instead of blocking on console
     echo "Enclave started successfully.. Container will keep running..."
+    local describe_output
     while true; do
         sleep 30
-        if ! nitro-cli describe-enclaves | jq -e \
+        if ! describe_output=$(nitro-cli describe-enclaves) || \
+            ! jq -e \
             --arg enclave_id "$enclave_id" \
             'any(.[]; .EnclaveID == $enclave_id and .State == "RUNNING")' \
-            > /dev/null 2>&1; then
+            > /dev/null 2>&1 <<< "$describe_output"; then
+            printf 'nitro-cli describe-enclaves output:\n%s\n' "$describe_output"
             echo "Enclave $enclave_id is no longer running. Exiting..."
             exit 1
         fi

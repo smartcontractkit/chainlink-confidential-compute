@@ -1,6 +1,6 @@
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 
-# Match root go.mod (currently go 1.26.x) and allow minor toolchain bumps
+# Match root go.mod (currently go 1.26.10) and allow minor toolchain bumps
 # without another Dockerfile edit when chainlink-common moves forward.
 ENV GOTOOLCHAIN=auto
 
@@ -16,12 +16,12 @@ COPY util/ ./util/
 
 # Build the Go binary
 ARG APP_NAME=confidential-http
-RUN CGO_ENABLED=0 GOOS=linux go build -o /enclave-app enclave/apps/${APP_NAME}/environments/nitro/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /enclave-app enclave/apps/${APP_NAME}/environments/nitro/main.go
 
 FROM amazonlinux:latest
 
-RUN dnf upgrade -y && \
-    dnf install -y \
+RUN dnf upgrade -y --setopt=install_weak_deps=False && \
+    dnf install -y --setopt=install_weak_deps=False \
     iproute \
     ca-certificates \
     chrony && \

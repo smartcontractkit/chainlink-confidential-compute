@@ -2,6 +2,7 @@ package tests
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/tls"
@@ -65,10 +66,14 @@ import (
 	ttypes "github.com/smartcontractkit/chainlink/system-tests/tests/test-helpers/configuration"
 )
 
+// relativePathToRepoRoot locates the chainlink checkout: CHAINLINK_REPO_ROOT
+// when set (the Makefile's pinned checkout), otherwise the sibling checkout CI
+// uses.
+var relativePathToRepoRoot = cmp.Or(os.Getenv("CHAINLINK_REPO_ROOT"), "../../../chainlink")
+
 const (
-	relativePathToRepoRoot = "../../../chainlink"
-	workflowOwner          = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
-	requestCount           = 6
+	workflowOwner = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+	requestCount  = 6
 	// interRequestDelay is the delay between consecutive requests,
 	// giving key rotation a chance to trigger during the test.
 	interRequestDelay = 5 * time.Second
@@ -504,6 +509,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			var enclaves []types.Enclave
 			var configURLs []string
 			var enclaveCleanups []func()
+			var enclaveRestarts []func(*testing.T) func()
 			// Legacy-enclave runs provision a local fake enclave sourced from a
 			// prior release checkout (LEGACY_ENCLAVE_REPO_ROOT) instead of the
 			// current tree, exercising protocol compatibility against the older
@@ -535,6 +541,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 
 				result := testhelpers.SetupLocalEnclaves(t, cfg)
 				enclaveCleanups = result.Cleanups
+				enclaveRestarts = result.Restarts
 				// Defer cleanup of all enclaves that haven't been stopped yet
 				defer func() {
 					for _, cleanup := range enclaveCleanups {
@@ -658,12 +665,6 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			// block (which tears down an enclave) and restores the full node set so
 			// later sub-tests still see the original topology.
 			t.Run("DON node rotation reconfigures enclaves", func(t *testing.T) {
-				if useLegacyEnclaves {
-					t.Skip("skipping: legacy/remote enclaves are not reconfigured by the executor")
-				}
-				if _, usePrior := priorVersionPaths[app.Name]; usePrior {
-					t.Skip("skipping: prior-version capability binary lacks the config-update proposal path")
-				}
 
 				originalNodes := getWorkflowDONNodes(t, testEnv)
 				require.GreaterOrEqual(t, len(originalNodes), 4, "need >=4 nodes so dropping one keeps OCR fault tolerance (2F+1)")
@@ -688,7 +689,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 					}
 				}
 
-				rotate := func(phase string, nodes [][32]byte, expectedSigners [][32]byte) {
+				rotate := func(phase string, nodes [][32]byte, expectedSigners [][32]byte, afterUpdate func()) {
 					recipient.mu.Lock()
 					recipient.requests = nil
 					recipient.mu.Unlock()
@@ -697,6 +698,9 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 					setWorkflowDONNodes(t, testEnv, nodes, testLogger)
 					testLogger.Info().Msg("Waiting 30s for nodes to pick up the new DON membership")
 					time.Sleep(30 * time.Second)
+					if afterUpdate != nil {
+						afterUpdate()
+					}
 
 					// Triggering drives EnsureFreshEnclaves on each node, which proposes
 					// the new signed enclave config.
@@ -710,14 +714,15 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 					require.NoError(t, app.Validate(framework.L, recipient.getRequests()), "validation failed during %s", phase)
 				}
 
-				rotate("node removal", reducedNodes, reducedNodes)
-				rotate("node restoration", originalNodes, originalNodes)
+				rotate("node removal", reducedNodes, reducedNodes, nil)
+				// The rejoined node can't relaunch its HTTP capabilities until restarted
+				// (chainlink#23679 leaks their gateway handlers when they are stopped).
+				rotate("node restoration", originalNodes, originalNodes, func() {
+					restartWorkflowNode(t, testEnv, originalNodes[len(originalNodes)-1], testLogger)
+				})
 			})
 
 			t.Run("DNS NXDOMAIN returns 502", func(t *testing.T) {
-				if useLegacyEnclaves {
-					t.Skip("skipping: legacy/remote enclaves return 400 for DNS failures")
-				}
 
 				// Reset recipient to isolate this sub-test's results
 				recipient.mu.Lock()
@@ -765,9 +770,6 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			})
 
 			t.Run("SSRF private address returns 400", func(t *testing.T) {
-				if useLegacyEnclaves {
-					t.Skip("skipping: legacy/remote enclaves lack the SSRF-blocked-to-400 handling")
-				}
 
 				// Reset recipient to isolate this sub-test's results
 				recipient.mu.Lock()
@@ -791,9 +793,6 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			})
 
 			t.Run("upstream TLS handshake rejection returns 502", func(t *testing.T) {
-				if useLegacyEnclaves {
-					t.Skip("skipping: legacy/remote enclaves lack the TLS-handshake-to-502 handling")
-				}
 
 				// Reset recipient to isolate this sub-test's results
 				recipient.mu.Lock()
@@ -817,9 +816,6 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			})
 
 			t.Run("zeroed enclave config is routed around and recovers", func(t *testing.T) {
-				if useLegacyEnclaves {
-					t.Skip("skipping: remote/legacy enclaves cannot be reconfigured by the test")
-				}
 				if len(configURLs) < 2 {
 					t.Skip("skipping: need >=2 enclaves so one can be zeroed while another serves")
 				}
@@ -909,6 +905,69 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				err := app.Validate(framework.L, recipient.getRequests())
 				require.NoError(t, err, "recipient validation failed after registry trusted value update")
 			})
+
+			// Restart enclave 0 while earlier triggers are still executing, and keep
+			// sending without waiting for the node pools to converge. Until they
+			// do, nodes can disagree about enclave 0's liveness and still hold its
+			// pre-restart keys, which is how enclave restarts fail in production.
+			if len(enclaveCleanups) > 1 && !useLegacyEnclaves {
+				peer := enclaves[1]
+				peer.EnclaveAuthHeader = "x-api-key: foobar"
+				savedConfig, err := fetchEnclaveConfig(peer)
+				require.NoError(t, err, "failed to read peer enclave config")
+				require.False(t, savedConfig.IsZero(), "peer enclave should have a valid config to restore from")
+
+				recipient.mu.Lock()
+				recipient.requests = nil
+				recipient.mu.Unlock()
+
+				restartTriggers := 0
+				for i := range requestCount {
+					if i > 0 {
+						time.Sleep(interRequestDelay)
+					}
+					for _, input := range triggerInputs {
+						sendHTTPTrigger(t, testLogger, gatewayURL, uniqueWorkflowName, workflowID, workflowOwnerAddr, signingKey, input)
+						restartTriggers++
+					}
+					if i == 0 {
+						testLogger.Info().Msg("Restarting enclave 0 with requests in flight...")
+						enclaveCleanups[0]()
+						enclaveCleanups[0] = enclaveRestarts[0](t)
+						// Stands in for the config tracker, which restores an
+						// enclave's config after it restarts in production.
+						postEnclaveConfig(t, configURLs[0], savedConfig)
+					}
+				}
+
+				// A request executing on enclave 0 when it is killed can be lost if the
+				// executor's retries run out before every node marks the enclave dead,
+				// so up to one round of results may be missing. The check is on the
+				// total, so it cannot tell which round lost them; losing more than one
+				// round fails.
+				restartExpected := restartTriggers * numNodes
+				restartRequired := restartExpected - len(triggerInputs)*numNodes
+				deadline := time.Now().Add(3 * time.Minute)
+				for recipient.requestCount() < restartExpected && time.Now().Before(deadline) {
+					testLogger.Info().Msgf("Enclave restart recipient progress: %d/%d", recipient.requestCount(), restartExpected)
+					time.Sleep(5 * time.Second)
+				}
+				restartReceived := recipient.requestCount()
+				if restartReceived < restartExpected {
+					testLogger.Warn().Msgf("%d results lost from requests in flight on the restarted enclave", restartExpected-restartReceived)
+				}
+				require.GreaterOrEqual(t, restartReceived, restartRequired, "more than one round of results was lost across the enclave restart")
+				require.NoError(t, app.Validate(framework.L, recipient.getRequests()), "validation failed across enclave restart")
+
+				// Failover alone would satisfy the counts above, so also require that
+				// the restarted enclave serves again with the restored config.
+				restarted := enclaves[0]
+				restarted.EnclaveAuthHeader = "x-api-key: foobar"
+				restartedConfig, err := fetchEnclaveConfig(restarted)
+				require.NoError(t, err, "restarted enclave 0 should serve its public keys")
+				require.Equal(t, savedConfig, restartedConfig, "restarted enclave 0 should hold the restored config")
+				testLogger.Info().Msg("Enclave restart under load passed")
+			}
 
 			// Test enclave failover: take down the first enclave and verify requests still succeed.
 			// Skipped for legacy enclaves — the reconfig sub-tests that precede it are skipped,
@@ -1113,7 +1172,7 @@ func updateCapabilityRegistryEnclaveMeasurements(
 	capReg, err := capabilities_registry_wrapper_v2.NewCapabilitiesRegistry(common.HexToAddress(capabilityRegistryAddress), sethClient.Client)
 	require.NoError(t, err, "failed to construct capabilities registry client")
 
-	donName := "workflow-don"
+	donName := "workflow"
 	donInfo, err := capReg.GetDONByName(&bind.CallOpts{}, donName)
 	require.NoError(t, err, "failed to fetch workflow DON info")
 
@@ -1178,7 +1237,7 @@ func mustWorkflowCapReg(t *testing.T, testEnv *ttypes.TestEnvironment) *capabili
 // getWorkflowDONNodes returns the current on-chain node P2P IDs for the workflow DON.
 func getWorkflowDONNodes(t *testing.T, testEnv *ttypes.TestEnvironment) [][32]byte {
 	t.Helper()
-	donInfo, err := mustWorkflowCapReg(t, testEnv).GetDONByName(&bind.CallOpts{}, "workflow-don")
+	donInfo, err := mustWorkflowCapReg(t, testEnv).GetDONByName(&bind.CallOpts{}, "workflow")
 	require.NoError(t, err, "failed to fetch workflow DON info")
 	return donInfo.NodeP2PIds
 }
@@ -1191,7 +1250,7 @@ func setWorkflowDONNodes(t *testing.T, testEnv *ttypes.TestEnvironment, nodes []
 	sethClient := testEnv.CreEnvironment.Blockchains[0].(*evm.Blockchain).SethClient
 	capReg := mustWorkflowCapReg(t, testEnv)
 
-	donName := "workflow-don"
+	donName := "workflow"
 	donInfo, err := capReg.GetDONByName(&bind.CallOpts{}, donName)
 	require.NoError(t, err, "failed to fetch workflow DON info")
 
@@ -1208,6 +1267,41 @@ func setWorkflowDONNodes(t *testing.T, testEnv *ttypes.TestEnvironment, nodes []
 	testLogger.Info().Str("txHash", tx.Hash().Hex()).Int("nodeCount", len(nodes)).Msg("Submitted workflow DON node-set update")
 	_, err = bind.WaitMined(t.Context(), sethClient.Client, tx)
 	require.NoError(t, err, "failed waiting for DON node-set update to be mined")
+}
+
+// restartWorkflowNode restarts the workflow DON node with the given P2P ID and
+// waits for its HTTP capability plugins to be running again.
+func restartWorkflowNode(t *testing.T, testEnv *ttypes.TestEnvironment, p2pID [32]byte, testLogger zerolog.Logger) {
+	t.Helper()
+	workers, err := testEnv.Dons.MustWorkflowDON().Workers()
+	require.NoError(t, err, "failed to get worker nodes from topology")
+	idx := slices.IndexFunc(workers, func(n *crelib.Node) bool {
+		return n.Keys != nil && n.Keys.P2PKey != nil && bytes.Equal(n.Keys.P2PKey.PeerID[:], p2pID[:])
+	})
+	require.GreaterOrEqual(t, idx, 0, "no workflow node with P2P ID %x", p2pID)
+	container := workers[idx].Host
+
+	testLogger.Info().Str("container", container).Msg("Restarting workflow node")
+	out, err := exec.Command("docker", "restart", container).CombinedOutput()
+	require.NoError(t, err, "docker restart %s: %s", container, out)
+
+	plugins := []string{"http_trigger", "http_action"}
+	require.Eventually(t, func() bool {
+		top, topErr := exec.Command("docker", "top", container).CombinedOutput()
+		if topErr != nil {
+			return false
+		}
+		for _, p := range plugins {
+			if !strings.Contains(string(top), p) {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Minute, 5*time.Second, "HTTP capability plugins did not start on %s after restart", container)
+
+	// Let the plugins register their gateway handlers and the node reconnect to the gateway.
+	testLogger.Info().Str("container", container).Msg("HTTP capability plugins running, waiting 30s to settle")
+	time.Sleep(30 * time.Second)
 }
 
 // fetchEnclaveConfig reads the config the enclave currently reports on /publicKeys.

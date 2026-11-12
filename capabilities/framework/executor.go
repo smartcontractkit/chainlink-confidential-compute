@@ -222,6 +222,33 @@ func ParseConfig(capConfigRaw string) (*ParsedConfig, error) {
 	return parsed, nil
 }
 
+// capabilityLimits returns the Confidential Compute overrides for this
+// executor's capability. An unrecognized capability gets the zero value, which
+// resolves every setting from the shared ConfidentialCompute values.
+func (e *RealExecutor) capabilityLimits() cresettings.ConfidentialComputePerCapability {
+	switch e.capabilityID {
+	case types.AppIDConfidentialHTTP:
+		return cresettings.Default.ConfidentialCompute.HTTP
+	case types.AppIDConfidentialWorkflows:
+		return cresettings.Default.ConfidentialCompute.Workflows
+	default:
+		return cresettings.ConfidentialComputePerCapability{}
+	}
+}
+
+// capabilityOwnerLimits returns the per-owner Confidential Compute overrides for
+// this executor's capability, zero-valued for an unrecognized capability.
+func (e *RealExecutor) capabilityOwnerLimits() cresettings.OwnerConfidentialComputePerCapability {
+	switch e.capabilityID {
+	case types.AppIDConfidentialHTTP:
+		return cresettings.Default.PerOwner.ConfidentialCompute.HTTP
+	case types.AppIDConfidentialWorkflows:
+		return cresettings.Default.PerOwner.ConfidentialCompute.Workflows
+	default:
+		return cresettings.OwnerConfidentialComputePerCapability{}
+	}
+}
+
 // applyLimitSettings overlays the CRE limits framework values onto the parsed
 // config: the global + per-workflow-owner request rates, the retry policy, the
 // secrets-cache toggle, the enclave/public-key request timeouts, TLS verification,
@@ -238,34 +265,49 @@ func ParseConfig(capConfigRaw string) (*ParsedConfig, error) {
 // deployments migrate off the job-spec config. GetOrDefault returns the limits
 // default (which mirrors the historical hardcoded defaults) on any lookup error,
 // so behavior is preserved if settings are unavailable.
+//
+// Every setting with a per-capability group resolves through it first: this
+// executor's ConfidentialCompute.{HTTP,Workflows} value when set, otherwise the
+// shared ConfidentialCompute value. Each capability builds its own enclave pool
+// from its own on-chain enclave list, so its rates, retries, timeouts, refresh
+// interval, public-key cache and session settings are all independent. Tuning one
+// capability therefore leaves the other where it was.
+//
+// InsecureSkipTLSVerify stays shared: it is a node-wide enclave trust posture,
+// not a per-capability limit.
 func (e *RealExecutor) applyLimitSettings(ctx context.Context, parsed *ParsedConfig) {
 	g := e.limitsFactory.Settings
 	cc := cresettings.Default.ConfidentialCompute
+	capCC := e.capabilityLimits()
+	ownerCC := cresettings.Default.PerOwner.ConfidentialCompute
+	ownerCapCC := e.capabilityOwnerLimits()
 	pkc := cc.PublicKeyCache
+	capPKC := capCC.PublicKeyCache
 	sess := cc.Session
+	capSess := capCC.Session
 
-	globalRate, _ := cc.GlobalRate.GetOrDefault(ctx, g)
-	ownerRate, _ := cresettings.Default.PerOwner.ConfidentialCompute.Rate.GetOrDefault(ctx, g)
-	maxRetries, _ := cc.MaxRetries.GetOrDefault(ctx, g)
-	retryBackoff, _ := cc.RetryBackoff.GetOrDefault(ctx, g)
-	secretsCacheEnabled, _ := cc.SecretsCacheEnabled.GetOrDefault(ctx, g)
-	enclaveRequestTimeout, _ := cc.EnclaveRequestTimeout.GetOrDefault(ctx, g)
-	publicKeyRequestTimeout, _ := cc.PublicKeyRequestTimeout.GetOrDefault(ctx, g)
+	globalRate, _ := resolveWithFallback(ctx, g, capCC.GlobalRate, cc.GlobalRate)
+	ownerRate, _ := resolveWithFallback(ctx, g, ownerCapCC.Rate, ownerCC.Rate)
+	maxRetries, _ := resolveWithFallback(ctx, g, capCC.MaxRetries, cc.MaxRetries)
+	retryBackoff, _ := resolveWithFallback(ctx, g, capCC.RetryBackoff, cc.RetryBackoff)
+	secretsCacheEnabled, _ := resolveWithFallback(ctx, g, capCC.SecretsCacheEnabled, cc.SecretsCacheEnabled)
+	enclaveRequestTimeout, _ := resolveWithFallback(ctx, g, capCC.EnclaveRequestTimeout, cc.EnclaveRequestTimeout)
+	publicKeyRequestTimeout, _ := resolveWithFallback(ctx, g, capCC.PublicKeyRequestTimeout, cc.PublicKeyRequestTimeout)
 	insecureSkipTLSVerify, _ := cc.InsecureSkipTLSVerify.GetOrDefault(ctx, g)
-	enclaveRefreshInterval, _ := cc.EnclaveRefreshInterval.GetOrDefault(ctx, g)
-	publicKeyRetriesMax, _ := cc.PublicKeyRetriesMax.GetOrDefault(ctx, g)
-	publicKeyRetriesBackoff, _ := cc.PublicKeyRetriesBackoff.GetOrDefault(ctx, g)
-	cacheEnabled, _ := pkc.Enabled.GetOrDefault(ctx, g)
-	cacheTTL, _ := pkc.TTL.GetOrDefault(ctx, g)
-	cacheMaxTTL, _ := pkc.MaxTTL.GetOrDefault(ctx, g)
-	cacheCleanup, _ := pkc.CleanupInterval.GetOrDefault(ctx, g)
-	cacheTTLBufferPercent, _ := pkc.TTLBufferPercent.GetOrDefault(ctx, g)
-	cacheProactiveRefresh, _ := pkc.ProactiveRefreshEnabled.GetOrDefault(ctx, g)
-	cacheRefreshIntervalPercent, _ := pkc.RefreshIntervalPercent.GetOrDefault(ctx, g)
-	cacheMinRefreshInterval, _ := pkc.MinRefreshInterval.GetOrDefault(ctx, g)
-	cacheRefreshTimeout, _ := pkc.RefreshTimeout.GetOrDefault(ctx, g)
-	sessionPersistence, _ := sess.PersistenceEnabled.GetOrDefault(ctx, g)
-	sessionHeaderName, _ := sess.HeaderName.GetOrDefault(ctx, g)
+	enclaveRefreshInterval, _ := resolveWithFallback(ctx, g, capCC.EnclaveRefreshInterval, cc.EnclaveRefreshInterval)
+	publicKeyRetriesMax, _ := resolveWithFallback(ctx, g, capCC.PublicKeyRetriesMax, cc.PublicKeyRetriesMax)
+	publicKeyRetriesBackoff, _ := resolveWithFallback(ctx, g, capCC.PublicKeyRetriesBackoff, cc.PublicKeyRetriesBackoff)
+	cacheEnabled, _ := resolveWithFallback(ctx, g, capPKC.Enabled, pkc.Enabled)
+	cacheTTL, _ := resolveWithFallback(ctx, g, capPKC.TTL, pkc.TTL)
+	cacheMaxTTL, _ := resolveWithFallback(ctx, g, capPKC.MaxTTL, pkc.MaxTTL)
+	cacheCleanup, _ := resolveWithFallback(ctx, g, capPKC.CleanupInterval, pkc.CleanupInterval)
+	cacheTTLBufferPercent, _ := resolveWithFallback(ctx, g, capPKC.TTLBufferPercent, pkc.TTLBufferPercent)
+	cacheProactiveRefresh, _ := resolveWithFallback(ctx, g, capPKC.ProactiveRefreshEnabled, pkc.ProactiveRefreshEnabled)
+	cacheRefreshIntervalPercent, _ := resolveWithFallback(ctx, g, capPKC.RefreshIntervalPercent, pkc.RefreshIntervalPercent)
+	cacheMinRefreshInterval, _ := resolveWithFallback(ctx, g, capPKC.MinRefreshInterval, pkc.MinRefreshInterval)
+	cacheRefreshTimeout, _ := resolveWithFallback(ctx, g, capPKC.RefreshTimeout, pkc.RefreshTimeout)
+	sessionPersistence, _ := resolveWithFallback(ctx, g, capSess.PersistenceEnabled, sess.PersistenceEnabled)
+	sessionHeaderName, _ := resolveWithFallback(ctx, g, capSess.HeaderName, sess.HeaderName)
 
 	parsed.GlobalRPS = float64(globalRate.Limit)
 	parsed.GlobalBurst = globalRate.Burst
@@ -327,6 +369,41 @@ func (e *RealExecutor) refreshLimitSettings(ctx context.Context) {
 	next := *cur
 	e.applyLimitSettings(ctx, &next)
 	e.setCapConfig(&next)
+	e.logResolvedConfig(&next)
+}
+
+// logResolvedConfig logs the effective config resolved from the limits
+// framework, so the values a node is running with can be checked against the
+// configured overrides. The deprecated job-spec Config is omitted because it
+// carries encrypted API keys.
+func (e *RealExecutor) logResolvedConfig(parsed *ParsedConfig) {
+	e.lggr.Infow("resolved capability config",
+		"capabilityID", e.capabilityID,
+		"globalRPS", parsed.GlobalRPS,
+		"globalBurst", parsed.GlobalBurst,
+		"workflowOwnerRPS", parsed.WorkflowOwnerRPS,
+		"workflowOwnerBurst", parsed.WorkflowOwnerBurst,
+		"maxRetries", parsed.MaxRetries,
+		"retryBackoffSeconds", parsed.RetryBackoffSeconds,
+		"enableSecretsCache", parsed.EnableSecretsCache,
+		"enclaveRequestTimeout", parsed.EnclaveRequestTimeout,
+		"publicKeyRequestTimeout", parsed.PublicKeyRequestTimeout,
+		"enclaveRefreshInterval", parsed.EnclaveRefreshInterval,
+		"insecureSkipTLSVerify", parsed.InsecureSkipTLSVerify,
+		"publicKeyRetriesMax", parsed.PublicKeyRetriesMax,
+		"publicKeyRetriesBackoff", parsed.PublicKeyRetriesBackoff,
+		"cacheEnabled", parsed.CacheConfig.EnableCache,
+		"cacheTTL", parsed.CacheConfig.DefaultTTL,
+		"cacheMaxTTL", parsed.CacheConfig.MaxTTL,
+		"cacheCleanupInterval", parsed.CacheConfig.CleanupInterval,
+		"cacheTTLBufferPercent", parsed.CacheConfig.TTLBufferPercent,
+		"cacheProactiveRefreshEnabled", parsed.CacheConfig.EnableProactiveRefresh,
+		"cacheRefreshIntervalPercent", parsed.CacheConfig.RefreshIntervalPercent,
+		"cacheMinRefreshInterval", parsed.CacheConfig.MinRefreshInterval,
+		"cacheRefreshTimeout", parsed.CacheConfig.RefreshTimeout,
+		"sessionPersistenceEnabled", parsed.SessionConfig.EnableSessionPersistence,
+		"sessionHeaderName", parsed.SessionConfig.SessionHeaderName,
+	)
 }
 
 // RealExecutor is the concrete implementation of the Executor interface.
@@ -338,6 +415,7 @@ type RealExecutor struct {
 	keystore                   core.Keystore
 	rateLimiter                *ratelimit.RateLimiter
 	capabilityID               string
+	shardIndex                 uint32 // host node's shard, labeled on emitted events
 	secretsCache               *util.Cache[*cachedEDKS]
 	confidentialComputeVersion string
 	apiKey                     string
@@ -357,7 +435,7 @@ type RealExecutor struct {
 	capabilityRegistry core.CapabilitiesRegistry
 	nodeID             string
 	proposalInFlight   atomic.Bool
-	donMu              sync.RWMutex
+	donMu              sync.RWMutex // also guards nodeID, enclaves and vaultDON.CryptographyThreshold, rewritten by the background refresh
 	donMembers         [][]byte
 	donF               uint32
 	enclaves           []types.Enclave
@@ -370,6 +448,10 @@ type RealExecutor struct {
 type cachedEDKS struct {
 	encryptedSecret           []byte
 	encryptedDecryptionShares [][]byte
+	// rawVaultPublicKey is the vault public key from the GetSecrets response that
+	// produced these shares (empty if that response did not carry one). Cached so
+	// cache hits reuse the same key and stay reshare-safe.
+	rawVaultPublicKey []byte
 }
 
 func NewRealExecutor(
@@ -386,6 +468,7 @@ func NewRealExecutor(
 		capabilityRegistry:         capDependencies.CapabilityRegistry,
 		capConfigRaw:               capDependencies.Config,
 		capabilityID:               capabilityID,
+		shardIndex:                 capDependencies.ShardIndex,
 		confidentialComputeVersion: confidentialComputeVersion,
 		secretsCache:               util.NewCache[*cachedEDKS](nil, nil),
 		limitsFactory:              limitsFactory,
@@ -608,7 +691,7 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 		// Get encrypted decryption shares from VaultDON
 		vaultDONRequestSent = true
 		vaultDONAttemptStart := time.Now()
-		encryptedSecrets, encryptedDecryptionShares, err := e.GetEncryptedDecryptionShares(
+		encryptedSecrets, encryptedDecryptionShares, rawVaultPublicKey, err := e.GetEncryptedDecryptionShares(
 			ctx,
 			innerLggr,
 			secrets,
@@ -647,6 +730,11 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 			CiphertextNames:              inputCiphertextNames,
 			EnclaveEphemeralPublicKey:    enclaveParams.EnclaveEphemeralPublicKey,
 			EncryptedDecryptionKeyShares: encryptedDecryptionShares,
+			// Vault public key of the DKG instance that produced the shares, carried inline
+			// in the vault DON response. Empty when the vault plugin gate is off (cache hits
+			// or older nodes), in which case the enclave uses its configured MasterPublicKey.
+			// Signed as part of ComputeRequest.Hash().
+			MasterPublicKey: rawVaultPublicKey,
 			AppID:                        e.capabilityID,
 			Version:                      e.confidentialComputeVersion,
 		}
@@ -674,6 +762,10 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 					"duration_seconds": enclaveExecuteErrDuration.Seconds(),
 				})
 				return fmt.Errorf("enclave quorum timeout: %w", err)
+			}
+			if strings.Contains(err.Error(), types.ErrHTTPRedirectNotAllowed) {
+				// The wrapped HTTP error may contain a URL with interpolated secrets.
+				return caperrors.NewPublicUserError(errors.New(types.ErrHTTPRedirectNotAllowed), caperrors.InvalidArgument)
 			}
 			if strings.Contains(err.Error(), types.ErrEncryptionRequestedNoKey) ||
 				strings.Contains(err.Error(), types.ErrKeyPresentNoEncryption) ||
@@ -737,14 +829,14 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 				msg, ok := ev.Details["message"].(string)
 				runLggr.Debugw("emitting user_log beholder event", "ok", ok, "msg", msg)
 				if ok {
-					emitUserLog(ctx, runLggr, metadata, msg)
+					emitUserLog(ctx, runLggr, metadata, e.shardIndex, msg)
 				}
 			case "capability_started":
 				capID, _ := ev.Details["capability_id"].(string)
 				method, _ := ev.Details["method"].(string)
 				stepRef := detailInt32(ev.Details, "step_ref")
 				runLggr.Debugw("emitting capability_started beholder event", "capability_id", capID, "method", method, "step_ref", stepRef)
-				emitCapabilityStarted(ctx, runLggr, metadata, capID, method, stepRef)
+				emitCapabilityStarted(ctx, runLggr, metadata, e.shardIndex, capID, method, stepRef)
 			case "capability_finished":
 				capID, _ := ev.Details["capability_id"].(string)
 				method, _ := ev.Details["method"].(string)
@@ -752,7 +844,7 @@ func (e *RealExecutor) Execute(ctx context.Context, protoBytes []byte, secrets [
 				errMsg, _ := ev.Details["error"].(string)
 				stepRef := detailInt32(ev.Details, "step_ref")
 				runLggr.Debugw("emitting capability_finished beholder event", "capability_id", capID, "method", method, "step_ref", stepRef, "success", success, "error", errMsg)
-				emitCapabilityFinished(ctx, runLggr, metadata, capID, method, stepRef, success, errMsg)
+				emitCapabilityFinished(ctx, runLggr, metadata, e.shardIndex, capID, method, stepRef, success, errMsg)
 			}
 		}
 	} else if executeResponses[0].Metrics != nil {
@@ -809,6 +901,7 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 	// job-spec Config field still wins for backward compatibility during
 	// migration.
 	e.applyLimitSettings(ctx, parsedConfig)
+	e.logResolvedConfig(parsedConfig)
 	rateLimiter, err := ratelimit.NewRateLimiter(ratelimit.RateLimiterConfig{
 		GlobalRPS:      parsedConfig.GlobalRPS,
 		GlobalBurst:    parsedConfig.GlobalBurst,
@@ -903,10 +996,12 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 
 	vaultDONCapability, err := e.capabilityRegistry.GetExecutable(ctx, vault.CapabilityID)
 	if err != nil {
+		_ = pool.Close()
 		return fmt.Errorf("failed to get VaultDON capability with ID '%s' from registry: %w", vault.CapabilityID, err)
 	}
 	vaultDONPossibleFaultyNodes, err := getVaultDONPossibleFaultyNodes(ctx, vaultDONCapability, int(localNode.WorkflowDON.F))
 	if err != nil {
+		_ = pool.Close()
 		return fmt.Errorf("failed to get VaultDON possible faulty nodes: %w", err)
 	}
 
@@ -921,7 +1016,6 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 	e.proposeConfigUpdateIfMembershipChanged(ctx, peerIDsToSortedBytes(localNode.WorkflowDON.Members), uint32(localNode.WorkflowDON.F))
 
 	e.initialized = true
-	e.startEnclaveRefreshLoop()
 	e.lggr.Infow("executor initialized",
 		"capabilityID", e.capabilityID,
 		"nodeID", e.nodeID,
@@ -932,6 +1026,8 @@ func (e *RealExecutor) initLazily(ctx context.Context) error {
 		"insecureSkipTLS", parsedConfig.InsecureSkipTLSVerify,
 		"publicKeyRetriesMax", parsedConfig.PublicKeyRetriesMax,
 		"publicKeyRetriesBackoff", parsedConfig.PublicKeyRetriesBackoff)
+	// Started after the log line, which reads fields the refresh loop rewrites.
+	e.startEnclaveRefreshLoop()
 	return nil
 }
 
@@ -961,17 +1057,22 @@ func (e *RealExecutor) startEnclaveRefreshLoop() {
 	}()
 }
 
-// Close stops the background enclave-refresh loop.
+// Close stops the background enclave-refresh loop and closes the enclave
+// client, which stops the pool's proactive public-key refresh.
 func (e *RealExecutor) Close() error {
 	e.initializedMutex.Lock()
 	cancel := e.refreshCancel
 	done := e.refreshDone
+	client := e.enclaveClient
 	e.refreshCancel = nil
 	e.initializedMutex.Unlock()
 
 	if cancel != nil {
 		cancel()
 		<-done
+	}
+	if client != nil {
+		return client.Close()
 	}
 	return nil
 }
@@ -996,14 +1097,18 @@ func (e *RealExecutor) EnsureFreshEnclaves(ctx context.Context) error {
 			"endpoint": "publicKeys",
 		})
 	} else {
+		e.donMu.Lock()
 		e.enclaves = nodes
+		e.donMu.Unlock()
 	}
 
 	vaultDONPossibleFaultyNodes, err := getVaultDONPossibleFaultyNodes(ctx, e.vaultDON.Capability, int(localNode.WorkflowDON.F))
 	if err != nil {
 		return fmt.Errorf("failed to get VaultDON possible faulty nodes: %w", err)
 	}
+	e.donMu.Lock()
 	e.vaultDON.CryptographyThreshold = getVaultDONThreshold(vaultDONPossibleFaultyNodes)
+	e.donMu.Unlock()
 
 	newMembers := peerIDsToSortedBytes(localNode.WorkflowDON.Members)
 	newF := uint32(localNode.WorkflowDON.F)
@@ -1117,6 +1222,8 @@ func (e *RealExecutor) broadcastConfigUpdate(ctx context.Context, newMembers [][
 }
 
 func (e *RealExecutor) GetEnclaves() []types.Enclave {
+	e.donMu.RLock()
+	defer e.donMu.RUnlock()
 	return e.enclaves
 }
 
@@ -1135,7 +1242,9 @@ func (e *RealExecutor) getLocalNodeAndCapConfig(ctx context.Context) (capabiliti
 		return capabilities.Node{}, capabilities.CapabilityConfiguration{}, fmt.Errorf("local node does not have a WorkflowDON ID, cannot initialise confidential http action capability")
 	}
 	if localNode.PeerID != nil {
+		e.donMu.Lock()
 		e.nodeID = localNode.PeerID.String()
+		e.donMu.Unlock()
 	}
 
 	ownCapabilityConfig, err := e.capabilityRegistry.ConfigForCapability(ctx, e.capabilityID, localNode.WorkflowDON.ID)
@@ -1328,6 +1437,19 @@ func (e *RealExecutor) getEnclaveParams(ctx context.Context, lggr logger.Logger,
 	}, nil
 }
 
+// cachedPublicKeysMatch reports whether every cached entry carries the same
+// rawVaultPublicKey (byte-equal, treating empty as a distinct value). A batch that
+// mixes keys must not be served from cache because all ciphertexts in a request
+// are decrypted under one MasterPublicKey.
+func cachedPublicKeysMatch(cached []*cachedEDKS) bool {
+	for _, entry := range cached {
+		if !bytes.Equal(entry.rawVaultPublicKey, cached[0].rawVaultPublicKey) {
+			return false
+		}
+	}
+	return true
+}
+
 func generateSecretCacheKey(enclaveEphemeralPublicKey []byte, secret *framework.SecretIdentifier, workflowOwner string) [32]byte {
 	owner := workflowOwner
 	keyData := fmt.Sprintf("%x-%s-%s-%s", enclaveEphemeralPublicKey, secret.Key, secret.Namespace, owner)
@@ -1344,18 +1466,18 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 	enclaveEphemeralPublicKey []byte,
 	metadata capabilities.RequestMetadata,
 	metrics types.Emitter,
-) ([][]byte, [][][]byte, error) {
+) ([][]byte, [][][]byte, []byte, error) {
 	lggr.Debugw("Attempting to get encrypted decrypted shares from VaultDON capability",
 		"enclaveEphemeralPublicKey", fmt.Sprintf("%x", enclaveEphemeralPublicKey[:8]))
 
 	// Short circuit Vault DON call if no secrets are required.
 	if len(vaultDONSecrets) == 0 {
 		lggr.Debugw("no secrets required, skipping VaultDON call")
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	if e.vaultDON.Capability == nil {
-		return nil, nil, errors.New("VaultDON capability is not initialized")
+		return nil, nil, nil, errors.New("VaultDON capability is not initialized")
 	}
 	enclaveEphemeralPublicKeyHex := hex.EncodeToString(enclaveEphemeralPublicKey)
 	enableSecretsCache := e.getCapConfig().EnableSecretsCache
@@ -1363,24 +1485,44 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 	// It's technically suboptimal to require all secrets be cached to not send a request,
 	// but this is simpler logic and practically just as effective for real users.
 	if enableSecretsCache {
-		var allSecretsAreCached = true
+		cached := make([]*cachedEDKS, 0, len(vaultDONSecrets))
+		allSecretsAreCached := true
 		for i := range vaultDONSecrets {
-			if _, ok := e.secretsCache.Get(generateSecretCacheKey(enclaveEphemeralPublicKey, vaultDONSecrets[i], metadata.WorkflowOwner)); !ok {
+			entry, ok := e.secretsCache.Get(generateSecretCacheKey(enclaveEphemeralPublicKey, vaultDONSecrets[i], metadata.WorkflowOwner))
+			if !ok {
 				allSecretsAreCached = false
 				break
 			}
+			cached = append(cached, entry)
+		}
+		// The cache key does not include the DKG generation, so a batch can mix
+		// secrets cached before and after a reshare under the same enclave ephemeral
+		// key. Every ciphertext in a request is decrypted under a single
+		// MasterPublicKey, so serving such a batch would apply one key to shares from
+		// a different DKG and fail aggregation on every retry. Only serve from cache
+		// when all entries agree on the response public key (including empty vs
+		// present); otherwise treat it as a miss and refetch the whole batch.
+		if allSecretsAreCached && !cachedPublicKeysMatch(cached) {
+			lggr.Debugw("cached secrets disagree on vault public key; refetching batch from VaultDON", "num_secrets", len(vaultDONSecrets))
+			allSecretsAreCached = false
 		}
 		if allSecretsAreCached {
 			encryptedSecrets := make([][]byte, 0, len(vaultDONSecrets))
 			encryptedDecryptionShares := make([][][]byte, 0, len(vaultDONSecrets))
-			for i := range vaultDONSecrets {
-				cachedEDKS, _ := e.secretsCache.Get(generateSecretCacheKey(enclaveEphemeralPublicKey, vaultDONSecrets[i], metadata.WorkflowOwner))
-				encryptedSecrets = append(encryptedSecrets, cachedEDKS.encryptedSecret)
-				encryptedDecryptionShares = append(encryptedDecryptionShares, cachedEDKS.encryptedDecryptionShares)
+			for _, entry := range cached {
+				encryptedSecrets = append(encryptedSecrets, entry.encryptedSecret)
+				encryptedDecryptionShares = append(encryptedDecryptionShares, entry.encryptedDecryptionShares)
 			}
+			// All cached entries agree on the key (checked above), so any of them is
+			// representative; empty means the responses carried no key and the enclave
+			// falls back to its configured MasterPublicKey.
+			rawVaultPublicKey := cached[0].rawVaultPublicKey
 			lggr.Debugw("All secrets retrieved from cache", "num_secrets", len(vaultDONSecrets))
 			metrics.Emit("vault_don_cache_hit", nil)
-			return encryptedSecrets, encryptedDecryptionShares, nil
+			if len(rawVaultPublicKey) > 0 {
+				lggr.Debug("using vault public key from cached GetSecrets response")
+			}
+			return encryptedSecrets, encryptedDecryptionShares, rawVaultPublicKey, nil
 		}
 		metrics.Emit("vault_don_cache_miss", nil)
 	}
@@ -1404,13 +1546,13 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 	}
 	vaultDONInputAny, err := anypb.New(vaultDONRequestPayload)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal VaultDON request payload to Any: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to marshal VaultDON request payload to Any: %w", err)
 	}
 
 	vaultMetadata := metadata
 	e.applyPropagatedOrgIDToVault(ctx, &vaultMetadata)
 	if err := e.applyWorkflowDONBindingToVault(ctx, &vaultMetadata); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	vaultDONRequest := capabilities.CapabilityRequest{
@@ -1426,14 +1568,27 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 		"metadata", vaultMetadata)
 	vaultDONResponse, err := e.vaultDON.Capability.Execute(ctx, vaultDONRequest)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to execute VaultDON capability: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to execute VaultDON capability: %w", err)
 	}
 	lggr.Debugw("VaultDON response received", "secretCount", len(vaultDONSecrets))
 
 	var vaultDONOutput vault.GetSecretsResponse
 	err = vaultDONResponse.Payload.UnmarshalTo(&vaultDONOutput)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to unmarshal VaultDON response payload: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to unmarshal VaultDON response payload: %w", err)
+	}
+
+	// Prefer the vault public key carried inline in the response (the key of the DKG
+	// instance that produced these shares) so a reshare needs no infra/config update.
+	// Decoded to the tdh2 marshaled bytes the enclave combiner expects; empty when the
+	// plugin gate is off, in which case the enclave uses its configured MasterPublicKey.
+	var rawVaultPublicKey []byte
+	if raw := vaultDONOutput.GetRawVaultPublicKey(); raw != "" {
+		rawVaultPublicKey, err = hex.DecodeString(raw)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to decode RawVaultPublicKey from VaultDON response: %w", err)
+		}
+		lggr.Debug("using vault public key from GetSecrets response")
 	}
 
 	encryptedSecrets := make([][]byte, 0)
@@ -1452,15 +1607,15 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 			// TODO: replace this string match with a typed origin/code field on SecretResponse.
 			// Source: chainlink core ocr2 vault plugin, userFacingError() helper.
 			if resp.GetError() == types.ErrVaultSystemErrorFallback {
-				return nil, nil, innerErr
+				return nil, nil, nil, innerErr
 			}
-			return nil, nil, caperrors.NewPublicUserError(innerErr, caperrors.InvalidArgument)
+			return nil, nil, nil, caperrors.NewPublicUserError(innerErr, caperrors.InvalidArgument)
 		}
 		if resp.GetId() == nil || resp.GetId().GetKey() == "" {
-			return nil, nil, fmt.Errorf("VaultDON response at index %d is missing a valid secret identifier", responseIndex)
+			return nil, nil, nil, fmt.Errorf("VaultDON response at index %d is missing a valid secret identifier", responseIndex)
 		}
 		if slices.Contains(seenKeys, resp.GetId().GetKey()) {
-			return nil, nil, fmt.Errorf("duplicate VaultDON response for secret key %s at index %d", resp.GetId().GetKey(), responseIndex)
+			return nil, nil, nil, fmt.Errorf("duplicate VaultDON response for secret key %s at index %d", resp.GetId().GetKey(), responseIndex)
 		}
 		seenKeys = append(seenKeys, resp.GetId().GetKey())
 	}
@@ -1474,7 +1629,7 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 			}
 		}
 		if matchingResp == nil {
-			return nil, nil, fmt.Errorf("no response from VaultDON for secret with key %s, namespace %s, owner %s", secretReq.Id.GetKey(), secretReq.Id.GetNamespace(), secretReq.Id.GetOwner())
+			return nil, nil, nil, fmt.Errorf("no response from VaultDON for secret with key %s, namespace %s, owner %s", secretReq.Id.GetKey(), secretReq.Id.GetNamespace(), secretReq.Id.GetOwner())
 		}
 		orderedVaultDONResponses = append(orderedVaultDONResponses, matchingResp)
 	}
@@ -1482,18 +1637,18 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 	for _, secretResp := range orderedVaultDONResponses {
 		secretData := secretResp.GetData()
 		if secretData == nil {
-			return nil, nil, fmt.Errorf("VaultDON returned no data for secret %s", secretResp.GetId().GetKey())
+			return nil, nil, nil, fmt.Errorf("VaultDON returned no data for secret %s", secretResp.GetId().GetKey())
 		}
 
 		encryptedSecret, err := hex.DecodeString(secretData.GetEncryptedValue())
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to decode hex-encoded ciphertext for secret %s: %w", secretResp.GetId().GetKey(), err)
+			return nil, nil, nil, fmt.Errorf("failed to decode hex-encoded ciphertext for secret %s: %w", secretResp.GetId().GetKey(), err)
 		}
 		encryptedSecrets = append(encryptedSecrets, encryptedSecret)
 
 		encryptedDecryptionSharesForSecret := make([][]byte, 0)
 		if len(secretData.GetEncryptedDecryptionKeyShares()) != 1 {
-			return nil, nil, fmt.Errorf("expected exactly one set of encrypted decryption key shares for secret %s, got %d", secretResp.GetId().GetKey(), len(secretData.GetEncryptedDecryptionKeyShares()))
+			return nil, nil, nil, fmt.Errorf("expected exactly one set of encrypted decryption key shares for secret %s, got %d", secretResp.GetId().GetKey(), len(secretData.GetEncryptedDecryptionKeyShares()))
 		}
 		shares := secretData.GetEncryptedDecryptionKeyShares()[0]
 		if len(shares.GetBinaryShares()) > 0 {
@@ -1502,16 +1657,18 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 			for _, shareStr := range shares.GetShares() {
 				shareBytes, err := hex.DecodeString(shareStr)
 				if err != nil {
-					return nil, nil, fmt.Errorf("failed to decode hex-encoded share for secret %s: %w", secretResp.GetId().GetKey(), err)
+					return nil, nil, nil, fmt.Errorf("failed to decode hex-encoded share for secret %s: %w", secretResp.GetId().GetKey(), err)
 				}
 				encryptedDecryptionSharesForSecret = append(encryptedDecryptionSharesForSecret, shareBytes)
 			}
 		} else {
-			return nil, nil, fmt.Errorf("no decryption shares found for secret %s: neither binary nor hex-encoded shares present", secretResp.GetId().GetKey())
+			return nil, nil, nil, fmt.Errorf("no decryption shares found for secret %s: neither binary nor hex-encoded shares present", secretResp.GetId().GetKey())
 		}
+		e.donMu.RLock()
 		minimumSharesRequired := e.vaultDON.CryptographyThreshold
+		e.donMu.RUnlock()
 		if len(encryptedDecryptionSharesForSecret) < minimumSharesRequired {
-			return nil, nil, fmt.Errorf("not enough encrypted decryption key shares for secret %s, expected at least %d, got %d", secretResp.GetId().GetKey(), minimumSharesRequired, len(encryptedDecryptionSharesForSecret))
+			return nil, nil, nil, fmt.Errorf("not enough encrypted decryption key shares for secret %s, expected at least %d, got %d", secretResp.GetId().GetKey(), minimumSharesRequired, len(encryptedDecryptionSharesForSecret))
 		}
 		encryptedDecryptionShares = append(encryptedDecryptionShares, encryptedDecryptionSharesForSecret)
 	}
@@ -1523,11 +1680,12 @@ func (e *RealExecutor) GetEncryptedDecryptionShares(
 			e.secretsCache.Set(cacheKey, &cachedEDKS{
 				encryptedSecret:           encryptedSecrets[i],
 				encryptedDecryptionShares: encryptedDecryptionShares[i],
+				rawVaultPublicKey:         rawVaultPublicKey,
 			}, nil)
 		}
 		lggr.Debugw("cached VaultDON secrets", "secretCount", len(vaultDONSecrets))
 	}
-	return encryptedSecrets, encryptedDecryptionShares, nil
+	return encryptedSecrets, encryptedDecryptionShares, rawVaultPublicKey, nil
 }
 
 func sanitizeLogString(s string) string {

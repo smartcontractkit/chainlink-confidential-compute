@@ -8,9 +8,11 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -93,11 +95,12 @@ type recordedExecution struct {
 }
 
 type recordingExecutionMetrics struct {
-	mu              sync.Mutex
-	started         []executionMetadata
-	completed       []recordedExecution
-	startedSignal   chan struct{}
-	completedSignal chan struct{}
+	mu                    sync.Mutex
+	started               []executionMetadata
+	completed             []recordedExecution
+	subCapabilityFailures []string
+	startedSignal         chan struct{}
+	completedSignal       chan struct{}
 }
 
 func newRecordingExecutionMetrics() *recordingExecutionMetrics {
@@ -124,10 +127,22 @@ func (r *recordingExecutionMetrics) startExecution(metadata executionMetadata, _
 	}
 }
 
+func (r *recordingExecutionMetrics) recordSubCapabilityFailure(errorType string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.subCapabilityFailures = append(r.subCapabilityFailures, errorType)
+}
+
 func (r *recordingExecutionMetrics) snapshot() ([]executionMetadata, []recordedExecution) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]executionMetadata(nil), r.started...), append([]recordedExecution(nil), r.completed...)
+}
+
+func (r *recordingExecutionMetrics) subCapabilityFailuresSnapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.subCapabilityFailures...)
 }
 
 func signedExecuteRequest(t *testing.T, request types.ComputeRequest, privateKey ed25519.PrivateKey) *http.Request {
@@ -184,7 +199,7 @@ func TestInspectPublicDataConfidentialHTTP(t *testing.T) {
 
 	metadata := inspectPublicData(lggr, types.AppIDConfidentialHTTP, publicData)
 
-	assert.Equal(t, executionMetadata{appID: types.AppIDConfidentialHTTP}, metadata)
+	assert.Equal(t, executionMetadata{appID: types.AppIDConfidentialHTTP, requestKind: "action"}, metadata)
 	fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA")
 	assert.Equal(t, types.AppIDConfidentialHTTP, fields["appID"])
 	assert.Equal(t, "confidential_http_request", fields["publicDataType"])
@@ -469,6 +484,36 @@ func TestHandleExecuteRecordsEnclaveError(t *testing.T) {
 	assert.Equal(t, 1, transport.callCount())
 }
 
+func TestHandleExecuteRelaysEnclaveErrorResponse(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	events := []types.MetricEvent{{
+		Event:   "app_execution_completed",
+		Details: map[string]any{"duration_seconds": 0.5},
+	}}
+	enclaveBody := util.MustMarshal(t, types.EnclaveErrorResponse{Error: "execution failed", MetricEvents: events})
+	host := NewHostServer(context.Background(), &http.Client{Transport: &mockRoundTripper{response: &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Status:     "500 Internal Server Error",
+		Body:       io.NopCloser(bytes.NewReader(enclaveBody)),
+	}}})
+	host.config = types.EnclaveConfig{Signers: [][]byte{publicKey}, T: 1, F: 0}
+	request := types.ComputeRequest{
+		RequestID: sha256.Sum256([]byte("enclave-error-response")),
+		AppID:     types.AppIDConfidentialWorkflows,
+	}
+
+	w := httptest.NewRecorder()
+	host.handleExecute(w, signedExecuteRequest(t, request, privateKey))
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	var got types.EnclaveErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, fmt.Sprintf("error for request ID %x: enclave returned error: 500 Internal Server Error - execution failed", request.RequestID), got.Error)
+	assert.Equal(t, events, got.MetricEvents)
+}
+
 func TestExecutionFailureReasonForStatus(t *testing.T) {
 	tests := map[int]string{
 		http.StatusBadRequest:         executionFailureInvalid,
@@ -480,6 +525,104 @@ func TestExecutionFailureReasonForStatus(t *testing.T) {
 	for status, expected := range tests {
 		assert.Equal(t, expected, executionFailureReasonForStatus(status))
 	}
+}
+
+func TestRecordSubCapabilityFailuresFiltersEvents(t *testing.T) {
+	events := []types.MetricEvent{
+		{Event: "capability_finished", Details: map[string]any{"success": false, "error_type": "dispatch"}},
+		{Event: "capability_finished", Details: map[string]any{"success": false}},
+		{Event: "capability_finished", Details: map[string]any{"success": true, "error_type": "capability"}},
+		{Event: "capability_finished", Details: map[string]any{"success": "false", "error_type": "capability"}},
+		{Event: "capability_started", Details: map[string]any{"success": false, "error_type": "capability"}},
+	}
+
+	t.Run("confidential workflows failures", func(t *testing.T) {
+		recordedMetrics := newRecordingExecutionMetrics()
+		host := NewHostServer(context.Background(), nil)
+		host.metrics = recordedMetrics
+		host.recordSubCapabilityFailures([]types.SignedComputeRequest{{
+			ComputeRequest: types.ComputeRequest{AppID: types.AppIDConfidentialWorkflows},
+		}}, events)
+
+		assert.Equal(t, []string{"dispatch", "unknown"}, recordedMetrics.subCapabilityFailuresSnapshot())
+	})
+
+	t.Run("unrelated app", func(t *testing.T) {
+		recordedMetrics := newRecordingExecutionMetrics()
+		host := NewHostServer(context.Background(), nil)
+		host.metrics = recordedMetrics
+		host.recordSubCapabilityFailures([]types.SignedComputeRequest{{
+			ComputeRequest: types.ComputeRequest{AppID: "other-app"},
+		}}, events)
+
+		assert.Empty(t, recordedMetrics.subCapabilityFailuresSnapshot())
+	})
+}
+
+func TestProcessBatchRecordsSubCapabilityFailures(t *testing.T) {
+	reqs := []types.SignedComputeRequest{{
+		ComputeRequest: types.ComputeRequest{AppID: types.AppIDConfidentialWorkflows},
+	}}
+
+	t.Run("successful response", func(t *testing.T) {
+		responseBody := util.MustMarshal(t, types.ExecuteResponse{MetricEvents: []types.MetricEvent{{
+			Event:   "capability_finished",
+			Details: map[string]any{"success": false, "error_type": "dispatch"},
+		}}})
+		recordedMetrics := newRecordingExecutionMetrics()
+		host := NewHostServer(context.Background(), &http.Client{Transport: &mockRoundTripper{response: &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader(responseBody)),
+		}}})
+		host.metrics = recordedMetrics
+
+		_, failureReason, err := host.processBatch(reqs)
+
+		require.NoError(t, err)
+		assert.Empty(t, failureReason)
+		assert.Equal(t, []string{"dispatch"}, recordedMetrics.subCapabilityFailuresSnapshot())
+	})
+
+	t.Run("error response", func(t *testing.T) {
+		responseBody := util.MustMarshal(t, types.EnclaveErrorResponse{
+			Error: "execution failed",
+			MetricEvents: []types.MetricEvent{{
+				Event:   "capability_finished",
+				Details: map[string]any{"success": false, "error_type": "capability"},
+			}},
+		})
+		recordedMetrics := newRecordingExecutionMetrics()
+		host := NewHostServer(context.Background(), &http.Client{Transport: &mockRoundTripper{response: &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Status:     "500 Internal Server Error",
+			Body:       io.NopCloser(bytes.NewReader(responseBody)),
+		}}})
+		host.metrics = recordedMetrics
+
+		resp, failureReason, err := host.processBatch(reqs)
+
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		assert.Equal(t, executionFailureInternal, failureReason)
+		assert.Equal(t, "enclave returned error: 500 Internal Server Error - execution failed", err.Error())
+		assert.Equal(t, []string{"capability"}, recordedMetrics.subCapabilityFailuresSnapshot())
+	})
+
+	t.Run("malformed error response", func(t *testing.T) {
+		const responseBody = "opaque enclave error"
+		recordedMetrics := newRecordingExecutionMetrics()
+		host := NewHostServer(context.Background(), &http.Client{Transport: &mockRoundTripper{response: &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Status:     "500 Internal Server Error",
+			Body:       io.NopCloser(strings.NewReader(responseBody)),
+		}}})
+		host.metrics = recordedMetrics
+
+		_, _, err := host.processBatch(reqs)
+
+		require.EqualError(t, err, "enclave returned error: 500 Internal Server Error - "+responseBody)
+		assert.Empty(t, recordedMetrics.subCapabilityFailuresSnapshot())
+	})
 }
 
 func TestHandleGetPublicKeys(t *testing.T) {
@@ -629,6 +772,10 @@ func TestHandleExecuteWithBatchingAndCaching(t *testing.T) {
 		RequestID:   sha256.Sum256([]byte("test-request-id-batching-caching")),
 		Output:      []byte("test-outputs"),
 		Attestation: []byte("test-attestation"),
+		MetricEvents: []types.MetricEvent{{
+			Event:   "capability_finished",
+			Details: map[string]any{"success": false, "error_type": "dispatch"},
+		}},
 	}
 	respBytes := util.MustMarshal(t, mockExecResponse)
 
@@ -641,6 +788,8 @@ func TestHandleExecuteWithBatchingAndCaching(t *testing.T) {
 	mockTransport := &mockRoundTripper{response: mockResp}
 
 	host := NewHostServer(context.Background(), &http.Client{Transport: mockTransport})
+	recordedMetrics := newRecordingExecutionMetrics()
+	host.metrics = recordedMetrics
 
 	host.config = config
 
@@ -653,6 +802,7 @@ func TestHandleExecuteWithBatchingAndCaching(t *testing.T) {
 			RequestID:   sha256.Sum256([]byte("test-request-id-batching-caching")),
 			Ciphertexts: [][]byte{[]byte("test-ciphertext")},
 			PublicData:  []byte("test-public-data"),
+			AppID:       types.AppIDConfidentialWorkflows,
 		}
 
 		hash := computeReq.Hash()
@@ -723,6 +873,7 @@ func TestHandleExecuteWithBatchingAndCaching(t *testing.T) {
 		RequestID:   sha256.Sum256([]byte("test-request-id-batching-caching")),
 		Ciphertexts: [][]byte{[]byte("test-ciphertext")},
 		PublicData:  []byte("test-public-data"),
+		AppID:       types.AppIDConfidentialWorkflows,
 	}
 
 	hash := computeReq.Hash()
@@ -750,6 +901,7 @@ func TestHandleExecuteWithBatchingAndCaching(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, mockExecResponse.RequestID, laggardResp.RequestID)
 	assert.Equal(t, mockExecResponse.Output, laggardResp.Output)
+	assert.Equal(t, []string{"dispatch"}, recordedMetrics.subCapabilityFailuresSnapshot())
 }
 
 func TestHandleExecuteWithZeroTF(t *testing.T) {

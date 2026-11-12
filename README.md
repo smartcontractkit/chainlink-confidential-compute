@@ -355,7 +355,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.26.10'
 
       - name: Run E2E tests
         env:

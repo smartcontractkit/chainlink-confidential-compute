@@ -118,6 +118,13 @@ type batchResponse struct {
 	err      error
 }
 
+// enclaveError keeps the enclave's decoded error response so handleExecute can
+// relay its metric events.
+type enclaveError struct {
+	error
+	response types.EnclaveErrorResponse
+}
+
 func NewHostServer(ctx context.Context, clientOverride *http.Client) *hostServer {
 	var client *http.Client
 	if clientOverride == nil {
@@ -197,6 +204,24 @@ func (h *hostServer) handleGetPublicKeys(w http.ResponseWriter, r *http.Request)
 	}
 	defer util.SafeClose(resp)
 
+	// Read one extra byte to distinguish oversized responses.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, types.MaxEnclaveResponseBodyBytes+1))
+	if err != nil {
+		logger.Warnw("failed to read enclave publicKeys response", "error", err)
+		http.Error(w, "failed to read enclave publicKeys response", http.StatusBadGateway)
+		return
+	}
+	if int64(len(body)) > types.MaxEnclaveResponseBodyBytes {
+		logger.Warnw("enclave publicKeys response exceeds size limit")
+		http.Error(w, "enclave publicKeys response exceeds size limit", http.StatusBadGateway)
+		return
+	}
+	if resp.StatusCode == http.StatusOK {
+		if err := h.maybeRecoverConfig(body); err != nil {
+			logger.Warnw("failed to recover host config", "error", err)
+		}
+	}
+
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
@@ -204,7 +229,7 @@ func (h *hostServer) handleGetPublicKeys(w http.ResponseWriter, r *http.Request)
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	if _, err := io.Copy(w, resp.Body); err != nil {
+	if _, err := w.Write(body); err != nil {
 		logger.Errorw("error copying publicKeys response",
 			"event", "PUBKEYS_ERR",
 			"error", err)
@@ -215,6 +240,26 @@ func (h *hostServer) handleGetPublicKeys(w http.ResponseWriter, r *http.Request)
 		"event", "RESPONSE_OK_PUBKEYS",
 		"statusCode", resp.StatusCode,
 		"waitDuration", time.Since(arrivalTime).String())
+}
+
+// maybeRecoverConfig restores an empty config, ie. when the host container restarted but the enclave stayed alive.
+func (h *hostServer) maybeRecoverConfig(body []byte) error {
+	h.configMutex.Lock()
+	defer h.configMutex.Unlock()
+	if !h.config.IsZero() {
+		return nil
+	}
+
+	var resp types.PublicKeyResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return err
+	}
+	if resp.Config.T == 0 || len(resp.Config.Signers) == 0 || len(resp.Config.MasterPublicKey) == 0 {
+		return errors.New("incomplete enclave config")
+	}
+	h.config = resp.Config
+	h.logger.Infow("host recovered local config", "source", "publicKeys", "configHash", fmt.Sprintf("%x", resp.Config.Hash()), "T", resp.Config.T, "F", resp.Config.F)
+	return nil
 }
 
 // handleSetConfig handles POST on the /config endpoint, which sets the enclave's
@@ -467,11 +512,11 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 			"prefix", fmt.Sprintf("%x", prefix))
 	}
 
-	// If T and F are both zero, the node is not configured. Reject the request.
 	h.configMutex.RLock()
-	t := h.config.T
-	f := h.config.F
+	config := h.config.Copy()
 	h.configMutex.RUnlock()
+	t, f := config.T, config.F
+	// If T and F are both zero, the node is not configured. Reject the request.
 	if t == 0 && f == 0 {
 		reqLog.Warnw("rejecting request: not configured",
 			"event", "REJECT",
@@ -490,7 +535,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	// Validate the domain separated hash of the request.
 	var signer []byte
 	prefixedRequestHash := types.MakePeerIDSignatureDomainSeparatedPayload(util.GetConfidentialComputePayloadPrefix(), requestHash[:])
-	if signer, err = h.verifier.VerifySignature(prefixedRequestHash, execReq.Signature, h.config.Signers); err != nil {
+	if signer, err = h.verifier.VerifySignature(prefixedRequestHash, execReq.Signature, config.Signers); err != nil {
 		h.processRequestMutex.Unlock()
 		reqLog.Warnw("rejecting request: signature verification failed",
 			"event", "REJECT",
@@ -534,8 +579,8 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 			"F", f,
 			"threshold", quorumThreshold(f))
 		br = &batchRequest{
-			requests:    make([]types.SignedComputeRequest, 0, len(h.config.Signers)),
-			responseCh:  make([]chan *batchResponse, 0, len(h.config.Signers)),
+			requests:    make([]types.SignedComputeRequest, 0, len(config.Signers)),
+			responseCh:  make([]chan *batchResponse, 0, len(config.Signers)),
 			signersSeen: make(map[string]bool),
 			createdAt:   time.Now(),
 			doneCh:      make(chan struct{}),
@@ -634,7 +679,18 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 				"event", "RESPONSE_ERR",
 				"waitDuration", waitDuration.String(),
 				"error", batchResp.err)
-			http.Error(w, fmt.Sprintf("error for request ID %x: %s", execReq.RequestID, batchResp.err), http.StatusInternalServerError)
+			msg := fmt.Sprintf("error for request ID %x: %s", execReq.RequestID, batchResp.err)
+			var enclaveErr *enclaveError
+			if errors.As(batchResp.err, &enclaveErr) {
+				// Relay the enclave's JSON error so callers can still emit its metric events.
+				errResp := enclaveErr.response
+				errResp.Error = msg
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(errResp)
+				return
+			}
+			http.Error(w, msg, http.StatusInternalServerError)
 			return
 		}
 		reqLog.Infow("response sent",
@@ -681,6 +737,16 @@ func (h *hostServer) processBatch(reqs []types.SignedComputeRequest) (*types.Exe
 		if err != nil {
 			return nil, failureReason, fmt.Errorf("enclave returned error: %s (no message provided)", resp.Status)
 		}
+		var enclaveErrResp types.EnclaveErrorResponse
+		if json.Unmarshal(body, &enclaveErrResp) == nil {
+			h.recordSubCapabilityFailures(reqs, enclaveErrResp.MetricEvents)
+			// Relay the decoded response with the enclave's message: quoting the raw
+			// body too would send its events twice and can exceed the client's limit.
+			if enclaveErrResp.Error != "" {
+				err = fmt.Errorf("enclave returned error: %s - %s", resp.Status, enclaveErrResp.Error)
+				return nil, failureReason, &enclaveError{error: err, response: enclaveErrResp}
+			}
+		}
 		return nil, failureReason, fmt.Errorf("enclave returned error: %s - %s", resp.Status, string(body))
 	}
 
@@ -688,8 +754,26 @@ func (h *hostServer) processBatch(reqs []types.SignedComputeRequest) (*types.Exe
 	if err := json.NewDecoder(resp.Body).Decode(&execResp); err != nil {
 		return nil, executionFailureProtocol, fmt.Errorf("failed to decode response: %w", err)
 	}
+	h.recordSubCapabilityFailures(reqs, execResp.MetricEvents)
 
 	return &execResp, "", nil
+}
+
+func (h *hostServer) recordSubCapabilityFailures(reqs []types.SignedComputeRequest, events []types.MetricEvent) {
+	if len(reqs) == 0 || reqs[0].AppID != types.AppIDConfidentialWorkflows {
+		return
+	}
+	for _, event := range events {
+		if event.Event != "capability_finished" {
+			continue
+		}
+		success, ok := event.Details["success"].(bool)
+		if !ok || success {
+			continue
+		}
+		errorType, _ := event.Details["error_type"].(string)
+		h.metrics.recordSubCapabilityFailure(normalizeSubCapabilityErrorType(errorType))
+	}
 }
 
 // notifyWaiters sends a response to all waiting channels for a batch.
@@ -886,7 +970,10 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
-	telemetryCfg := loadHostTelemetryConfig(os.Getenv)
+	telemetryCfg, err := loadHostTelemetryConfig(os.Getenv)
+	if err != nil {
+		log.Fatalf("invalid telemetry config: %v", err)
+	}
 	telemetry, err := newHostTelemetry(ctx, telemetryCfg, lggr)
 	if err != nil {
 		log.Fatalf("failed to initialize telemetry: %v", err)
@@ -917,7 +1004,8 @@ func main() {
 	host.logger = lggr
 	host.metrics = metrics
 	if telemetryCfg.enabled() {
-		go metrics.monitorEnclaveMemory(ctx, host.enclaveClient, lggr, enclaveMemoryPollInterval, enclaveMemoryPollTimeout)
+		lggr.Infow("polling enclave memory", "interval", telemetryCfg.MemoryPollInterval.String())
+		go metrics.monitorEnclaveMemory(ctx, host.enclaveClient, lggr, telemetryCfg.MemoryPollInterval, enclaveMemoryPollTimeout)
 	}
 	mainMux := http.NewServeMux()
 

@@ -44,12 +44,12 @@
 [[nodesets]]
   nodes = 4
   name = "workflow"
-  don_family = "test-don-family"
+  don_families = ["test-don-family"]
   don_types = ["workflow"]
   override_mode = "all"
   http_port_range_start = 10100
 
-  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":false}}", CL_CRE_SETTINGS_DEFAULT = "{\"RemoteExecutableWorkflowDONBindingEnabled\":\"true\",\"PerWorkflow\":{\"ConfidentialWorkflows\":{\"Enabled\":\"true\"}}}" }
+  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":\"false\"}}", CL_CRE_SETTINGS_DEFAULT = "{\"RemoteExecutableWorkflowDONBindingEnabled\":\"true\",\"PerWorkflow\":{\"ConfidentialWorkflows\":{\"Enabled\":\"true\"}}}" }
   supported_evm_chains = [1337, 2337]
   # evm-1337 registers the EVM read/write capability for the local chain, which the
   # engine test's confidential workflow needs to write its report on-chain. Chain
@@ -57,10 +57,10 @@
   # cresettings ChainAllowed default allowlist, so no extra CL_CRE_SETTINGS is needed.
   capabilities = ["consensus", "confidential-workflows", "confidential-relay", "cron", "http-action", "http-trigger", "don-time", "evm-1337"]
   exposes_remote_capabilities = true
-  registry_based_launch_allowlist = ["cron-trigger@1.0.0"]
+  registry_based_launch_allowlist = ["cron-trigger@1.0.0", "dontime@1.0.0"]
 
   [nodesets.db]
-    image = "postgres:12.0"
+    image = "postgres:16"
     port = 13000
 
   [[nodesets.node_specs]]
@@ -93,18 +93,23 @@
 [[nodesets]]
   nodes = 4
   name = "capabilities"
-  don_family = "test-don-family"
+  don_families = ["test-don-family"]
   don_types = ["capabilities"]
   override_mode = "each"
   http_port_range_start = 10400
 
-  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":false}}", CL_CRE_SETTINGS_DEFAULT = "{\"RemoteExecutableWorkflowDONBindingEnabled\":\"true\"}" }
+  # VaultGetSecretsIncludePublicKeyEnabled: Vault GetSecrets responses carry the
+  # DKG RawVaultPublicKey so the confidential-workflows runtime GetSecret path uses
+  # the live key forwarded via the relay. Exercises the response-key path end-to-end.
+  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":\"false\",\"VaultGetSecretsIncludePublicKeyEnabled\":\"true\"}}", CL_CRE_SETTINGS_DEFAULT = "{\"RemoteExecutableWorkflowDONBindingEnabled\":\"true\"}" }
   supported_evm_chains = [1337, 2337]
   capabilities = ["vault"]
   exposes_remote_capabilities = true
+  # Vault nodes log at debug: the engine test asserts on the debug-level
+  # "received workflow get secrets request" log in its direct-read phase.
 
   [nodesets.db]
-    image = "postgres:12.0"
+    image = "postgres:16"
     port = 13300
 
   [[nodesets.node_specs]]
@@ -113,7 +118,7 @@
       custom_ports = ["17770:7777"]
       user_config_overrides = """
       [Log]
-      Level = 'info'
+      Level = 'debug'
       JSONConsole = true
 
       [Tracing]
@@ -132,7 +137,7 @@
       custom_ports = ["17771:7777"]
       user_config_overrides = """
       [Log]
-      Level = 'info'
+      Level = 'debug'
       JSONConsole = true
 
       [Tracing]
@@ -151,7 +156,7 @@
       custom_ports = ["17772:7777"]
       user_config_overrides = """
       [Log]
-      Level = 'info'
+      Level = 'debug'
       JSONConsole = true
 
       [Tracing]
@@ -170,7 +175,7 @@
       custom_ports = ["17773:7777"]
       user_config_overrides = """
       [Log]
-      Level = 'info'
+      Level = 'debug'
       JSONConsole = true
 
       [Tracing]
@@ -186,16 +191,16 @@
 [[nodesets]]
   nodes = 1
   name = "bootstrap-gateway"
-  don_family = "test-don-family"
+  don_families = ["test-don-family"]
   don_types = ["bootstrap", "gateway"]
   override_mode = "each"
   http_port_range_start = 10300
 
-  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":false}}" }
+  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":\"false\"}}" }
   supported_evm_chains = [1337, 2337]
 
   [nodesets.db]
-    image = "postgres:12.0"
+    image = "postgres:16"
     port = 13200
 
   [[nodesets.node_specs]]

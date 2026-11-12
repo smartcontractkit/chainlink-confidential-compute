@@ -24,6 +24,7 @@ import (
 	"github.com/smartcontractkit/cre-sdk-go/internal_testing/capabilities/basicaction"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/protobuf/proto"
 
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
@@ -451,6 +452,16 @@ func TestExecute_ExecutionTimeout(t *testing.T) {
 	require.NotNil(t, execErr)
 	assert.Equal(t, http.StatusGatewayTimeout, execErr.Code)
 	assert.Contains(t, execErr.Error, context.DeadlineExceeded.Error())
+	assert.Contains(t, execErr.Error, types.ErrWasmExecutionTimeout)
+}
+
+// startTimer records when workflow_execute_started is emitted.
+type startTimer struct{ at time.Time }
+
+func (s *startTimer) Emit(event string, _ map[string]any) {
+	if event == "workflow_execute_started" {
+		s.at = time.Now()
+	}
 }
 
 // Every execution is held for the grace period before it starts; a negative
@@ -476,10 +487,14 @@ func TestExecute_GracePeriod(t *testing.T) {
 		data, err := proto.Marshal(execution)
 		require.NoError(t, err)
 
+		// Measures up to workflow_execute_started so the WASM run, which is
+		// slow under -race, does not count against the bound.
+		started := &startTimer{}
 		start := time.Now()
-		_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+		_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, started)
 		require.Nil(t, execErr, "expected no error, got: %+v", execErr)
-		return time.Since(start)
+		require.False(t, started.at.IsZero(), "workflow_execute_started was not emitted")
+		return started.at.Sub(start)
 	}
 
 	t.Run("injected period is waited out", func(t *testing.T) {
@@ -531,6 +546,111 @@ func TestInjectSettings_Timeouts(t *testing.T) {
 		a, got := newApp()
 		inject(t, a, func(*WorkflowSettings) {})
 		assert.Zero(t, *got)
+	})
+}
+
+// The share cap is forwarded to the dispatcher factory; zero leaves the
+// dispatcher's built-in default in charge and a negative value is rejected.
+func TestInjectSettings_MaxEncryptedSharesPerRelayResult(t *testing.T) {
+	newApp := func() (*confidentialWorkflowsApp, *int64) {
+		var got int64
+		a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t),
+			WithRemoteDispatcherFactory(func(gw GatewayConfig) (RemoteDispatcher, error) {
+				got = gw.MaxEncryptedSharesPerRelayResult
+				return &testRemoteDispatcher{}, nil
+			}),
+		).(*confidentialWorkflowsApp)
+		return a, &got
+	}
+
+	inject := func(t *testing.T, a *confidentialWorkflowsApp, mutate func(*WorkflowSettings)) error {
+		t.Helper()
+		s := testSettings("127.0.0.1:1")
+		mutate(&s)
+		raw, err := json.Marshal(s)
+		require.NoError(t, err)
+		return a.InjectSettings(raw)
+	}
+
+	t.Run("forwarded to the dispatcher factory", func(t *testing.T) {
+		a, got := newApp()
+		require.NoError(t, inject(t, a, func(s *WorkflowSettings) {
+			s.MaxEncryptedSharesPerRelayResult = 7
+		}))
+		assert.Equal(t, int64(7), *got)
+	})
+
+	t.Run("omitted leaves the dispatcher default", func(t *testing.T) {
+		a, got := newApp()
+		require.NoError(t, inject(t, a, func(*WorkflowSettings) {}))
+		assert.Zero(t, *got)
+	})
+
+	t.Run("negative rejected", func(t *testing.T) {
+		a, got := newApp()
+		err := inject(t, a, func(s *WorkflowSettings) {
+			s.MaxEncryptedSharesPerRelayResult = -1
+		})
+		require.ErrorContains(t, err, "maxEncryptedSharesPerRelayResult")
+		assert.Zero(t, *got)
+	})
+}
+
+// The compile gate follows MaxConcurrentCompilations: omitted keeps the
+// default width, a positive value replaces the gate, and a negative payload is
+// rejected before any of it is applied.
+func TestInjectSettings_MaxConcurrentCompilations(t *testing.T) {
+	newApp := func() *confidentialWorkflowsApp {
+		return NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t),
+			WithRemoteDispatcherFactory(func(GatewayConfig) (RemoteDispatcher, error) {
+				return &testRemoteDispatcher{}, nil
+			}),
+		).(*confidentialWorkflowsApp)
+	}
+	inject := func(t *testing.T, a *confidentialWorkflowsApp, mutate func(*WorkflowSettings)) error {
+		t.Helper()
+		s := testSettings("127.0.0.1:1")
+		mutate(&s)
+		raw, err := json.Marshal(s)
+		require.NoError(t, err)
+		return a.InjectSettings(raw)
+	}
+	// gateCapacity acquires until the gate refuses, then releases everything.
+	gateCapacity := func(t *testing.T, gate *semaphore.Weighted) int64 {
+		t.Helper()
+		var n int64
+		for gate.TryAcquire(1) {
+			n++
+		}
+		for i := int64(0); i < n; i++ {
+			gate.Release(1)
+		}
+		return n
+	}
+
+	t.Run("default gate", func(t *testing.T) {
+		a := newApp()
+		assert.Equal(t, int64(defaultMaxConcurrentCompilations), gateCapacity(t, a.compileSlots.Load()))
+	})
+
+	t.Run("injected value replaces the gate", func(t *testing.T) {
+		a := newApp()
+		require.NoError(t, inject(t, a, func(s *WorkflowSettings) { s.MaxConcurrentCompilations = 9 }))
+		assert.Equal(t, int64(9), gateCapacity(t, a.compileSlots.Load()))
+	})
+
+	t.Run("omitted keeps the existing gate", func(t *testing.T) {
+		a := newApp()
+		require.NoError(t, inject(t, a, func(s *WorkflowSettings) { s.MaxConcurrentCompilations = 2 }))
+		require.NoError(t, inject(t, a, func(*WorkflowSettings) {}))
+		assert.Equal(t, int64(2), gateCapacity(t, a.compileSlots.Load()))
+	})
+
+	t.Run("negative rejected", func(t *testing.T) {
+		a := newApp()
+		err := inject(t, a, func(s *WorkflowSettings) { s.MaxConcurrentCompilations = -1 })
+		require.ErrorContains(t, err, "maxConcurrentCompilations")
+		assert.Equal(t, int64(defaultMaxConcurrentCompilations), gateCapacity(t, a.compileSlots.Load()))
 	})
 }
 

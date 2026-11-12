@@ -1,6 +1,6 @@
 module github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/app/testdata/engine-test
 
-go 1.26.4
+go 1.26.10
 
 require (
 	github.com/smartcontractkit/cre-sdk-go v1.17.0-capdev.1

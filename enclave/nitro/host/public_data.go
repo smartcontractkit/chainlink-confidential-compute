@@ -116,8 +116,12 @@ func decodeWorkflowPublicData(publicData []byte) (*confworkflowtypes.WorkflowExe
 	return &execution, nil
 }
 
+// httpRequestKind is the request kind for confidential HTTP executions, which
+// are always capability action calls.
+const httpRequestKind = "action"
+
 func httpExecutionMetadata() executionMetadata {
-	return executionMetadata{appID: types.AppIDConfidentialHTTP}
+	return executionMetadata{appID: types.AppIDConfidentialHTTP, requestKind: httpRequestKind}
 }
 
 func workflowExecutionMetadata(execution *confworkflowtypes.WorkflowExecution) executionMetadata {
