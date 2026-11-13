@@ -49,10 +49,16 @@ type invalidShare struct {
 // It validates each share against the ciphertext and public key. For an invalid share, its index is collected and
 // the function continues. If a threshold of valid shares is not reached, it returns an error identifying the faulty
 // shares by index. Otherwise, it proceeds to aggregate the valid shares and returns the result.
+//
+// Valid shares are deduplicated by node index. TDH2 share generation is
+// randomized, so one node can produce different valid bytes for the same index;
+// those count as one share.
 func TDH2AggregateDecryptionShares(ciphertext tdh2easy.Ciphertext, shares [][]byte, publicKey tdh2easy.PublicKey, threshold int) ([]byte, error) {
-	// Gather all valid shares.
-	var decShares []*tdh2easy.DecryptionShare
+	// Gather all valid, distinct shares.
+	decShares := make([]*tdh2easy.DecryptionShare, 0, len(shares))
+	seenIndexes := make(map[int]struct{}, len(shares))
 	var invalidShares []invalidShare
+	duplicateShareCount := 0
 	for i, s := range shares {
 		var share tdh2easy.DecryptionShare
 		if err := share.Unmarshal(s); err != nil {
@@ -64,13 +70,18 @@ func TDH2AggregateDecryptionShares(ciphertext tdh2easy.Ciphertext, shares [][]by
 			invalidShares = append(invalidShares, invalidShare{index: i, err: err})
 			continue
 		}
+		if _, dup := seenIndexes[share.Index()]; dup {
+			duplicateShareCount++
+			continue
+		}
+		seenIndexes[share.Index()] = struct{}{}
 		decShares = append(decShares, &share)
 		if len(decShares) == threshold {
 			break
 		}
 	}
 
-	// If a threshold of valid shares is not reached, report the faulty share indexes.
+	// Below threshold: report the invalid shares and the duplicate count.
 	if len(decShares) < threshold {
 		var errDetails string
 		for _, is := range invalidShares {
@@ -79,8 +90,8 @@ func TDH2AggregateDecryptionShares(ciphertext tdh2easy.Ciphertext, shares [][]by
 		if len(invalidShares) == 0 {
 			errDetails = "none"
 		}
-		return nil, fmt.Errorf("not enough valid shares to decrypt (%d/%d). invalid shares: %s",
-			len(decShares), threshold, errDetails)
+		return nil, fmt.Errorf("not enough valid distinct shares to decrypt (%d/%d, %d duplicate); invalid shares: %s",
+			len(decShares), threshold, duplicateShareCount, errDetails)
 	}
 
 	// Aggregate threshold of valid shares.

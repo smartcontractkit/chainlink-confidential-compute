@@ -22,7 +22,7 @@ on:
     # Nightly real-enclave run at 07:00 UTC.
     - cron: '0 7 * * *'
 env:
-  CHAINLINK_COMMIT_SHA: ad77e6d9c92cb77aa67e2c7986c9bc4320ad926a
+  CHAINLINK_COMMIT_SHA: 3deeb0e9daa7977efc7194a0a5afd3e047d9bb61
   LEGACY_COMMIT_SHA: c81a7a6bd15999eb3136e7526e8d833d3760755e # release/1.4.8 pin commit; the commit pointing to whatever capability gitref is deployed in Chainlink's plugins.public.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.public.yaml.
   LEGACY_ENCLAVE_RELEASE: v1.4.3 # The release tag whose enclave app the legacy-enclaves leg checks out and runs locally as a fake enclave: the release of the confidential-http enclave image in confidential-compute-infra deploy/config/enclave/prod.yaml. The nightly legacy-enclave-drift job flags when it changes.
   # Pinned refs for the supporting CRE Docker images, used as GHCR cache keys.

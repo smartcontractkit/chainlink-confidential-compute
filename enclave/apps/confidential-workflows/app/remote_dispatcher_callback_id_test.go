@@ -37,8 +37,9 @@ func TestGetSecrets_RetryOnNewEnclaveKeyFetchesFreshResult(t *testing.T) {
 	secretID := confidentialrelay.SecretIdentifier{Key: "API_KEY", Namespace: "main"}
 	result := confidentialrelay.SecretsResponseResult{
 		Secrets: []confidentialrelay.SecretEntry{{
-			ID:         secretID,
-			Ciphertext: base64.StdEncoding.EncodeToString([]byte("ciphertext")),
+			ID:              secretID,
+			Ciphertext:      base64.StdEncoding.EncodeToString([]byte("ciphertext")),
+			EncryptedShares: []string{base64.StdEncoding.EncodeToString([]byte("share"))},
 		}},
 	}
 
@@ -78,7 +79,7 @@ func TestGetSecrets_RetryOnNewEnclaveKeyFetchesFreshResult(t *testing.T) {
 			&stubKeychain{kp: &stubKeypair{pub: []byte(enclaveKey)}},
 			&stubCombiner{aggregateFn: func([]byte, [][]byte, []byte, int) ([]byte, error) { return []byte("value"), nil }},
 			signatureverifier.NewEd25519SignatureVerifier(),
-			0, 0,
+			0, 0, 0,
 		)
 		resp, err := d.GetSecrets(
 			context.Background(),

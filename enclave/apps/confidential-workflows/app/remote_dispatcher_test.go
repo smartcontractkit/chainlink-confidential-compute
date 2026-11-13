@@ -121,7 +121,7 @@ func TestCallCapability_HappyPath(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
-		0, 0,
+		0, 0, 0,
 	)
 
 	inputAny, err := anypb.New(wrapperspb.String("input-data"))
@@ -163,7 +163,7 @@ func TestCallCapability_RemoteError(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
-		0, 0,
+		0, 0, 0,
 	)
 
 	resp, err := d.CallCapability(context.Background(), "wf-err", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
@@ -189,7 +189,7 @@ func TestCallCapability_RPCError(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
-		0, 0,
+		0, 0, 0,
 	)
 
 	_, err := d.CallCapability(context.Background(), "wf-err", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
@@ -423,7 +423,7 @@ func TestCallCapability_VerificationFailures(t *testing.T) {
 				logger.Test(t),
 				nil, nil,
 				signatureverifier.NewEd25519SignatureVerifier(),
-				0, 0,
+				0, 0, 0,
 			)
 			_, err := d.CallCapability(context.Background(), "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
 				Id:         "write_ethereum@1.0.0",
@@ -464,7 +464,7 @@ func TestCallCapability_TolerantToNoise(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
-		0, 0,
+		0, 0, 0,
 	)
 	resp, err := d.CallCapability(context.Background(), "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
 		Id:         "write_ethereum@1.0.0",
@@ -506,7 +506,7 @@ func TestCallCapability_ForgedResultCannotWin(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
-		0, 0,
+		0, 0, 0,
 	)
 	resp, err := d.CallCapability(context.Background(), "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
 		Id:         "write_ethereum@1.0.0",
@@ -551,7 +551,7 @@ func TestCallCapability_ReportSignaturesIgnoredForQuorum(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
-		0, 0,
+		0, 0, 0,
 	)
 	resp, err := d.CallCapability(context.Background(), "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
 		Id:         "consensus@1.0.0-alpha",
@@ -599,7 +599,7 @@ func TestCallCapability_QuorumErrorReportsFields(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
-		0, 0,
+		0, 0, 0,
 	)
 	_, err := d.CallCapability(context.Background(), "wf-cap", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
 		Id:         "consensus@1.0.0-alpha",
@@ -789,7 +789,7 @@ func TestCallCapability_PopulatesEnclaveConfig(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
-		0, 0,
+		0, 0, 0,
 	)
 
 	_, err = d.CallCapability(context.Background(), "wf-cfg", "0xowner", "0000000000000000000000000000000000000000000000000000000000000001", "", &sdkpb.CapabilityRequest{
@@ -845,7 +845,7 @@ func TestCallCapability_SetConfigUpdatesOutgoingConfig(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
-		0, 0,
+		0, 0, 0,
 	)
 
 	call := func() {
@@ -972,7 +972,7 @@ func TestCallCapability_RetriesAfterTransientGatewayFailure(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
-		0, 0,
+		0, 0, 0,
 	)
 
 	// retryBackoff is 1s; use a context that tolerates it.
@@ -1058,7 +1058,7 @@ func TestCallCapability_RetriesWhenGatewayCannotReachRelayDON(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
-		0, 0,
+		0, 0, 0,
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1110,7 +1110,7 @@ func TestCallCapability_DoesNotRetryTerminalRPCError(t *testing.T) {
 		logger.Test(t),
 		nil, nil,
 		signatureverifier.NewEd25519SignatureVerifier(),
-		0, 0,
+		0, 0, 0,
 	)
 
 	_, err := d.CallCapability(context.Background(), "wf-term", "0x0123456789abcdef0123456789abcdef01234567", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", &sdkpb.CapabilityRequest{
