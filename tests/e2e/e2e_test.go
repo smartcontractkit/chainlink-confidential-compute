@@ -702,35 +702,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			}
 			require.NotZero(t, numNodes, "workflow nodeset not found in config")
 
-			var negativeExpected int
-			if app.Name == "confidential-http" && !usingPriorBinary {
-				workflowIDForSettings := strings.TrimPrefix(workflowID, "0x")
-
-				// First exercise the OCR path: enable the global per-workflow flag
-				// but leave the capability-side direct-read gate off.
-				testLogger.Info().Msg("Checking OCR Vault GetSecrets path with the capability gate off...")
-				ocrSettings := systemtests.ApplyCRESettings(t, testEnv,
-					systemtests.Workflow(workflowIDForSettings, confidentialHTTPDirectReadWorkflowTOML),
-				)
-				sendHTTPTrigger(t, testLogger, gatewayURL, uniqueWorkflowName, workflowID, workflowOwnerAddr, signingKey, triggerInputs[0])
-				negativeExpected = numNodes
-				require.Eventually(t, func() bool {
-					return recipient.requestCount() >= negativeExpected
-				}, 5*time.Minute, 5*time.Second, "recipient should receive the OCR-path workflow result")
-				// Prove the gate-off execution actually took the OCR path:
-				// the vault logged the request without the direct flag and
-				// has not served any direct request yet.
-				requireVaultOCRSecretsPath(t, testEnv, names[0])
-				ocrSettings.Reset(t)
-
-				testLogger.Info().Msg("Enabling Vault direct reads for confidential-http...")
-				systemtests.ApplyCRESettings(t, testEnv,
-					systemtests.Global(confidentialHTTPDirectReadGlobalTOML),
-					systemtests.Workflow(workflowIDForSettings, confidentialHTTPDirectReadWorkflowTOML),
-				)
-			}
-
-			totalExpected := negativeExpected + totalTriggers*numNodes
+			totalExpected := totalTriggers * numNodes
 			testLogger.Info().Msgf("Sending %d total triggers (%d rounds x %d inputs, expecting %d results with %d nodes, interRequestDelay=%s)...", totalTriggers, requestCount, len(triggerInputs), totalExpected, numNodes, interRequestDelay)
 			triggersSent := 0
 			for i := range requestCount {
@@ -755,10 +727,6 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 			testLogger.Info().Msgf("Validating recipient requests...")
 			err = app.Validate(framework.L, recipient.getRequests())
 			require.NoError(t, err, "recipient request validation failed")
-
-			if app.Name == "confidential-http" && !usingPriorBinary {
-				requireConfidentialHTTPVaultDirectRead(t, testEnv)
-			}
 
 			// --- Error handling sub-tests ---
 			// These exercise the enclave app's error-to-response conversion
@@ -1119,6 +1087,60 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				require.NoError(t, err, "recipient validation failed after failover")
 				testLogger.Info().Msgf("Enclave failover test passed successfully")
 			}
+
+			// --- Vault direct-read gate sub-test ---
+			// Exercises the capability-side direct-read gate in isolation, after
+			// the main flow and error-handling sub-tests: with the per-workflow
+			// direct-read flag on but the capability gate off, the pre-fetch must
+			// stay on the OCR path; with both on, the vault must serve direct
+			// reads end-to-end. Settings are restored on exit so the suite's
+			// shared state is unchanged.
+			t.Run("vault direct-read gate switches paths", func(t *testing.T) {
+				if usingPriorBinary {
+					t.Skip("prior binary predates the capability-side direct-read gate")
+				}
+
+				workflowIDForSettings := strings.TrimPrefix(workflowID, "0x")
+
+				resetRecipient := func() {
+					recipient.mu.Lock()
+					recipient.requests = nil
+					recipient.mu.Unlock()
+				}
+				triggerRoundAndAwait := func(expected int, msg string) {
+					t.Helper()
+					for _, input := range triggerInputs {
+						sendHTTPTrigger(t, testLogger, gatewayURL, uniqueWorkflowName, workflowID, workflowOwnerAddr, signingKey, input)
+					}
+					require.Eventually(t, func() bool {
+						return recipient.requestCount() >= expected
+					}, 5*time.Minute, 5*time.Second, msg)
+				}
+
+				// Phase 1: per-workflow direct-read flag on, capability gate off.
+				// The capability gate must win and keep the pre-fetch on the OCR path.
+				testLogger.Info().Msg("Direct-read sub-test: OCR path with the capability gate off...")
+				ocrSettings := systemtests.ApplyCRESettings(t, testEnv,
+					systemtests.Workflow(workflowIDForSettings, confidentialHTTPDirectReadWorkflowTOML),
+				)
+				defer ocrSettings.Reset(t)
+				resetRecipient()
+				triggerRoundAndAwait(numNodes*len(triggerInputs), "recipient should receive the OCR-path workflow results")
+				requireVaultOCRSecretsPath(t, testEnv, names[0])
+
+				// Phase 2: enable the capability-side gate on top of the flag.
+				// Direct reads must engage end-to-end: the vault serves them and
+				// the D2D aggregator's merged share sets still decrypt.
+				testLogger.Info().Msg("Direct-read sub-test: enabling Vault direct reads for confidential-http...")
+				directSettings := systemtests.ApplyCRESettings(t, testEnv,
+					systemtests.Global(confidentialHTTPDirectReadGlobalTOML),
+					systemtests.Workflow(workflowIDForSettings, confidentialHTTPDirectReadWorkflowTOML),
+				)
+				defer directSettings.Reset(t)
+				resetRecipient()
+				triggerRoundAndAwait(numNodes*len(triggerInputs), "recipient should receive the direct-read workflow results")
+				requireConfidentialHTTPVaultDirectRead(t, testEnv)
+			})
 		})
 	}
 
