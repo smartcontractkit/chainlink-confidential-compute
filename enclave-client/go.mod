@@ -6,7 +6,7 @@ replace github.com/smartcontractkit/chainlink-confidential-compute => ../
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.0
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20261113191656-e76ab5ff9b42
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20261116213440-51f4bebad41d
 	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-00010101000000-000000000000
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel/metric v1.46.0
