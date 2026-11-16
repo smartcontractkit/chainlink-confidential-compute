@@ -247,9 +247,6 @@ const (
 	httpDONConfigFile   = "/configs/workflow-don.toml"
 	engineDONConfigFile = "/configs/workflow-don-engine.toml"
 
-	// The vault capability runs on the workflow nodeset in workflow-don.toml.
-	confidentialHTTPVaultNodesetName = "workflow"
-
 	confidentialHTTPDirectReadGlobalTOML = `[ConfidentialCompute]
 ConfidentialHTTPVaultGetSecretsDirectlyActivePeriod = '[2000-01-01 00:00:00 +0000 UTC,2100-01-01 00:00:00 +0000 UTC]'`
 
@@ -258,10 +255,69 @@ FeatureVaultGetSecretsDirectlyActivePeriod = '[2000-01-01 00:00:00 +0000 UTC,210
 ExecutionTimestampsEnabled = 'true'`
 )
 
+// requireConfidentialHTTPVaultDirectRead waits until a vault node logs that it
+// served a direct GetSecrets request. The vault capability runs on its own DON
+// (the "vault" nodeset in workflow-don.toml), mirroring production, so the
+// capability's pre-fetch resolves the remote (D2D) vault executable and
+// chainlink's direct-read aggregator merges the responders' shares.
 func requireConfidentialHTTPVaultDirectRead(t *testing.T, testEnv *ttypes.TestEnvironment) {
 	t.Helper()
 
-	systemtests.RequireContainerLogsForNodesetEventually(t, testEnv, confidentialHTTPVaultNodesetName, "served direct get secrets request", time.Minute, 2*time.Second)
+	containers := vaultDONContainerNames(testEnv)
+	require.NotEmpty(t, containers, "no vault DON containers found to scrape")
+
+	require.Eventually(t, func() bool {
+		for _, name := range containers {
+			out, err := exec.Command("docker", "logs", name).CombinedOutput()
+			if err != nil {
+				continue
+			}
+			if bytes.Contains(out, []byte("served direct get secrets request")) {
+				return true
+			}
+		}
+		return false
+	}, time.Minute, 2*time.Second, "vault never served a direct get secrets request")
+}
+
+// requireVaultOCRSecretsPath proves the gate-off execution used the classic OCR
+// path: a vault node logged a GetSecrets request for secretID without the
+// direct flag, and no vault node has served a direct request yet. It must run
+// after the OCR-phase result arrives and before the capability-side gate is
+// enabled.
+func requireVaultOCRSecretsPath(t *testing.T, testEnv *ttypes.TestEnvironment, secretID string) {
+	t.Helper()
+
+	containers := vaultDONContainerNames(testEnv)
+	require.NotEmpty(t, containers, "no vault DON containers found to scrape")
+
+	// The direct flag may render as "get_secrets_directly: false" or be omitted
+	// entirely by the proto text marshaling; treat both as the OCR path.
+	sawOCRRequest := false
+	servedDirect := false
+	for _, name := range containers {
+		out, err := exec.Command("docker", "logs", name).CombinedOutput()
+		if err != nil {
+			continue
+		}
+		if bytes.Contains(out, []byte("served direct get secrets request")) {
+			servedDirect = true
+		}
+		for _, line := range bytes.Split(out, []byte{'\n'}) {
+			if !bytes.Contains(line, []byte("received workflow get secrets request")) ||
+				!bytes.Contains(line, []byte(secretID)) {
+				continue
+			}
+			if !bytes.Contains(line, []byte("get_secrets_directly: true")) &&
+				!bytes.Contains(line, []byte("get_secrets_directly:true")) {
+				sawOCRRequest = true
+			}
+		}
+	}
+	require.True(t, sawOCRRequest,
+		"no vault node logged an OCR-path GetSecrets request (direct flag unset) for %s", secretID)
+	require.False(t, servedDirect,
+		"a vault node already served a direct get secrets request before the capability gate was enabled")
 }
 
 func getTestConfig(t *testing.T, configPath string) *ttypes.TestConfig {
@@ -661,6 +717,10 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				require.Eventually(t, func() bool {
 					return recipient.requestCount() >= negativeExpected
 				}, 5*time.Minute, 5*time.Second, "recipient should receive the OCR-path workflow result")
+				// Prove the gate-off execution actually took the OCR path:
+				// the vault logged the request without the direct flag and
+				// has not served any direct request yet.
+				requireVaultOCRSecretsPath(t, testEnv, names[0])
 				ocrSettings.Reset(t)
 
 				testLogger.Info().Msg("Enabling Vault direct reads for confidential-http...")
