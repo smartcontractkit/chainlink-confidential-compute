@@ -30,6 +30,7 @@ var _ types.Emitter = (*MetricsEmitter)(nil)
 func NewMetricsEmitter(name string, lggr logger.Logger) *MetricsEmitter {
 	m := &MetricsEmitter{
 		baseName:   name,
+		//nolint:staticcheck // SA1019: DX-5066 — LOOP plugins read the process-global client until the loop protocol passes it in.
 		meter:      beholder.GetMeter(),
 		counters:   make(map[string]metric.Int64Counter),
 		histograms: make(map[string]metric.Float64Histogram),
