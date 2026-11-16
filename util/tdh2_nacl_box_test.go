@@ -113,6 +113,26 @@ func TestTDH2AggregateDecryptionShares_Golden(t *testing.T) {
 	assert.Equal(t, "vault secret", string(plaintext))
 
 	_, err = TDH2AggregateDecryptionShares(ciphertext, shares[:2], publicKey, 2)
-	require.ErrorContains(t, err, "not enough valid shares to decrypt (1/2)")
+	require.ErrorContains(t, err, "not enough valid distinct shares to decrypt (1/2, 0 duplicate)")
 	require.ErrorContains(t, err, "share 1:")
+}
+
+// Shares with the same node index count once toward the threshold.
+func TestTDH2AggregateDecryptionShares_DedupesByIndex(t *testing.T) {
+	var publicKey tdh2easy.PublicKey
+	require.NoError(t, publicKey.Unmarshal([]byte(goldenTDH2PublicKey)))
+	var ciphertext tdh2easy.Ciphertext
+	require.NoError(t, ciphertext.UnmarshalVerify([]byte(goldenTDH2Ciphertext), &publicKey))
+
+	shares := [][]byte{
+		[]byte(goldenTDH2Shares[0]),
+		[]byte(goldenTDH2Shares[0]),
+		[]byte(goldenTDH2Shares[1]),
+	}
+	plaintext, err := TDH2AggregateDecryptionShares(ciphertext, shares, publicKey, 2)
+	require.NoError(t, err)
+	assert.Equal(t, "vault secret", string(plaintext))
+
+	_, err = TDH2AggregateDecryptionShares(ciphertext, shares[:2], publicKey, 2)
+	require.ErrorContains(t, err, "not enough valid distinct shares to decrypt (1/2, 1 duplicate)")
 }

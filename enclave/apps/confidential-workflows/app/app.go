@@ -92,9 +92,9 @@ type Option func(*confidentialWorkflowsApp)
 
 type StorageFetcherFactory func(storageURL string, tls bool, privateKey string, maxBytes int64, timeout time.Duration, lggr logger.Logger) (RawFetcher, ed25519.PublicKey, error)
 
-// GatewayConfig carries the injected gateway tunables to the dispatcher
-// factory. Zero values mean "use the built-in default" (resolved by the
-// factory or the dispatcher).
+// GatewayConfig carries the injected dispatcher tunables to the remote
+// dispatcher factory. Zero values mean "use the built-in default" (resolved by
+// the factory or the dispatcher).
 type GatewayConfig struct {
 	// URL is the Gateway endpoint(s) for remote dispatch, comma-separated.
 	URL string
@@ -106,6 +106,10 @@ type GatewayConfig struct {
 	// RetryTimeout bounds the full gateway retry window for one capability call
 	// or secret fetch (all attempts, including backoffs).
 	RetryTimeout time.Duration
+	// MaxEncryptedSharesPerRelayResult caps the encrypted shares taken from one
+	// relay-DON signer's result for one secret. Zero means the dispatcher's
+	// built-in default.
+	MaxEncryptedSharesPerRelayResult int64
 }
 
 // RemoteDispatcherFactory defers construction until the host injects the gateway URL.
@@ -233,10 +237,11 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 	a.mu.Lock()
 	if a.dispatcher == nil && a.dispatcherFactory != nil {
 		d, err := a.dispatcherFactory(GatewayConfig{
-			URL:            req.GatewayURL,
-			RequestTimeout: time.Duration(req.GatewayRequestTimeout),
-			RetryBackoff:   time.Duration(req.GatewayRetryBackoff),
-			RetryTimeout:   time.Duration(req.GatewayRetryTimeout),
+			URL:                              req.GatewayURL,
+			RequestTimeout:                   time.Duration(req.GatewayRequestTimeout),
+			RetryBackoff:                     time.Duration(req.GatewayRetryBackoff),
+			RetryTimeout:                     time.Duration(req.GatewayRetryTimeout),
+			MaxEncryptedSharesPerRelayResult: req.MaxEncryptedSharesPerRelayResult,
 		})
 		if err != nil {
 			a.mu.Unlock()

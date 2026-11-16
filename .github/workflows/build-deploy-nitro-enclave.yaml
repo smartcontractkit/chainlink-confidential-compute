@@ -413,6 +413,12 @@ jobs:
               name: confidential-http
               nitro_prefix: nitro-enclave
               plugin_prefix: enclave
+          - account: "008732161165"
+            region: "us-east-2"
+            app:
+              name: confidential-http
+              nitro_prefix: nitro-enclave
+              plugin_prefix: enclave
           - account: "312157985241"
             region: "us-west-2"
             app:
@@ -432,6 +438,12 @@ jobs:
               nitro_prefix: nitro-workflows
               plugin_prefix: enclave-workflows
           - account: "129896631554"
+            region: "us-east-2"
+            app:
+              name: confidential-workflows
+              nitro_prefix: nitro-workflows
+              plugin_prefix: enclave-workflows
+          - account: "008732161165"
             region: "us-east-2"
             app:
               name: confidential-workflows

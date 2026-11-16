@@ -549,6 +549,53 @@ func TestInjectSettings_Timeouts(t *testing.T) {
 	})
 }
 
+// The share cap is forwarded to the dispatcher factory; zero leaves the
+// dispatcher's built-in default in charge and a negative value is rejected.
+func TestInjectSettings_MaxEncryptedSharesPerRelayResult(t *testing.T) {
+	newApp := func() (*confidentialWorkflowsApp, *int64) {
+		var got int64
+		a := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t),
+			WithRemoteDispatcherFactory(func(gw GatewayConfig) (RemoteDispatcher, error) {
+				got = gw.MaxEncryptedSharesPerRelayResult
+				return &testRemoteDispatcher{}, nil
+			}),
+		).(*confidentialWorkflowsApp)
+		return a, &got
+	}
+
+	inject := func(t *testing.T, a *confidentialWorkflowsApp, mutate func(*WorkflowSettings)) error {
+		t.Helper()
+		s := testSettings("127.0.0.1:1")
+		mutate(&s)
+		raw, err := json.Marshal(s)
+		require.NoError(t, err)
+		return a.InjectSettings(raw)
+	}
+
+	t.Run("forwarded to the dispatcher factory", func(t *testing.T) {
+		a, got := newApp()
+		require.NoError(t, inject(t, a, func(s *WorkflowSettings) {
+			s.MaxEncryptedSharesPerRelayResult = 7
+		}))
+		assert.Equal(t, int64(7), *got)
+	})
+
+	t.Run("omitted leaves the dispatcher default", func(t *testing.T) {
+		a, got := newApp()
+		require.NoError(t, inject(t, a, func(*WorkflowSettings) {}))
+		assert.Zero(t, *got)
+	})
+
+	t.Run("negative rejected", func(t *testing.T) {
+		a, got := newApp()
+		err := inject(t, a, func(s *WorkflowSettings) {
+			s.MaxEncryptedSharesPerRelayResult = -1
+		})
+		require.ErrorContains(t, err, "maxEncryptedSharesPerRelayResult")
+		assert.Zero(t, *got)
+	})
+}
+
 // The compile gate follows MaxConcurrentCompilations: omitted keeps the
 // default width, a positive value replaces the gate, and a negative payload is
 // rejected before any of it is applied.

@@ -76,7 +76,7 @@ func TestTDH2EasyCombiner_AggregateShares(t *testing.T) {
 					insufficientShares := decryptionShares[:threshold-1]
 					_, err := tdh2Combiner.AggregateShares(ciphertextBytes, insufficientShares, pubKeyBytes, threshold)
 					require.Error(t, err)
-					require.Contains(t, err.Error(), fmt.Sprintf("not enough valid shares to decrypt (%d/%d). invalid shares: none",
+					require.Contains(t, err.Error(), fmt.Sprintf("not enough valid distinct shares to decrypt (%d/%d, 0 duplicate); invalid shares: none",
 						len(insufficientShares), threshold))
 				}
 
@@ -99,7 +99,7 @@ func TestTDH2EasyCombiner_AggregateShares(t *testing.T) {
 					// Aggregate shares. Assert a threshold of valid shares is not met due to the last share.
 					_, err = tdh2Combiner.AggregateShares(ciphertextBytes, mixedShares, pubKeyBytes, threshold)
 					require.Error(t, err)
-					require.Contains(t, err.Error(), fmt.Sprintf("not enough valid shares to decrypt (%d/%d). invalid shares: share %d", threshold-1, threshold, threshold-1))
+					require.Contains(t, err.Error(), fmt.Sprintf("not enough valid distinct shares to decrypt (%d/%d, 0 duplicate); invalid shares: share %d", threshold-1, threshold, threshold-1))
 
 					// If more valid shares are added, the threshold of valid shares is met and aggregation succeeds.
 					if threshold+1 <= n {
