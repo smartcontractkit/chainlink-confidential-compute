@@ -49,6 +49,7 @@ func emitProtoEvent(ctx context.Context, lggr logger.Logger, event proto.Message
 		lggr.Errorw("failed to marshal beholder event", "entity", entity, "error", err)
 		return
 	}
+	//nolint:staticcheck // SA1019: DX-5066 — LOOP plugins read the process-global client until the loop protocol passes it in.
 	if err := beholder.GetEmitter().Emit(ctx, body,
 		"beholder_data_schema", schema,
 		"beholder_domain", eventDomain,
