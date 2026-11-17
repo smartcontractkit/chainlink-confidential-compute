@@ -2,17 +2,11 @@ module github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/c
 
 go 1.27.3
 
-replace github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework => ../../../../capabilities/framework
-
-replace github.com/smartcontractkit/chainlink-confidential-compute/enclave-client => ../../../../enclave-client
-
-replace github.com/smartcontractkit/chainlink-confidential-compute => ../../../..
-
 require (
 	github.com/smartcontractkit/capabilities/libs v0.0.0-20260928161313-2aaae97ddf69
 	github.com/smartcontractkit/chainlink-common v0.11.2-0.20261116213440-51f4bebad41d
-	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20260422000908-67af9e15fe65
-	github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework v0.0.0-20260422000908-67af9e15fe65
+	github.com/smartcontractkit/chainlink-confidential-compute v0.0.0-20261117144708-d697334f5711
+	github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework v0.0.0-20261117144708-d697334f5711
 	github.com/stretchr/testify v1.12.1
 	google.golang.org/protobuf v1.36.12
 )
@@ -84,7 +78,7 @@ require (
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/smartcontractkit/chain-selectors v1.0.104 // indirect
 	github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20261106154152-9426766b30a9 // indirect
-	github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-00010101000000-000000000000 // indirect
+	github.com/smartcontractkit/chainlink-confidential-compute/enclave-client v0.0.0-20261117144708-d697334f5711 // indirect
 	github.com/smartcontractkit/chainlink-protos/cre/go v0.0.0-20261103151748-aa8c64acc53c // indirect
 	github.com/smartcontractkit/chainlink-protos/linking-service/go v0.0.0-20251002192024-d2ad9222409b // indirect
 	github.com/smartcontractkit/chainlink-protos/metering/go v0.0.0-20260710151514-27b5a126dabe // indirect
