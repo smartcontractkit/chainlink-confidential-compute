@@ -256,10 +256,7 @@ ExecutionTimestampsEnabled = 'true'`
 )
 
 // requireConfidentialHTTPVaultDirectRead waits until a vault node logs that it
-// served a direct GetSecrets request. The vault capability runs on its own DON
-// (the "vault" nodeset in workflow-don.toml), mirroring production, so the
-// capability's pre-fetch resolves the remote (D2D) vault executable and
-// chainlink's direct-read aggregator merges the responders' shares.
+// served a direct GetSecrets request.
 func requireConfidentialHTTPVaultDirectRead(t *testing.T, testEnv *ttypes.TestEnvironment) {
 	t.Helper()
 
@@ -280,19 +277,17 @@ func requireConfidentialHTTPVaultDirectRead(t *testing.T, testEnv *ttypes.TestEn
 	}, time.Minute, 2*time.Second, "vault never served a direct get secrets request")
 }
 
-// requireVaultOCRSecretsPath proves the gate-off execution used the classic OCR
-// path: a vault node logged a GetSecrets request for secretID without the
-// direct flag, and no vault node has served a direct request yet. It must run
-// after the OCR-phase result arrives and before the capability-side gate is
-// enabled.
+// requireVaultOCRSecretsPath asserts a vault node logged a GetSecrets request
+// for secretID without the direct flag, and that no direct request has been
+// served yet. Run it before enabling the capability-side gate.
 func requireVaultOCRSecretsPath(t *testing.T, testEnv *ttypes.TestEnvironment, secretID string) {
 	t.Helper()
 
 	containers := vaultDONContainerNames(testEnv)
 	require.NotEmpty(t, containers, "no vault DON containers found to scrape")
 
-	// The direct flag may render as "get_secrets_directly: false" or be omitted
-	// entirely by the proto text marshaling; treat both as the OCR path.
+	// The direct flag may render as ": false" or be omitted by proto text
+	// marshaling; both mean the OCR path.
 	sawOCRRequest := false
 	servedDirect := false
 	for _, name := range containers {
@@ -1088,13 +1083,9 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				testLogger.Info().Msgf("Enclave failover test passed successfully")
 			}
 
-			// --- Vault direct-read gate sub-test ---
-			// Exercises the capability-side direct-read gate in isolation, after
-			// the main flow and error-handling sub-tests: with the per-workflow
-			// direct-read flag on but the capability gate off, the pre-fetch must
-			// stay on the OCR path; with both on, the vault must serve direct
-			// reads end-to-end. Settings are restored on exit so the suite's
-			// shared state is unchanged.
+			// Vault direct-read gate: with the per-workflow flag on but the
+			// capability gate off, the pre-fetch must stay on the OCR path; with
+			// both on, the vault must serve direct reads.
 			t.Run("vault direct-read gate switches paths", func(t *testing.T) {
 				if usingPriorBinary {
 					t.Skip("prior binary predates the capability-side direct-read gate")
@@ -1117,29 +1108,27 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 					}, 5*time.Minute, 5*time.Second, msg)
 				}
 
-				// Phase 1: per-workflow direct-read flag on, capability gate off.
-				// The capability gate must win and keep the pre-fetch on the OCR path.
+				// Phase 1: flag on, gate off — the gate must win; the pre-fetch stays on the OCR path.
 				testLogger.Info().Msg("Direct-read sub-test: OCR path with the capability gate off...")
 				ocrSettings := systemtests.ApplyCRESettings(t, testEnv,
 					systemtests.Workflow(workflowIDForSettings, confidentialHTTPDirectReadWorkflowTOML),
 				)
-				defer ocrSettings.Reset(t)
 				resetRecipient()
 				triggerRoundAndAwait(numNodes*len(triggerInputs), "recipient should receive the OCR-path workflow results")
 				requireVaultOCRSecretsPath(t, testEnv, names[0])
+				// Release the override before phase 2's apply: only one active override is allowed per test.
+				ocrSettings.Reset(t)
 
-				// Phase 2: enable the capability-side gate on top of the flag.
-				// Direct reads must engage end-to-end: the vault serves them and
-				// the D2D aggregator's merged share sets still decrypt.
+				// Phase 2: both on — the vault must serve direct reads.
 				testLogger.Info().Msg("Direct-read sub-test: enabling Vault direct reads for confidential-http...")
 				directSettings := systemtests.ApplyCRESettings(t, testEnv,
 					systemtests.Global(confidentialHTTPDirectReadGlobalTOML),
 					systemtests.Workflow(workflowIDForSettings, confidentialHTTPDirectReadWorkflowTOML),
 				)
-				defer directSettings.Reset(t)
 				resetRecipient()
 				triggerRoundAndAwait(numNodes*len(triggerInputs), "recipient should receive the direct-read workflow results")
 				requireConfidentialHTTPVaultDirectRead(t, testEnv)
+				directSettings.Reset(t)
 			})
 		})
 	}
