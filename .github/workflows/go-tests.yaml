@@ -674,15 +674,19 @@ jobs:
       - name: Setup Postgres
         uses: ./confidential-compute/.github/actions/setup-postgres
 
-      - name: Install PostgreSQL client
+      - name: Install pg_dump shim
+        # chainlink's `make testdb` (preparetest) shells out to pg_dump on PATH.
+        # The shim forwards it to the postgres container started by setup-postgres,
+        # so the client version always matches the server image exactly instead of
+        # depending on the runner's apt/dnf client (which can be older than the
+        # server tag and refuse to dump it).
         run: |
-          if command -v dnf &> /dev/null; then
-            sudo dnf update -y
-            sudo dnf install -y postgresql15
-          else
-            sudo apt-get update
-            sudo apt-get install -y postgresql-client
-          fi
+          sudo tee /usr/local/bin/pg_dump > /dev/null <<'EOF'
+          #!/bin/bash
+          exec docker exec -i cl_pg pg_dump "$@"
+          EOF
+          sudo chmod +x /usr/local/bin/pg_dump
+          pg_dump --version
       - name: Set Database URL
         run: |
           echo "CL_DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@localhost:5432/chainlink_test?sslmode=disable" >> $GITHUB_ENV
