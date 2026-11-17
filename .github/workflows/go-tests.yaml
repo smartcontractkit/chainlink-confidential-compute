@@ -681,11 +681,15 @@ jobs:
         # depending on the runner's apt/dnf client (which can be older than the
         # server tag and refuse to dump it).
         run: |
-          sudo tee /usr/local/bin/pg_dump > /dev/null <<'EOF'
+          PG_DUMP_BIN="$RUNNER_TEMP/pg-dump-bin"
+          mkdir -p "$PG_DUMP_BIN"
+          tee "$PG_DUMP_BIN/pg_dump" > /dev/null <<'EOF'
           #!/bin/bash
           exec docker exec -i cl_pg pg_dump "$@"
           EOF
-          sudo chmod +x /usr/local/bin/pg_dump
+          chmod +x "$PG_DUMP_BIN/pg_dump"
+          echo "$PG_DUMP_BIN" >> "$GITHUB_PATH"
+          export PATH="$PG_DUMP_BIN:$PATH"
           pg_dump --version
       - name: Set Database URL
         run: |
