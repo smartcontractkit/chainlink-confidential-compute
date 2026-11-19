@@ -17,8 +17,8 @@ import (
 // resolveExecutionLimits reads the CRE limits for the execution's org, owner
 // and workflow (carried by ctx) from the node's settings, the source the
 // workflow engine uses for non-confidential executions, so a customer's
-// override applies the same way in both. It sends every limit it can resolve
-// and decides nothing: how each one applies is the enclave's policy.
+// override applies the same way in both. When inclusion is enabled, it sends
+// every limit it can resolve; how each applies is the enclave's policy.
 //
 // Nothing here falls back to cresettings defaults on a failure: an invalid or
 // negative value leaves that one limit unset, so a settings problem cannot turn
@@ -36,6 +36,22 @@ func resolveExecutionLimits(ctx context.Context, g settings.Getter, lggr logger.
 	}
 	if g == nil {
 		return nil, fmt.Errorf("CRE settings not loaded; refusing to sign confidential workflow limits")
+	}
+	s := cresettings.Default.PerWorkflow.ConfidentialWorkflows.IncludeExecutionLimits
+	// Require explicit scoped opt-in from the same source as the limits.
+	raw, err := g.GetScoped(ctx, s.Scope, s.Key)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", s.Key, err)
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	include, err := s.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", s.Key, err)
+	}
+	if !include {
+		return nil, nil
 	}
 	r := limitResolver{ctx: ctx, g: g, lggr: lggr}
 	h := cresettings.Default.PerWorkflow.HTTPAction

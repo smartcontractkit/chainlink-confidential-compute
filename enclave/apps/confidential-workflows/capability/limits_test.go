@@ -37,10 +37,9 @@ func resolve(t *testing.T, g settings.Getter, ctx context.Context) *confworkflow
 	return got
 }
 
-// With no overrides the CRE defaults are sent; the enclave decides how to apply
-// them.
+// With inclusion enabled and no limit overrides, the CRE defaults are sent.
 func TestResolveExecutionLimits_SendsDefaults(t *testing.T) {
-	got := resolve(t, jsonGetter(t, `{}`), creCtx("org-1", plainOwner, "wf-1"))
+	got := resolve(t, jsonGetter(t, `{"global":{"PerWorkflow":{"ConfidentialWorkflows":{"IncludeExecutionLimits":"true"}}}}`), creCtx("org-1", plainOwner, "wf-1"))
 	require.NotNil(t, got)
 	assert.Equal(t, uint32(5), got.GetHttpAction().GetCallLimit())
 	assert.Equal(t, uint64(10_000), got.GetHttpAction().GetRequestSizeLimitBytes())
@@ -67,7 +66,7 @@ func TestResolveExecutionLimits_SendsDefaults(t *testing.T) {
 // org over global, with unset values taking the CRE default.
 func TestResolveExecutionLimits_ScopePrecedence(t *testing.T) {
 	g := jsonGetter(t, `{
-		"global": {"PerWorkflow": {"CapabilityConcurrencyLimit": "31"}},
+		"global": {"PerWorkflow": {"ConfidentialWorkflows": {"IncludeExecutionLimits": "true"}, "CapabilityConcurrencyLimit": "31"}},
 		"org": {"org-1": {"PerWorkflow": {"HTTPAction": {"CallLimit": "30"}, "UserMetricEnabled": "true"}}},
 		"owner": {"`+overrideOwner+`": {"PerWorkflow": {"HTTPAction": {"CallLimit": "20", "RequestSizeLimit": "200kb"}}}},
 		"workflow": {"wf-1": {"PerWorkflow": {"HTTPAction": {"ConnectionTimeout": "5s"}}}}
@@ -93,6 +92,7 @@ func TestResolveExecutionLimits_ScopePrecedence(t *testing.T) {
 // so the enclave applies nothing for it.
 func TestResolveExecutionLimits_InvalidValueLeavesLimitUnset(t *testing.T) {
 	g := jsonGetter(t, `{
+		"global": {"PerWorkflow": {"ConfidentialWorkflows": {"IncludeExecutionLimits": "true"}}},
 		"owner": {"`+overrideOwner+`": {"PerWorkflow": {
 			"HTTPAction": {"CallLimit": "-1", "RequestSizeLimit": "lots"},
 			"UserMetricEnabled": "maybe"
@@ -110,7 +110,7 @@ func TestResolveExecutionLimits_InvalidValueLeavesLimitUnset(t *testing.T) {
 // Every node must sign identical PublicData, so resolution and marshaling
 // must be deterministic.
 func TestResolveExecutionLimits_Deterministic(t *testing.T) {
-	g := jsonGetter(t, `{"owner": {"`+overrideOwner+`": {"PerWorkflow": {"HTTPAction": {"CallLimit": "20"}}}}}`)
+	g := jsonGetter(t, `{"global":{"PerWorkflow":{"ConfidentialWorkflows":{"IncludeExecutionLimits":"true"}}},"owner": {"`+overrideOwner+`": {"PerWorkflow": {"HTTPAction": {"CallLimit": "20"}}}}}`)
 	marshal := func() []byte {
 		e := testExecution()
 		e.Limits = resolve(t, g, creCtx("org-1", overrideOwner, "wf-1"))
@@ -127,11 +127,14 @@ func TestExecute_SendsResolvedLimits(t *testing.T) {
 		ConfidentialAction: mock,
 		lggr:               logger.Sugared(logger.Test(t)),
 		settings: jsonGetter(t, `{
+			"global": {"PerWorkflow": {"ConfidentialWorkflows": {"IncludeExecutionLimits": "true"}}},
 			"owner": {"1234567890abcdef1234567890abcdef12345678": {"PerWorkflow": {"HTTPAction": {"CallLimit": "20"}}}}
 		}`),
 	}
 	metadata := testMetadata()
-	_, capErr := action.Execute(context.Background(), metadata, &confworkflowtypes.ConfidentialWorkflowRequest{Execution: testExecution()})
+	input := testExecution()
+	input.Limits = &confworkflowtypes.ExecutionLimits{HttpAction: &confworkflowtypes.HTTPActionLimits{CallLimit: proto.Uint32(99)}}
+	_, capErr := action.Execute(context.Background(), metadata, &confworkflowtypes.ConfidentialWorkflowRequest{Execution: input})
 	require.Nil(t, capErr)
 	require.NotNil(t, mock.executed)
 	limits := mock.executed.Execution.GetLimits()

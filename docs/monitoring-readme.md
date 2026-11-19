@@ -181,10 +181,12 @@ snapshot of the default-off `enforceCRELimits` setting and signed-limit presence
 GET `/settings` on each host's loopback config port provides non-secret readback
 for idle enclaves. Neither signal attests to the operator-controlled policy.
 
-The capability always signs resolved limits from a ready settings source. Before
-the first env/JD source is loaded, it returns a system `Unavailable` error without
-dispatching to the enclave. Monitor node-side failures and settings subscription
-or update errors too; these failures cannot emit enclave execution metrics.
+`PerWorkflow.ConfidentialWorkflows.IncludeExecutionLimits` is a separate
+default-off DON inclusion gate. Off omits limits and preserves legacy request
+bytes; on signs scoped limits. Gate and limits use one captured settings source.
+An unloaded source or invalid gate returns system `Unavailable` before dispatch;
+a loaded source with no scoped opt-in is off. Monitor node-side failures and
+settings subscription/update errors; they cannot emit enclave execution metrics.
 
 Alert on `workflow_guest_execution{outcome="workflow_error"}` ratios above the
 per-org baseline (PRIV-758), alongside HTTP `cre_limit_exceeded` and
@@ -197,7 +199,10 @@ alone to justify enabling enforcement.
 
 Emergency rollback changes only enclave enforcement, not signed limits. Keep
 watching new executions, readback on every serving host, capacity and quorum
-failures. Later scoped-limit updates change request hashes while they propagate.
+failures. Changing DON inclusion in either direction changes request hashes:
+pause admission, drain active executions including retries, update and verify
+settings/readiness across all signers, then resume. Later scoped-limit updates
+also require coordinated propagation. Enclave-only rollback needs no hash change.
 
 ---
 
