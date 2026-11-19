@@ -118,9 +118,12 @@ func TestExecute_CompilationQueueRetainsAdmissionUntilFailure(t *testing.T) {
 		})
 	}
 	require.Eventually(t, func() bool { return len(a.limiter.slots) == 2 }, 5*time.Second, time.Millisecond)
-	_, rejected := a.Execute([32]byte{3}, types.AppIDConfidentialWorkflows, nil, nil, emitter.NewNoOpEmitter())
+	rejectionMetrics := &recordingEmitter{}
+	_, rejected := a.Execute([32]byte{3}, types.AppIDConfidentialWorkflows, nil, nil, rejectionMetrics)
 	require.NotNil(t, rejected)
 	require.Equal(t, http.StatusTooManyRequests, rejected.Code)
+	require.Equal(t, 1, rejectionMetrics.countOf("execution_rejected_at_capacity"))
+	require.Equal(t, int(budget.MaxConcurrentExecutions), rejectionMetrics.lastDetails("execution_rejected_at_capacity")["max_concurrent"])
 	select {
 	case result := <-results:
 		t.Fatalf("execution bypassed occupied compilation queue: %+v", result)
