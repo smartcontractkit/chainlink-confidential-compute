@@ -32,7 +32,6 @@ func TestExecute_RequiresLoadedSettings(t *testing.T) {
 			assert.Equal(t, caperrors.OriginSystem, capErr.Origin())
 			assert.Equal(t, caperrors.Unavailable, capErr.Code())
 			assert.Contains(t, capErr.Error(), "CRE settings not loaded")
-			assert.Nil(t, input.Limits)
 			assert.Nil(t, mock.executed, "unready signers must not reach serialization/signing")
 		})
 	}

@@ -91,7 +91,6 @@ func (a *ConfidentialWorkflowAction) Execute(ctx context.Context, metadata capab
 		return nil, caperrors.NewPublicUserError(errors.New(errStr), caperrors.InvalidArgument)
 	}
 	ctx = metadata.ContextWithCRE(ctx)
-	input.Execution.Limits = nil
 	resolved, resolveErr := resolveExecutionLimits(ctx, a.settings, a.lggr)
 	if resolveErr != nil {
 		a.lggr.Errorw("Cannot execute confidential workflow", "err", resolveErr)
