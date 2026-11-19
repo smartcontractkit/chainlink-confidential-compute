@@ -54,8 +54,10 @@
   # asserts in-enclave. ConnectionTimeout keeps the echo calls on the enclave's
   # 30s default rather than the 10s default limit, so a slow echo target does not
   # fail the test.
+  # ExecutionResponseLimit also sizes the guest's capability-response buffer;
+  # the large echo must fit there as well as under the HTTP response limit.
   # Activates serialization alongside the owner override and the execution timestamp.
-  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":\"false\",\"PerWorkflow\":{\"ExecutionTimestampsEnabled\":\"true\",\"FeatureConfidentialWorkflowExecutionLimitsActivePeriod\":\"[2020-01-01 00:00:00 +0000 UTC,2100-01-01 00:00:00 +0000 UTC]\"}},\"owner\":{\"f39fd6e51aad88f6f4ce6ab8827279cfffb92266\":{\"PerWorkflow\":{\"HTTPAction\":{\"CallLimit\":\"2\",\"RequestSizeLimit\":\"200kb\",\"ResponseSizeLimit\":\"300kb\",\"ConnectionTimeout\":\"30s\"}}}}}", CL_CRE_SETTINGS_DEFAULT = "{\"RemoteExecutableWorkflowDONBindingEnabled\":\"true\",\"PerWorkflow\":{\"ConfidentialWorkflows\":{\"Enabled\":\"true\"}}}" }
+  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":\"false\",\"PerWorkflow\":{\"ExecutionTimestampsEnabled\":\"true\",\"FeatureConfidentialWorkflowExecutionLimitsActivePeriod\":\"[2020-01-01 00:00:00 +0000 UTC,2100-01-01 00:00:00 +0000 UTC]\"}},\"owner\":{\"f39fd6e51aad88f6f4ce6ab8827279cfffb92266\":{\"PerWorkflow\":{\"ExecutionResponseLimit\":\"1mb\",\"HTTPAction\":{\"CallLimit\":\"2\",\"RequestSizeLimit\":\"200kb\",\"ResponseSizeLimit\":\"300kb\",\"ConnectionTimeout\":\"30s\"}}}}}", CL_CRE_SETTINGS_DEFAULT = "{\"RemoteExecutableWorkflowDONBindingEnabled\":\"true\",\"PerWorkflow\":{\"ConfidentialWorkflows\":{\"Enabled\":\"true\"}}}" }
   supported_evm_chains = [1337, 2337]
   # evm-1337 registers the EVM read/write capability for the local chain, which the
   # engine test's confidential workflow needs to write its report on-chain. Chain

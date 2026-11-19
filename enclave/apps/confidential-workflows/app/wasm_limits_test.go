@@ -2,6 +2,9 @@ package app
 
 import (
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,6 +158,32 @@ func TestExecuteWasm_WASMLimits(t *testing.T) {
 				assert.Equal(t, enclaveResponseSizeBytes, req.MaxResponseSize)
 			}
 		})
+	}
+}
+
+func TestExecuteWasm_HTTPResponseBuffer(t *testing.T) {
+	binary := buildTestWasm(t, "http-call")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", 100_001)))
+	}))
+	t.Cleanup(server.Close)
+	payload, err := anypb.New(&basictrigger.Outputs{CoolOutput: "cool"})
+	require.NoError(t, err)
+	for _, size := range []uint64{100_000, 1_000_000} {
+		req := &sdkpb.ExecuteRequest{Config: []byte(server.URL), MaxResponseSize: size,
+			Request: &sdkpb.ExecuteRequest_Trigger{Trigger: &sdkpb.Trigger{Id: 0, Payload: payload}}}
+		ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
+		helper := &enclaveExecutionHelper{httpFetcher: permissiveFetcher(), httpLimits: newHTTPActionLimits(&confworkflowtypes.ExecutionLimits{
+			HttpAction: &confworkflowtypes.HTTPActionLimits{ResponseSizeLimitBytes: proto.Uint64(300_000)},
+		})}
+		result, err := executeWasm(ctx, logger.Test(t), &recordingEmitter{}, semaphore.NewWeighted(1), binary, req, false, helper, 0,
+			&confworkflowtypes.WASMLimits{ResponseLimitEnforced: proto.Bool(false)})
+		require.NoError(t, err)
+		if size == 100_000 {
+			require.NotEmpty(t, result.GetError(), "an HTTP override alone cannot enlarge the guest response buffer")
+		} else {
+			require.Empty(t, result.GetError(), "the execution response override must reach the guest buffer")
+		}
 	}
 }
 
