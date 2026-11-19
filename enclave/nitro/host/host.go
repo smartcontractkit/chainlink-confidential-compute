@@ -297,12 +297,12 @@ func (h *hostServer) handleUpdateConfig(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// handleInjectSettings proxies a POST /settings to the enclave over vsock.
-// It is registered ONLY on the config port (127.0.0.1:config-port, where POST
-// /config lives), never the public main port, so only a co-located settings
-// service can reach it, not arbitrary callers.
+// handleInjectSettings proxies runtime settings updates and non-secret status
+// reads to the enclave over vsock.
+// A separate config port keeps these routes on loopback. The shared-port/dev
+// configuration instead registers them on the main listener.
 func (h *hostServer) handleInjectSettings(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -312,7 +312,7 @@ func (h *hostServer) handleInjectSettings(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, vsockPrefix+types.SettingsPath, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, vsockPrefix+types.SettingsPath, bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, "failed to build request", http.StatusInternalServerError)
 		return
@@ -325,6 +325,10 @@ func (h *hostServer) handleInjectSettings(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer util.SafeClose(resp)
+	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
@@ -1014,6 +1018,7 @@ func main() {
 		configMux := http.NewServeMux()
 		configMux.HandleFunc("POST "+types.SetConfigPath, host.handleSetConfig)
 		configMux.HandleFunc("POST "+types.SettingsPath, host.handleInjectSettings)
+		configMux.HandleFunc("GET "+types.SettingsPath, host.handleInjectSettings)
 		configServer = &http.Server{
 			Addr:              fmt.Sprintf("127.0.0.1:%d", *configHttpPort),
 			Handler:           instrumentEndpointLatency(metrics, configMux),
@@ -1032,6 +1037,7 @@ func main() {
 	} else {
 		mainMux.HandleFunc("POST "+types.SetConfigPath, host.handleSetConfig)
 		mainMux.HandleFunc("POST "+types.SettingsPath, host.handleInjectSettings)
+		mainMux.HandleFunc("GET "+types.SettingsPath, host.handleInjectSettings)
 	}
 
 	mainMux.HandleFunc("PATCH "+types.SetConfigPath, host.handleUpdateConfig)

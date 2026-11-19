@@ -32,7 +32,7 @@ func (d doerFunc) Do(req *http.Request) (*http.Response, error) { return d(req) 
 
 func TestFetch_MethodNotAllowed(t *testing.T) {
 	f := NewFetcher(DefaultPolicy())
-	_, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://example.com/", Method: "TRACE"})
+	_, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://example.com/", Method: "TRACE"}, nil)
 	require.Error(t, err)
 	assert.EqualError(t, err, "method not allowed")
 }
@@ -52,7 +52,7 @@ func TestSetDefaultTimeout(t *testing.T) {
 	f := NewFetcherWithClient(policy, stub)
 
 	get := func(timeout *durationpb.Duration) {
-		_, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://example.com/", Method: "GET", Timeout: timeout})
+		_, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://example.com/", Method: "GET", Timeout: timeout}, nil)
 		require.NoError(t, err)
 	}
 
@@ -78,7 +78,7 @@ func TestDefaultPolicy_RejectsHTTPLoopback(t *testing.T) {
 	f := NewFetcher(DefaultPolicy())
 
 	// http scheme is not in the restricted client's allowlist.
-	resp, err := f.Fetch(context.Background(), &httpcap.Request{Url: "http://127.0.0.1:80/", Method: "GET"})
+	resp, err := f.Fetch(context.Background(), &httpcap.Request{Url: "http://127.0.0.1:80/", Method: "GET"}, nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, uint32(http.StatusBadRequest), resp.StatusCode)
@@ -86,7 +86,7 @@ func TestDefaultPolicy_RejectsHTTPLoopback(t *testing.T) {
 
 	// Https to a loopback literal is rejected by safeurl's baked-in privateNetworks.
 	u := &url.URL{Scheme: "https", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(443))}
-	resp, err = f.Fetch(context.Background(), &httpcap.Request{Url: u.String(), Method: "GET"})
+	resp, err = f.Fetch(context.Background(), &httpcap.Request{Url: u.String(), Method: "GET"}, nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, uint32(http.StatusBadRequest), resp.StatusCode)
@@ -99,7 +99,7 @@ func TestFetch_UpstreamRejectsTLSHandshakeReturns502(t *testing.T) {
 	addr := serveFatalTLSAlert(t)
 	f := NewFetcherWithClient(DefaultPolicy(), util.NewUnrestrictedClient())
 
-	resp, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://" + addr, Method: "GET"})
+	resp, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://" + addr, Method: "GET"}, nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, uint32(http.StatusBadGateway), resp.StatusCode)
@@ -172,7 +172,7 @@ func TestFetch_RedactsErrors(t *testing.T) {
 			resp, err := f.Fetch(context.Background(), &httpcap.Request{
 				Url: tt.url, Method: tt.method,
 				MultiHeaders: map[string]*httpcap.HeaderValues{"Authorization": {Values: []string{secret}}},
-			})
+			}, nil)
 			require.EqualError(t, err, tt.want)
 			assert.Nil(t, resp)
 			assert.NotContains(t, fmt.Sprintf("%+v", err), secret)
@@ -216,7 +216,7 @@ func TestFetch_SyntheticResponsesRemainRedacted(t *testing.T) {
 			f := NewFetcherWithClient(DefaultPolicy(), doerFunc(func(req *http.Request) (*http.Response, error) {
 				return nil, &url.Error{Op: req.Method, URL: req.URL.String(), Err: tt.err}
 			}))
-			resp, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://example.com/" + secret + "?token=" + secret, Method: "GET"})
+			resp, err := f.Fetch(context.Background(), &httpcap.Request{Url: "https://example.com/" + secret + "?token=" + secret, Method: "GET"}, nil)
 			require.NoError(t, err)
 			require.NotNil(t, resp)
 			assert.EqualValues(t, tt.status, resp.StatusCode)
@@ -247,7 +247,7 @@ func TestFetch_RealHTTPFailuresAreRedacted(t *testing.T) {
 				return dialer.DialContext(ctx, "tcp", server.Listener.Addr().String())
 			})
 			f := NewFetcherWithClient(DefaultPolicy(), client)
-			resp, err := f.Fetch(context.Background(), &httpcap.Request{Url: server.URL + "/" + secret + "?token=" + secret, Method: "GET"})
+			resp, err := f.Fetch(context.Background(), &httpcap.Request{Url: server.URL + "/" + secret + "?token=" + secret, Method: "GET"}, nil)
 			require.EqualError(t, err, want)
 			assert.Nil(t, resp)
 			if status == 200 {

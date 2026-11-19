@@ -63,6 +63,9 @@ import (
 //     falls back to types.DefaultMaxEncryptedSharesPerRelayResult; negative
 //     values are rejected.
 type WorkflowSettings struct {
+	// EnforceCRELimits applies DON-signed limits to new executions. Omission
+	// disables enforcement; the enclave never resolves CRE defaults itself.
+	EnforceCRELimits      bool     `json:"enforceCRELimits"`
 	StorageKey            string   `json:"storageKey"`
 	StorageServiceURL     string   `json:"storageServiceUrl"`
 	StorageServiceTLS     bool     `json:"storageServiceTls,omitempty"`

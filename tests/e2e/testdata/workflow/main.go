@@ -4,7 +4,10 @@
 // It exercises three capability paths from inside a confidential workflow:
 //   - GetSecret → VaultDON (remote dispatch through the relay DON)
 //   - http.SendRequest + ConsensusMedianAggregation → intercepted locally
-//     by the enclave (http-actions + consensus/Simple both handled in-process)
+//     by the enclave (http-actions + consensus/Simple both handled in-process),
+//     under the owner's CRE HTTP action override from the DON's settings: a
+//     request/response larger than the defaults passes, and a call beyond the
+//     overridden CallLimit is rejected
 //   - ReportFromDon + evm.WriteReport → routed *out* of the enclave to the DONs,
 //     which is how a TEE handler reaches consensus-bound capabilities. The report
 //     lands in a PermissionlessFeedsConsumer the test then reads back on-chain.
@@ -31,6 +34,11 @@ import (
 
 // writeGasLimit mirrors the upstream proof-of-reserve example's limit.
 const writeGasLimit = 400_000
+
+// largeBodyBytes exceeds the cresettings PerWorkflow.HTTPAction defaults
+// (RequestSizeLimit 10kb, ResponseSizeLimit 100kb) in both directions once
+// echoed back, while staying under postman-echo's request cap (110kB fails).
+const largeBodyBytes = 100_000
 
 type config struct {
 	EchoURL string `json:"echo_url"`
@@ -87,6 +95,18 @@ func handleTrigger(cfg *config, trt cre.TeeRuntime, payload *cron.Payload) (any,
 		}
 		trt.Logger().Info("engine-test-http", "status", status, "url", cfg.EchoURL)
 		result["http_status"] = status
+
+		if err := fetchLargeEcho(cfg, trt, client); err != nil {
+			trt.Logger().Error("engine-test-http-large-failed", "error", err.Error())
+			return nil, err
+		}
+		trt.Logger().Info("engine-test-http-large", "bytes", largeBodyBytes)
+
+		if err := probeCallLimit(cfg, trt, client); err != nil {
+			trt.Logger().Error("engine-test-http-call-limit-failed", "error", err.Error())
+			return nil, err
+		}
+		trt.Logger().Info("engine-test-http-call-limit")
 	}
 
 	if cfg.ConsumerAddress != "" {
@@ -121,6 +141,46 @@ func fetchEchoStatus(cfg *config, trt cre.TeeRuntime, client *http.Client) (int3
 		return 0, fmt.Errorf("echo response did not contain request body")
 	}
 	return int32(resp.StatusCode), nil
+}
+
+// fetchLargeEcho sends a request whose body, and echoed response, are larger
+// than the default CRE HTTP action size limits. It only succeeds because the
+// workflow DON sends the owner's size override (configs/workflow-don-engine.toml)
+// to the enclave; the defaults alone would reject it (INCIDENT-2784).
+func fetchLargeEcho(cfg *config, trt cre.TeeRuntime, client *http.Client) error {
+	body := strings.Repeat("x", largeBodyBytes)
+	resp, err := client.SendRequestInTee(trt, &http.Request{
+		Url:    cfg.EchoURL,
+		Method: "POST",
+		Body:   []byte(body),
+		Headers: map[string]string{
+			"Content-Type": "text/plain",
+		},
+	}).Await()
+	if err != nil {
+		return fmt.Errorf("large echo request: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("large echo returned status %d", resp.StatusCode)
+	}
+	if len(resp.Body) <= largeBodyBytes || !strings.Contains(string(resp.Body), body) {
+		return fmt.Errorf("large echo response (%d bytes) did not contain the %d-byte request body", len(resp.Body), largeBodyBytes)
+	}
+	return nil
+}
+
+// probeCallLimit makes a third http-actions call, one beyond the owner's
+// overridden CallLimit of 2. The default CallLimit of 5 would allow it, so a
+// rejection proves the enforced limit is the DON's override, not the default.
+func probeCallLimit(cfg *config, trt cre.TeeRuntime, client *http.Client) error {
+	_, err := client.SendRequestInTee(trt, &http.Request{Url: cfg.EchoURL, Method: "GET"}).Await()
+	if err == nil {
+		return fmt.Errorf("http-actions call beyond the overridden CallLimit succeeded")
+	}
+	if !strings.Contains(err.Error(), "PerWorkflow.HTTPAction.CallLimit: 2") {
+		return fmt.Errorf("unexpected error for the call beyond CallLimit: %w", err)
+	}
+	return nil
 }
 
 // writeFeedReport generates a DON-signed report over a single feed value and writes

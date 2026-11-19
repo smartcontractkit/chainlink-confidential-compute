@@ -193,7 +193,7 @@ func startNitroEnclavesForEngine(t *testing.T, logger zerolog.Logger) (
 	// keeps the test's assumptions local to the test.
 	host := enclaveHostAddr()
 	t.Setenv("ENCLAVE_SETTINGS", fmt.Sprintf(
-		`{"storageKey":%q,"storageServiceUrl":%q,"storageServiceTls":false,"gatewayUrl":%q,"gatewayRetryBackoff":"5s","gatewayRetryTimeout":"3m"}`,
+		`{"enforceCRELimits":true,"storageKey":%q,"storageServiceUrl":%q,"storageServiceTls":false,"gatewayUrl":%q,"gatewayRetryBackoff":"5s","gatewayRetryTimeout":"3m"}`,
 		engineTestStorageKeyHex, storageAddr, fmt.Sprintf("http://%s:9998,http://%s:9999", host, host)))
 	if !tests.UseFakeEnclave() {
 		// confidential-workflows EIF is larger than confidential-http (wasmtime/CGO),
@@ -386,6 +386,12 @@ func initCWEngineTestServers(configJSON string) (wasmURL string, configURL strin
 // Success signals:
 //   - "engine-test-secret" + the expected secret value in workflow-DON logs.
 //   - "engine-test-http" + status=200 in workflow-DON logs.
+//   - a 100kB POST to the echo target succeeds, despite exceeding the default
+//     CRE HTTP action request/response size limits, and a third http-actions
+//     call is rejected by the overridden CallLimit of 2. Both hold only if the
+//     owner's override in the DON's CL_CRE_SETTINGS
+//     (configs/workflow-don-engine.toml) reaches the enclave (see fetchLargeEcho
+//     and probeCallLimit in testdata/workflow).
 //   - the reported price readable via getPrice on the deployed consumer contract.
 //
 // Echo target: https://postman-echo.com/post. The EIF-baked DefaultPolicy
@@ -649,6 +655,9 @@ func testConfidentialWorkflowsEngine(t *testing.T, testLogger zerolog.Logger, bu
 	//      - workflow-DON reached the enclave successfully
 	//      - GetSecret → VaultDON remote dispatch succeeded
 	//      - http-actions was intercepted in-enclave and the HTTPS fetch succeeded
+	//      - the owner's CRE HTTP action override reached the enclave: a
+	//        request/response over the default size limits succeeded and a call
+	//        beyond the overridden CallLimit was rejected
 	//      - consensus/Simple was intercepted and returned the single observation
 	//    WASM runtime.Logger() lines do NOT surface: enclaveExecutionHelper.EmitUserLog
 	//    is a no-op stub today, with PRIV-443 tracking the wiring. So we rely on this

@@ -10,6 +10,7 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/settings"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
 
@@ -48,6 +49,9 @@ func (a *EnclaveActionInputAdapter) GetVaultDonSecrets() []*frameworktypes.Secre
 type ConfidentialWorkflowAction struct {
 	framework.ConfidentialAction[*EnclaveActionInputAdapter, *confworkflowtypes.ConfidentialWorkflowResponse]
 	lggr logger.SugaredLogger
+	// settings is the node's CRE settings, the source of the limits sent to
+	// the enclave with each execution.
+	settings settings.Getter
 }
 
 func validateExecutionIdentity(metadata capabilities.RequestMetadata, execution *confworkflowtypes.WorkflowExecution) string {
@@ -87,6 +91,12 @@ func (a *ConfidentialWorkflowAction) Execute(ctx context.Context, metadata capab
 		return nil, caperrors.NewPublicUserError(errors.New(errStr), caperrors.InvalidArgument)
 	}
 	ctx = metadata.ContextWithCRE(ctx)
+	resolved, resolveErr := resolveExecutionLimits(ctx, a.settings, a.lggr)
+	if resolveErr != nil {
+		a.lggr.Errorw("Cannot execute confidential workflow", "err", resolveErr)
+		return nil, caperrors.NewPublicSystemError(resolveErr, caperrors.Unavailable)
+	}
+	input.Execution.Limits = resolved
 	out, err := a.ConfidentialAction.Execute(ctx, metadata, &EnclaveActionInputAdapter{input})
 	if err != nil {
 		// Preserve typed errors from the underlying framework (matches confidential-http's
@@ -141,6 +151,9 @@ func (a *ConfidentialWorkflowAction) Initialise(ctx context.Context, dependencie
 }
 
 func NewService(lggr logger.Logger, limitsFactory limits.Factory) *ConfidentialWorkflowAction {
+	if limitsFactory.Settings == nil {
+		logger.Sugared(lggr).Warn("CRE settings unavailable: confidential workflow executions will fail until settings are loaded")
+	}
 	return &ConfidentialWorkflowAction{
 		ConfidentialAction: framework.NewConfidentialAction[*EnclaveActionInputAdapter](
 			lggr,
@@ -154,6 +167,7 @@ func NewService(lggr logger.Logger, limitsFactory limits.Factory) *ConfidentialW
 				return &confworkflowtypes.ConfidentialWorkflowResponse{}
 			},
 		),
-		lggr: logger.Sugared(logger.Named(lggr, ServiceName)),
+		lggr:     logger.Sugared(logger.Named(lggr, ServiceName)),
+		settings: limitsFactory.Settings,
 	}
 }

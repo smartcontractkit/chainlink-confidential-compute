@@ -53,7 +53,7 @@ func TestExecuteWasm_Hello(t *testing.T) {
 	}
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
 	metrics := &recordingEmitter{}
-	result, err := executeWasm(ctx, logger.Test(t), metrics, semaphore.NewWeighted(1), binary, execReq, false, &enclaveExecutionHelper{}, 0)
+	result, err := executeWasm(ctx, logger.Test(t), metrics, semaphore.NewWeighted(1), binary, execReq, false, &enclaveExecutionHelper{}, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
@@ -68,6 +68,54 @@ func TestExecuteWasm_Hello(t *testing.T) {
 	}
 	assert.Equal(t, true, metrics.events[1].Details["success"])
 	assert.Equal(t, true, metrics.events[2].Details["success"])
+	assert.Equal(t, "success", metrics.events[2].Details["outcome"])
+}
+
+// A workflow that returns an error still completes its run, so it reports
+// success=true but outcome=workflow_error, which is what per-org error-ratio
+// alerting keys off.
+func TestExecuteWasm_WorkflowErrorOutcome(t *testing.T) {
+	binary := buildTestWasm(t, "http-call")
+
+	payload, err := anypb.New(&basictrigger.Outputs{CoolOutput: "cool"})
+	require.NoError(t, err)
+	execReq := &sdkpb.ExecuteRequest{
+		Request: &sdkpb.ExecuteRequest_Trigger{
+			Trigger: &sdkpb.Trigger{Id: 0, Payload: payload},
+		},
+	}
+	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
+	metrics := &recordingEmitter{}
+	// No HTTP fetcher is configured, so the workflow's only HTTP call fails and
+	// the workflow returns that error.
+	result, err := executeWasm(ctx, logger.Test(t), metrics, semaphore.NewWeighted(1), binary, execReq, false, &enclaveExecutionHelper{}, 0, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, result.GetError())
+
+	require.Equal(t, 1, metrics.countOf("workflow_guest_execution"))
+	last := metrics.events[len(metrics.events)-1]
+	assert.Equal(t, true, last.Details["success"])
+	assert.Equal(t, "workflow_error", last.Details["outcome"])
+}
+
+func TestGuestOutcome(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		result *sdkpb.ExecutionResult
+		err    error
+		want   string
+	}{
+		{name: "success", result: &sdkpb.ExecutionResult{Result: &sdkpb.ExecutionResult_Value{}}, want: "success"},
+		{name: "workflow error", result: &sdkpb.ExecutionResult{Result: &sdkpb.ExecutionResult_Error{Error: "failed"}}, want: "workflow_error"},
+		{name: "empty workflow error", result: &sdkpb.ExecutionResult{Result: &sdkpb.ExecutionResult_Error{}}, want: "workflow_error"},
+		{name: "missing result", want: "error"},
+		{name: "runtime error", err: errors.New("failed"), want: "error"},
+		{name: "runtime error takes precedence", result: &sdkpb.ExecutionResult{Result: &sdkpb.ExecutionResult_Error{}}, err: errors.New("failed"), want: "error"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, guestOutcome(tt.result, tt.err))
+		})
+	}
 }
 
 // A workflow spinning in pure compute makes no host calls, so the module
@@ -98,13 +146,14 @@ func TestExecuteWasm_Timeout(t *testing.T) {
 	start := time.Now()
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
 	metrics := &recordingEmitter{}
-	result, err := executeWasm(ctx, logger.Test(t), metrics, semaphore.NewWeighted(1), binary, execReq, false, &enclaveExecutionHelper{}, time.Second)
+	result, err := executeWasm(ctx, logger.Test(t), metrics, semaphore.NewWeighted(1), binary, execReq, false, &enclaveExecutionHelper{}, time.Second, nil)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.ErrorContains(t, err, "executing wasm", "the guest must start before the deadline")
 	require.Nil(t, result)
 	assert.Less(t, time.Since(start), 30*time.Second, "the epoch deadline should interrupt the guest promptly")
 	require.Equal(t, 1, metrics.countOf("workflow_guest_execution"))
 	assert.Equal(t, false, metrics.events[len(metrics.events)-1].Details["success"])
+	assert.Equal(t, "error", metrics.events[len(metrics.events)-1].Details["outcome"])
 }
 
 type queuedExecutionHelper struct {
@@ -137,7 +186,7 @@ func TestExecuteWasm_CompilationQueue(t *testing.T) {
 	done := make(chan error, 1)
 	const budget = 30 * time.Second
 	go func() {
-		_, err := executeWasm(ctx, logger.Test(t), emitter.NewNoOpEmitter(), slot, binary, req, false, helper, budget)
+		_, err := executeWasm(ctx, logger.Test(t), emitter.NewNoOpEmitter(), slot, binary, req, false, helper, budget, nil)
 		done <- err
 	}()
 	select {
@@ -168,7 +217,7 @@ func TestExecuteWasm_CompilationQueue(t *testing.T) {
 func TestExecuteWasm_CompilationFailureReleasesQueue(t *testing.T) {
 	ctx := contexts.WithCRE(t.Context(), contexts.CRE{Org: "org", Owner: "owner", Workflow: "workflow"})
 	slot := semaphore.NewWeighted(1)
-	result, err := executeWasm(ctx, logger.Test(t), emitter.NewNoOpEmitter(), slot, []byte("invalid wasm"), nil, false, nil, 0)
+	result, err := executeWasm(ctx, logger.Test(t), emitter.NewNoOpEmitter(), slot, []byte("invalid wasm"), nil, false, nil, 0, nil)
 	require.ErrorContains(t, err, "creating wasm module")
 	require.Nil(t, result)
 	require.True(t, slot.TryAcquire(1), "failed compilation must release the slot")
@@ -194,7 +243,7 @@ func TestExecuteWasm_CompilationDeadline(t *testing.T) {
 			slot := semaphore.NewWeighted(1)
 			lggr, logs := logger.TestObserved(t, zapcore.InfoLevel)
 			metrics := &recordingEmitter{}
-			result, err := executeWasm(ctx, lggr, metrics, slot, test.binary, req, false, &enclaveExecutionHelper{}, time.Nanosecond)
+			result, err := executeWasm(ctx, lggr, metrics, slot, test.binary, req, false, &enclaveExecutionHelper{}, time.Nanosecond, nil)
 			require.ErrorIs(t, err, context.DeadlineExceeded)
 			require.ErrorContains(t, err, "creating wasm module", "expired compilation must not start the guest")
 			require.Nil(t, result)
