@@ -32,11 +32,9 @@ func creCtx(org, owner, workflow string) context.Context {
 
 func resolve(t *testing.T, g settings.Getter, ctx context.Context) *confworkflowtypes.ExecutionLimits {
 	t.Helper()
-	return resolveExecutionLimits(ctx, g, logger.Sugared(logger.Test(t)))
-}
-
-func TestResolveExecutionLimits_NilGetterSendsNothing(t *testing.T) {
-	assert.Nil(t, resolve(t, nil, creCtx("org-1", overrideOwner, "wf-1")))
+	got, err := resolveExecutionLimits(ctx, g, logger.Sugared(logger.Test(t)))
+	require.NoError(t, err)
+	return got
 }
 
 // With no overrides the CRE defaults are sent; the enclave decides how to apply
@@ -129,12 +127,10 @@ func TestExecute_SendsResolvedLimits(t *testing.T) {
 		ConfidentialAction: mock,
 		lggr:               logger.Sugared(logger.Test(t)),
 		settings: jsonGetter(t, `{
-			"global": {"PerWorkflow": {"FeatureConfidentialWorkflowExecutionLimitsActivePeriod": "`+limitsWindow+`"}},
 			"owner": {"1234567890abcdef1234567890abcdef12345678": {"PerWorkflow": {"HTTPAction": {"CallLimit": "20"}}}}
 		}`),
 	}
 	metadata := testMetadata()
-	metadata.ExecutionTimestamp = limitsTimestamp
 	_, capErr := action.Execute(context.Background(), metadata, &confworkflowtypes.ConfidentialWorkflowRequest{Execution: testExecution()})
 	require.Nil(t, capErr)
 	require.NotNil(t, mock.executed)

@@ -7,39 +7,12 @@ import (
 	"time"
 
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
-	"github.com/smartcontractkit/chainlink-common/pkg/config"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
-
-func executionLimitsActive(ctx context.Context, g settings.Getter, s settings.Setting[settings.Range[config.Timestamp]], ts time.Time, lggr logger.SugaredLogger) bool {
-	if g == nil {
-		return false
-	}
-	// Requires explicit scoped activation: an env default must not enable limits
-	// before the JD snapshot containing customer overrides arrives.
-	raw, err := g.GetScoped(ctx, s.Scope, s.Key)
-	if err != nil {
-		lggr.Warnw("Not sending CRE limits: activation setting unavailable", "key", s.Key, "err", err)
-		return false
-	}
-	if raw == "" {
-		return false
-	}
-	window, err := s.Parse(raw)
-	if err != nil {
-		lggr.Warnw("Not sending CRE limits: invalid activation setting", "key", s.Key, "err", err)
-		return false
-	}
-	if ts.IsZero() {
-		lggr.Warnw("Not sending CRE limits: execution timestamp unavailable", "key", s.Key)
-		return false
-	}
-	return window.Contains(config.Timestamp(ts.Unix()))
-}
 
 // resolveExecutionLimits reads the CRE limits for the execution's org, owner
 // and workflow (carried by ctx) from the node's settings, the source the
@@ -51,9 +24,18 @@ func executionLimitsActive(ctx context.Context, g settings.Getter, s settings.Se
 // negative value leaves that one limit unset, so a settings problem cannot turn
 // into enforcement of a default over an override (INCIDENT-2784). A value that
 // is merely absent resolves to the default, exactly as in the engine.
-func resolveExecutionLimits(ctx context.Context, g settings.Getter, lggr logger.SugaredLogger) *confworkflowtypes.ExecutionLimits {
+func resolveExecutionLimits(ctx context.Context, g settings.Getter, lggr logger.SugaredLogger) (*confworkflowtypes.ExecutionLimits, error) {
+	// LOOP seeds the Atomic with env settings before JD snapshots arrive. Capture
+	// that source once: Load misses env-only readiness, and per-field reads of the
+	// Atomic could mix snapshots during an update.
+	if atomic, ok := g.(*settings.Atomic); ok {
+		g = nil
+		if atomic != nil {
+			g = atomic.GetGetter()
+		}
+	}
 	if g == nil {
-		return nil
+		return nil, fmt.Errorf("CRE settings not loaded; refusing to sign confidential workflow limits")
 	}
 	r := limitResolver{ctx: ctx, g: g, lggr: lggr}
 	h := cresettings.Default.PerWorkflow.HTTPAction
@@ -78,7 +60,7 @@ func resolveExecutionLimits(ctx context.Context, g settings.Getter, lggr logger.
 			UserMetricLabelsPerMetric:   uint32Limit(r, &w.UserMetricLabelsPerMetric),
 			UserMetricLabelValueLength:  uint32Limit(r, &w.UserMetricLabelValueLength),
 		},
-	}
+	}, nil
 }
 
 type limitResolver struct {

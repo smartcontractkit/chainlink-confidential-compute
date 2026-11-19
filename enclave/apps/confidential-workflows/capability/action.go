@@ -11,7 +11,6 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings"
-	"github.com/smartcontractkit/chainlink-common/pkg/settings/cresettings"
 	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/core"
 
@@ -93,9 +92,12 @@ func (a *ConfidentialWorkflowAction) Execute(ctx context.Context, metadata capab
 	}
 	ctx = metadata.ContextWithCRE(ctx)
 	input.Execution.Limits = nil
-	if executionLimitsActive(ctx, a.settings, cresettings.Default.PerWorkflow.FeatureConfidentialWorkflowExecutionLimitsActivePeriod, metadata.ExecutionTimestamp, a.lggr) {
-		input.Execution.Limits = resolveExecutionLimits(ctx, a.settings, a.lggr)
+	resolved, resolveErr := resolveExecutionLimits(ctx, a.settings, a.lggr)
+	if resolveErr != nil {
+		a.lggr.Errorw("Cannot execute confidential workflow", "err", resolveErr)
+		return nil, caperrors.NewPublicSystemError(resolveErr, caperrors.Unavailable)
 	}
+	input.Execution.Limits = resolved
 	out, err := a.ConfidentialAction.Execute(ctx, metadata, &EnclaveActionInputAdapter{input})
 	if err != nil {
 		// Preserve typed errors from the underlying framework (matches confidential-http's
@@ -151,8 +153,7 @@ func (a *ConfidentialWorkflowAction) Initialise(ctx context.Context, dependencie
 
 func NewService(lggr logger.Logger, limitsFactory limits.Factory) *ConfidentialWorkflowAction {
 	if limitsFactory.Settings == nil {
-		// loopserver always supplies a getter; without one no limits can be sent.
-		logger.Sugared(lggr).Warn("CRE settings unavailable: no CRE limits will be sent to the enclave")
+		logger.Sugared(lggr).Warn("CRE settings unavailable: confidential workflow executions will fail until settings are loaded")
 	}
 	return &ConfidentialWorkflowAction{
 		ConfidentialAction: framework.NewConfidentialAction[*EnclaveActionInputAdapter](
