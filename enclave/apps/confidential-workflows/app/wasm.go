@@ -95,6 +95,7 @@ func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter,
 	result, err := mod.Execute(execCtx, execReq, helper)
 	emitter.Emit("workflow_guest_execution", map[string]any{
 		"success":          err == nil,
+		"outcome":          guestOutcome(result, err),
 		"duration_seconds": time.Since(guestStarted).Seconds(),
 	})
 	if err != nil {
@@ -102,4 +103,19 @@ func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter,
 	}
 
 	return result, nil
+}
+
+// guestOutcome separates a run whose workflow returned an error from a clean
+// one; both count as success because the runtime itself did not fail. CRE
+// limit errors and other user errors only surface as "workflow_error", so
+// per-org alerting on a jump in that ratio catches regressions that the
+// system-error metrics never see (INCIDENT-2784).
+func guestOutcome(result *sdkpb.ExecutionResult, err error) string {
+	if err != nil || result == nil {
+		return "error"
+	}
+	if _, ok := result.GetResult().(*sdkpb.ExecutionResult_Error); ok {
+		return "workflow_error"
+	}
+	return "success"
 }
