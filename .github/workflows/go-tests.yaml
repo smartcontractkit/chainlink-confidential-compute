@@ -22,7 +22,7 @@ on:
     # Nightly real-enclave run at 07:00 UTC.
     - cron: '0 7 * * *'
 env:
-  CHAINLINK_COMMIT_SHA: 196850e2cae6dd650f8ba52efbd7ea9cb0793cb6
+  CHAINLINK_COMMIT_SHA: 3deeb0e9daa7977efc7194a0a5afd3e047d9bb61
   LEGACY_COMMIT_SHA: c81a7a6bd15999eb3136e7526e8d833d3760755e # release/1.4.8 pin commit; the commit pointing to whatever capability gitref is deployed in Chainlink's plugins.public.yaml: https://github.com/smartcontractkit/chainlink/blob/develop/plugins/plugins.public.yaml.
   LEGACY_ENCLAVE_RELEASE: v1.4.3 # The release tag whose enclave app the legacy-enclaves leg checks out and runs locally as a fake enclave: the release of the confidential-http enclave image in confidential-compute-infra deploy/config/enclave/prod.yaml. The nightly legacy-enclave-drift job flags when it changes.
   # Pinned refs for the supporting CRE Docker images, used as GHCR cache keys.
@@ -674,15 +674,19 @@ jobs:
       - name: Setup Postgres
         uses: ./confidential-compute/.github/actions/setup-postgres
 
-      - name: Install PostgreSQL client
+      - name: Install pg_dump shim
+        # chainlink's `make testdb` (preparetest) shells out to pg_dump on PATH.
+        # The shim forwards it to the postgres container started by setup-postgres,
+        # so the client version always matches the server image exactly instead of
+        # depending on the runner's apt/dnf client (which can be older than the
+        # server tag and refuse to dump it).
         run: |
-          if command -v dnf &> /dev/null; then
-            sudo dnf update -y
-            sudo dnf install -y postgresql15
-          else
-            sudo apt-get update
-            sudo apt-get install -y postgresql-client
-          fi
+          sudo tee /usr/local/bin/pg_dump > /dev/null <<'EOF'
+          #!/bin/bash
+          exec docker exec -i cl_pg pg_dump "$@"
+          EOF
+          sudo chmod +x /usr/local/bin/pg_dump
+          pg_dump --version
       - name: Set Database URL
         run: |
           echo "CL_DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@localhost:5432/chainlink_test?sslmode=disable" >> $GITHUB_ENV

@@ -210,8 +210,13 @@ func validateTLSHandshakeFailureResponse(logger zerolog.Logger, bodies [][]byte)
 		if output.StatusCode != 502 {
 			return fmt.Errorf("response %d: expected statusCode 502, got %d (body: %s)", i, output.StatusCode, output.Body)
 		}
-		if !strings.Contains(output.Body, "upstream rejected the TLS handshake") {
-			return fmt.Errorf("response %d: expected body to contain 'upstream rejected the TLS handshake', got: %s", i, output.Body)
+		// rc4.badssl.com fails the handshake nondeterministically: sometimes a
+		// handshake_failure alert, sometimes a TCP reset. The enclave maps both
+		// upstream faults to 502, so accept either body.
+		handshakeRejected := strings.Contains(output.Body, "upstream rejected the TLS handshake")
+		connectionClosed := strings.Contains(output.Body, "upstream closed the connection before responding")
+		if !handshakeRejected && !connectionClosed {
+			return fmt.Errorf("response %d: expected body to contain 'upstream rejected the TLS handshake' or 'upstream closed the connection before responding', got: %s", i, output.Body)
 		}
 		logger.Info().Msgf("TLS handshake failure response %d: statusCode=%d, body=%s", i, output.StatusCode, output.Body)
 	}

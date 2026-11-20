@@ -50,12 +50,11 @@
   http_port_range_start = 10100
   p2p_port_range_start = 10110
 
-  # VaultGetSecretsIncludePublicKeyEnabled: Vault GetSecrets responses carry the
-  # DKG RawVaultPublicKey so confidential-http decrypt-side clients use the live
-  # key from the response. Exercises the response-key path end-to-end.
-  env_vars = { CL_EVM_CMD = "", OTEL_SERVICE_NAME = "chainlink-node", OTEL_TRACES_EXPORTER = "none", OTEL_LOGS_EXPORTER = "none", OTEL_METRICS_EXPORTER = "none", CL_CRE_SETTINGS = "{\"global\":{\"VaultGetSecretsIncludePublicKeyEnabled\":true}}" }
+  # RemoteExecutableWorkflowDONBindingEnabled: the executor sets WorkflowDonID
+  # on Vault GetSecrets requests so the vault DON's remote executable accepts them.
+  env_vars = { CL_EVM_CMD = "", OTEL_SERVICE_NAME = "chainlink-node", OTEL_TRACES_EXPORTER = "none", OTEL_LOGS_EXPORTER = "none", OTEL_METRICS_EXPORTER = "none", CL_CRE_SETTINGS_DEFAULT = "{\"RemoteExecutableWorkflowDONBindingEnabled\":\"true\"}" }
   supported_evm_chains = [1337, 2337]
-  capabilities = ["vault", "confidential-http", "cron", "http-action", "http-trigger", "consensus", "don-time"]
+  capabilities = ["confidential-http", "cron", "http-action", "http-trigger", "consensus", "don-time"]
   registry_based_launch_allowlist = ["cron-trigger@1.0.0", "dontime@1.0.0"]
 
   [nodesets.db]
@@ -71,7 +70,7 @@
       capabilities = ["./binaries/confidential-http"]
       user_config_overrides = """
       [Log]
-      Level = 'warn'
+      Level = 'debug'
       JSONConsole = true
 
       [Tracing]
@@ -86,6 +85,106 @@
       # Remove this bit to allow downloading workflows from remote sources
       [CRE.WorkflowFetcher]
       URL = "file:///home/chainlink/workflows"
+      """
+
+
+[[nodesets]]
+  nodes = 4
+  name = "vault"
+  don_families = ["test-don-family"]
+  don_types = ["capabilities"]
+  override_mode = "each"
+  http_port_range_start = 10400
+  p2p_port_range_start = 10410
+
+  # VaultGetSecretsIncludePublicKeyEnabled: responses carry the DKG
+  # RawVaultPublicKey so decrypt-side clients use the live key from the response.
+  # RemoteExecutableWorkflowDONBindingEnabled: the vault's remote executable
+  # validates the calling DON on cross-DON GetSecrets requests.
+  env_vars = { CL_EVM_CMD = "", CL_CRE_SETTINGS = "{\"global\":{\"VaultOrgIdAsSecretOwnerEnabled\":\"false\",\"VaultGetSecretsIncludePublicKeyEnabled\":\"true\"}}", CL_CRE_SETTINGS_DEFAULT = "{\"RemoteExecutableWorkflowDONBindingEnabled\":\"true\"}" }
+  supported_evm_chains = [1337, 2337]
+  capabilities = ["vault"]
+  exposes_remote_capabilities = true
+  # Vault nodes log at debug: the test asserts on their debug-level GetSecrets logs.
+
+  [nodesets.db]
+    image = "postgres:16"
+    port = 13300
+
+  [[nodesets.node_specs]]
+    roles = ["plugin"]
+    [nodesets.node_specs.node]
+      custom_ports = ["17770:7777"]
+      user_config_overrides = """
+      [Log]
+      Level = 'debug'
+      JSONConsole = true
+
+      [Tracing]
+      Enabled = false
+
+      [P2P]
+      EnableExperimentalRageP2P = true
+
+      [CRE]
+      EnableDKGRecipient = true
+      """
+
+  [[nodesets.node_specs]]
+    roles = ["plugin"]
+    [nodesets.node_specs.node]
+      custom_ports = ["17771:7777"]
+      user_config_overrides = """
+      [Log]
+      Level = 'debug'
+      JSONConsole = true
+
+      [Tracing]
+      Enabled = false
+
+      [P2P]
+      EnableExperimentalRageP2P = true
+
+      [CRE]
+      EnableDKGRecipient = true
+      """
+
+  [[nodesets.node_specs]]
+    roles = ["plugin"]
+    [nodesets.node_specs.node]
+      custom_ports = ["17772:7777"]
+      user_config_overrides = """
+      [Log]
+      Level = 'debug'
+      JSONConsole = true
+
+      [Tracing]
+      Enabled = false
+
+      [P2P]
+      EnableExperimentalRageP2P = true
+
+      [CRE]
+      EnableDKGRecipient = true
+      """
+
+  [[nodesets.node_specs]]
+    roles = ["plugin"]
+    [nodesets.node_specs.node]
+      custom_ports = ["17773:7777"]
+      user_config_overrides = """
+      [Log]
+      Level = 'debug'
+      JSONConsole = true
+
+      [Tracing]
+      Enabled = false
+
+      [P2P]
+      EnableExperimentalRageP2P = true
+
+      [CRE]
+      EnableDKGRecipient = true
       """
 
 

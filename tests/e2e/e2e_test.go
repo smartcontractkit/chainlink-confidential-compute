@@ -246,7 +246,74 @@ func isTelemetryNoise(lowerLine string) bool {
 const (
 	httpDONConfigFile   = "/configs/workflow-don.toml"
 	engineDONConfigFile = "/configs/workflow-don-engine.toml"
+
+	confidentialHTTPDirectReadGlobalTOML = `[ConfidentialCompute]
+ConfidentialHTTPVaultGetSecretsDirectlyActivePeriod = '[2000-01-01 00:00:00 +0000 UTC,2100-01-01 00:00:00 +0000 UTC]'`
+
+	confidentialHTTPDirectReadWorkflowTOML = `[PerWorkflow]
+FeatureVaultGetSecretsDirectlyActivePeriod = '[2000-01-01 00:00:00 +0000 UTC,2100-01-01 00:00:00 +0000 UTC]'
+ExecutionTimestampsEnabled = 'true'`
 )
+
+// requireConfidentialHTTPVaultDirectRead waits until a vault node logs that it
+// served a direct GetSecrets request.
+func requireConfidentialHTTPVaultDirectRead(t *testing.T, testEnv *ttypes.TestEnvironment) {
+	t.Helper()
+
+	containers := vaultDONContainerNames(testEnv)
+	require.NotEmpty(t, containers, "no vault DON containers found to scrape")
+
+	require.Eventually(t, func() bool {
+		for _, name := range containers {
+			out, err := exec.Command("docker", "logs", name).CombinedOutput()
+			if err != nil {
+				continue
+			}
+			if bytes.Contains(out, []byte("served direct get secrets request")) {
+				return true
+			}
+		}
+		return false
+	}, time.Minute, 2*time.Second, "vault never served a direct get secrets request")
+}
+
+// requireVaultOCRSecretsPath asserts a vault node logged a GetSecrets request
+// for secretID without the direct flag, and that no direct request has been
+// served yet. Run it before enabling the capability-side gate.
+func requireVaultOCRSecretsPath(t *testing.T, testEnv *ttypes.TestEnvironment, secretID string) {
+	t.Helper()
+
+	containers := vaultDONContainerNames(testEnv)
+	require.NotEmpty(t, containers, "no vault DON containers found to scrape")
+
+	// The direct flag may render as ": false" or be omitted by proto text
+	// marshaling; both mean the OCR path.
+	sawOCRRequest := false
+	servedDirect := false
+	for _, name := range containers {
+		out, err := exec.Command("docker", "logs", name).CombinedOutput()
+		if err != nil {
+			continue
+		}
+		if bytes.Contains(out, []byte("served direct get secrets request")) {
+			servedDirect = true
+		}
+		for _, line := range bytes.Split(out, []byte{'\n'}) {
+			if !bytes.Contains(line, []byte("received workflow get secrets request")) ||
+				!bytes.Contains(line, []byte(secretID)) {
+				continue
+			}
+			if !bytes.Contains(line, []byte("get_secrets_directly: true")) &&
+				!bytes.Contains(line, []byte("get_secrets_directly:true")) {
+				sawOCRRequest = true
+			}
+		}
+	}
+	require.True(t, sawOCRRequest,
+		"no vault node logged an OCR-path GetSecrets request (direct flag unset) for %s", secretID)
+	require.False(t, servedDirect,
+		"a vault node already served a direct get secrets request before the capability gate was enabled")
+}
 
 func getTestConfig(t *testing.T, configPath string) *ttypes.TestConfig {
 	t.Helper()
@@ -500,6 +567,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 
 	for _, app := range apps {
 		t.Run(fmt.Sprintf("Testing %s", app.Name), func(t *testing.T) {
+			_, usingPriorBinary := priorVersionPaths[app.Name]
 			testLogger.Info().Msgf("Provisioning enclave for app: %s", app.Name)
 			enclaveType := types.EnclaveTypeNitro
 			if tests.UseFakeEnclave() {
@@ -628,6 +696,7 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				}
 			}
 			require.NotZero(t, numNodes, "workflow nodeset not found in config")
+
 			totalExpected := totalTriggers * numNodes
 			testLogger.Info().Msgf("Sending %d total triggers (%d rounds x %d inputs, expecting %d results with %d nodes, interRequestDelay=%s)...", totalTriggers, requestCount, len(triggerInputs), totalExpected, numNodes, interRequestDelay)
 			triggersSent := 0
@@ -1013,6 +1082,54 @@ func TestConfidentialHTTPE2E(t *testing.T) {
 				require.NoError(t, err, "recipient validation failed after failover")
 				testLogger.Info().Msgf("Enclave failover test passed successfully")
 			}
+
+			// Vault direct-read gate: with the per-workflow flag on but the
+			// capability gate off, the pre-fetch must stay on the OCR path; with
+			// both on, the vault must serve direct reads.
+			t.Run("vault direct-read gate switches paths", func(t *testing.T) {
+				if usingPriorBinary {
+					t.Skip("prior binary predates the capability-side direct-read gate")
+				}
+
+				workflowIDForSettings := strings.TrimPrefix(workflowID, "0x")
+
+				resetRecipient := func() {
+					recipient.mu.Lock()
+					recipient.requests = nil
+					recipient.mu.Unlock()
+				}
+				triggerRoundAndAwait := func(expected int, msg string) {
+					t.Helper()
+					for _, input := range triggerInputs {
+						sendHTTPTrigger(t, testLogger, gatewayURL, uniqueWorkflowName, workflowID, workflowOwnerAddr, signingKey, input)
+					}
+					require.Eventually(t, func() bool {
+						return recipient.requestCount() >= expected
+					}, 5*time.Minute, 5*time.Second, msg)
+				}
+
+				// Phase 1: flag on, gate off — the gate must win; the pre-fetch stays on the OCR path.
+				testLogger.Info().Msg("Direct-read sub-test: OCR path with the capability gate off...")
+				ocrSettings := systemtests.ApplyCRESettings(t, testEnv,
+					systemtests.Workflow(workflowIDForSettings, confidentialHTTPDirectReadWorkflowTOML),
+				)
+				resetRecipient()
+				triggerRoundAndAwait(numNodes*len(triggerInputs), "recipient should receive the OCR-path workflow results")
+				requireVaultOCRSecretsPath(t, testEnv, names[0])
+				// Release the override before phase 2's apply: only one active override is allowed per test.
+				ocrSettings.Reset(t)
+
+				// Phase 2: both on — the vault must serve direct reads.
+				testLogger.Info().Msg("Direct-read sub-test: enabling Vault direct reads for confidential-http...")
+				directSettings := systemtests.ApplyCRESettings(t, testEnv,
+					systemtests.Global(confidentialHTTPDirectReadGlobalTOML),
+					systemtests.Workflow(workflowIDForSettings, confidentialHTTPDirectReadWorkflowTOML),
+				)
+				resetRecipient()
+				triggerRoundAndAwait(numNodes*len(triggerInputs), "recipient should receive the direct-read workflow results")
+				requireConfidentialHTTPVaultDirectRead(t, testEnv)
+				directSettings.Reset(t)
+			})
 		})
 	}
 

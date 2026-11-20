@@ -55,6 +55,7 @@ var (
 func recordFakeValidation(lggr types.Logger) {
 	fakeValidationCounterOnce.Do(func() {
 		var err error
+		//nolint:staticcheck // SA1019: DX-5066 — LOOP plugins read the process-global client until the loop protocol passes it in.
 		fakeValidationCounter, err = beholder.GetMeter().Int64Counter("teeattestation_passthrough_validation_count")
 		if err != nil && lggr != nil {
 			lggr.Warnw("failed to register fake attestation validation metric; insecure path will be unobservable", "error", err)
