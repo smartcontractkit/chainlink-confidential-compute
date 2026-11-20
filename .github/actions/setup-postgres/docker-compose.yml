@@ -3,7 +3,8 @@ services:
     ports:
       - "5432:5432"
     container_name: cl_pg
-    image: postgres:15-alpine
+    # 15.20 adds pg_attver, which breaks preparetest's schema comparison.
+    image: postgres:15.19-alpine
     command: postgres ${POSTGRES_OPTIONS}
     env_file:
       - .env
