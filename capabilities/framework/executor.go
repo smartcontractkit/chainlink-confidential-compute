@@ -1288,6 +1288,9 @@ func (e *RealExecutor) retryWithBackoff(ctx context.Context, fn func() error) er
 	var errs error
 	backoff := time.Duration(cfg.RetryBackoffSeconds) * time.Second
 	for i := 0; i < cfg.MaxRetries; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		err := fn()
 		if err == nil {
 			if i > 0 {
@@ -1312,6 +1315,12 @@ func (e *RealExecutor) retryWithBackoff(ctx context.Context, fn func() error) er
 		}
 
 		errs = errors.Join(errs, err)
+		if i+1 == cfg.MaxRetries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			break
+		}
 		e.lggr.Warnw("attempt failed",
 			"attempt", i+1,
 			"maxRetries", cfg.MaxRetries,
