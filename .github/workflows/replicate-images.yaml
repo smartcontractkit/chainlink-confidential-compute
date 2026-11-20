@@ -35,12 +35,13 @@ on:
 # A pull_request run has no inputs, so it falls back to these. Edit the
 # fallbacks on the branch to choose what a PR run copies.
 #
-# Current set: the stage images for release 1.4.11 (sha-58113cc), which the
-# us-east-2 stage account needs for the PRIV-706 replicas.
+# Current set: the stage images for the 1.4.11 wasmtime-go v47 patch
+# (sha-af44c39), which the us-east-2 stage account needs for the PRIV-706
+# replicas.
 env:
   TAGS: >-
-    ${{ inputs.tags || 'enclave-sha-58113cc enclave-workflows-sha-58113cc
-    host-sha-58113cc on-chain-config-tracker-sha-58113cc' }}
+    ${{ inputs.tags || 'enclave-sha-af44c39 enclave-workflows-sha-af44c39
+    host-sha-af44c39 on-chain-config-tracker-sha-af44c39' }}
   SOURCE_ACCOUNT: ${{ inputs.source_account || '816722353863' }}
   SOURCE_REGION: ${{ inputs.source_region || 'us-west-2' }}
   ECR_REPOSITORY: ${{ inputs.repository || 'containers/enclave' }}
