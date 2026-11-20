@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/smartcontractkit/capabilities/libs v0.0.0-20260928161313-2aaae97ddf69
-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20261105180829-079dfdd5c1f3
+	github.com/smartcontractkit/chainlink-common v0.11.2-0.20261120122459-2d67301a96ea
 	github.com/smartcontractkit/chainlink-confidential-compute v1.4.12-0.20261112140630-1e6946c8a03e
 	github.com/smartcontractkit/chainlink-confidential-compute/capabilities/framework v0.0.0-20261112140630-1e6946c8a03e
 	github.com/stretchr/testify v1.12.1
