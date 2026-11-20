@@ -197,7 +197,11 @@ func TestInspectPublicDataConfidentialHTTP(t *testing.T) {
 	publicData, err := proto.Marshal(req)
 	require.NoError(t, err)
 
-	metadata := inspectPublicData(lggr, types.AppIDConfidentialHTTP, publicData)
+	host := NewHostServer(t.Context(), &http.Client{})
+	t.Cleanup(host.cancel)
+	metadata, binary, err := host.publicDataPrehook(lggr, types.AppIDConfidentialHTTP, publicData)
+	require.NoError(t, err)
+	assert.Nil(t, binary)
 
 	assert.Equal(t, executionMetadata{appID: types.AppIDConfidentialHTTP, requestKind: "action"}, metadata)
 	fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA")
@@ -236,7 +240,11 @@ func TestInspectPublicDataConfidentialWorkflows(t *testing.T) {
 	publicData, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
-	metadata := inspectPublicData(lggr, types.AppIDConfidentialWorkflows, publicData)
+	host := NewHostServer(t.Context(), &http.Client{})
+	t.Cleanup(host.cancel)
+	metadata, binary, err := host.publicDataPrehook(lggr, types.AppIDConfidentialWorkflows, publicData)
+	require.ErrorContains(t, err, "not configured")
+	assert.Nil(t, binary, "no binary without a provider")
 
 	assert.Equal(t, executionMetadata{
 		appID:       types.AppIDConfidentialWorkflows,
@@ -265,7 +273,11 @@ func TestInspectPublicDataInvalidProto(t *testing.T) {
 		t.Run(appID, func(t *testing.T) {
 			lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 
-			metadata := inspectPublicData(lggr, appID, []byte{0xff})
+			host := NewHostServer(t.Context(), &http.Client{})
+			t.Cleanup(host.cancel)
+			metadata, binary, err := host.publicDataPrehook(lggr, appID, []byte{0xff})
+			require.NoError(t, err)
+			assert.Nil(t, binary)
 
 			assert.Equal(t, executionMetadata{appID: appID}, metadata)
 			fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA_DECODE_ERR")
@@ -348,7 +360,11 @@ func TestInspectResponseOutputUnknownApp(t *testing.T) {
 func TestInspectPublicDataUnknownApp(t *testing.T) {
 	lggr, logs := cllogger.TestObservedSugared(t, zapcore.DebugLevel)
 
-	metadata := inspectPublicData(lggr, "unknown-app", []byte("opaque"))
+	host := NewHostServer(t.Context(), &http.Client{})
+	t.Cleanup(host.cancel)
+	metadata, binary, err := host.publicDataPrehook(lggr, "unknown-app", []byte("opaque"))
+	require.NoError(t, err)
+	assert.Nil(t, binary)
 
 	assert.Equal(t, executionMetadata{appID: "unknown-app"}, metadata)
 	fields := observedFieldsByEvent(t, logs, "PUBLIC_DATA_UNSUPPORTED")
@@ -367,26 +383,15 @@ func TestHandleExecuteRecordsOneExecutionAfterQuorum(t *testing.T) {
 		signers[i] = publicKey
 	}
 
-	execution := &confworkflowtypes.WorkflowExecution{
-		WorkflowId: "workflow-id",
-		SdkExecuteRequest: &sdkpb.ExecuteRequest{
-			Request: &sdkpb.ExecuteRequest_Trigger{Trigger: &sdkpb.Trigger{Id: 7}},
-		},
-	}
-	publicData, err := proto.Marshal(execution)
-	require.NoError(t, err)
-	requestID := sha256.Sum256([]byte("execution-metrics-success"))
-	request := types.ComputeRequest{
-		RequestID:  requestID,
-		PublicData: publicData,
-		AppID:      types.AppIDConfidentialWorkflows,
-	}
-	responseBody := util.MustMarshal(t, types.ExecuteResponse{RequestID: requestID})
+	request := workflowExecuteRequest(t, "execution-metrics-success")
+	responseBody := util.MustMarshal(t, types.ExecuteResponse{RequestID: request.RequestID})
 	transport := newControlledRoundTripper(responseBody, nil)
 	recordedMetrics := newRecordingExecutionMetrics()
 	host := NewHostServer(context.Background(), &http.Client{Transport: transport})
 	host.config = types.EnclaveConfig{Signers: signers, T: 1, F: 1}
 	host.metrics = recordedMetrics
+	raw := &countingRawFetcher{binary: []byte("binary")}
+	host.binaries = testBinaryProvider(t, raw)
 
 	recorders := make([]*httptest.ResponseRecorder, 2)
 	done := make([]chan struct{}, 2)
@@ -431,6 +436,7 @@ func TestHandleExecuteRecordsOneExecutionAfterQuorum(t *testing.T) {
 	started, completed = recordedMetrics.snapshot()
 	assert.Len(t, started, 1)
 	assert.Len(t, completed, 1)
+	assert.Equal(t, int32(1), raw.calls.Load(), "cached responses must not refetch binaries")
 }
 
 func TestHandleExecuteRecordsEnclaveError(t *testing.T) {
@@ -449,10 +455,8 @@ func TestHandleExecuteRecordsEnclaveError(t *testing.T) {
 	host := NewHostServer(context.Background(), &http.Client{Transport: transport})
 	host.config = types.EnclaveConfig{Signers: signers, T: 1, F: 1}
 	host.metrics = recordedMetrics
-	request := types.ComputeRequest{
-		RequestID: sha256.Sum256([]byte("execution-metrics-error")),
-		AppID:     types.AppIDConfidentialWorkflows,
-	}
+	host.binaries = testBinaryProvider(t, &countingRawFetcher{binary: []byte("binary")})
+	request := workflowExecuteRequest(t, "execution-metrics-error")
 
 	recorders := make([]*httptest.ResponseRecorder, numSigners)
 	done := make([]chan struct{}, numSigners)
@@ -498,10 +502,8 @@ func TestHandleExecuteRelaysEnclaveErrorResponse(t *testing.T) {
 		Body:       io.NopCloser(bytes.NewReader(enclaveBody)),
 	}}})
 	host.config = types.EnclaveConfig{Signers: [][]byte{publicKey}, T: 1, F: 0}
-	request := types.ComputeRequest{
-		RequestID: sha256.Sum256([]byte("enclave-error-response")),
-		AppID:     types.AppIDConfidentialWorkflows,
-	}
+	host.binaries = testBinaryProvider(t, &countingRawFetcher{binary: []byte("binary")})
+	request := workflowExecuteRequest(t, "enclave-error-response")
 
 	w := httptest.NewRecorder()
 	host.handleExecute(w, signedExecuteRequest(t, request, privateKey))
@@ -576,7 +578,7 @@ func TestProcessBatchRecordsSubCapabilityFailures(t *testing.T) {
 		}}})
 		host.metrics = recordedMetrics
 
-		_, failureReason, err := host.processBatch(reqs)
+		_, failureReason, err := host.processBatch(reqs, nil)
 
 		require.NoError(t, err)
 		assert.Empty(t, failureReason)
@@ -599,7 +601,7 @@ func TestProcessBatchRecordsSubCapabilityFailures(t *testing.T) {
 		}}})
 		host.metrics = recordedMetrics
 
-		resp, failureReason, err := host.processBatch(reqs)
+		resp, failureReason, err := host.processBatch(reqs, nil)
 
 		require.Error(t, err)
 		assert.Nil(t, resp)
@@ -618,7 +620,7 @@ func TestProcessBatchRecordsSubCapabilityFailures(t *testing.T) {
 		}}})
 		host.metrics = recordedMetrics
 
-		_, _, err := host.processBatch(reqs)
+		_, _, err := host.processBatch(reqs, nil)
 
 		require.EqualError(t, err, "enclave returned error: 500 Internal Server Error - "+responseBody)
 		assert.Empty(t, recordedMetrics.subCapabilityFailuresSnapshot())
@@ -1547,4 +1549,185 @@ func TestHandleQuorumTimeoutGracefulShutdown(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Request did not complete within expected time after context cancellation")
 	}
+}
+
+// workflowExecuteRequest builds a confidential-workflows ComputeRequest whose
+// PublicData names a binary, so a host with fetching enabled would reach for
+// storage if it were going to.
+func workflowExecuteRequest(t *testing.T, seed string) types.ComputeRequest {
+	t.Helper()
+	execution := &confworkflowtypes.WorkflowExecution{
+		WorkflowId: "workflow-id",
+		BinaryUrl:  "artifact-id",
+		BinaryHash: sha256Sum([]byte("binary")),
+		SdkExecuteRequest: &sdkpb.ExecuteRequest{
+			Request: &sdkpb.ExecuteRequest_Trigger{Trigger: &sdkpb.Trigger{Id: 7}},
+		},
+	}
+	publicData, err := proto.Marshal(execution)
+	require.NoError(t, err)
+	return types.ComputeRequest{
+		RequestID:  sha256.Sum256([]byte(seed)),
+		PublicData: publicData,
+		AppID:      types.AppIDConfidentialWorkflows,
+	}
+}
+
+func sha256Sum(b []byte) []byte {
+	sum := sha256.Sum256(b)
+	return sum[:]
+}
+
+// An unsigned or wrongly signed request must never reach the storage service:
+// fetching spends the host's storage credentials, so it has to sit behind
+// signature verification.
+func TestHandleExecuteInvalidSignatureNeverFetchesBinary(t *testing.T) {
+	_, signerKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	knownPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	raw := &countingRawFetcher{binary: []byte("binary")}
+	host := NewHostServer(t.Context(), &http.Client{Transport: &mockRoundTripper{}})
+	t.Cleanup(host.cancel)
+	// The signer below is not in the configured set, so verification fails.
+	host.config = types.EnclaveConfig{Signers: [][]byte{knownPublicKey}, T: 1, F: 1}
+	host.binaries = testBinaryProvider(t, raw)
+
+	recorder := httptest.NewRecorder()
+	host.handleExecute(recorder, signedExecuteRequest(t, workflowExecuteRequest(t, "invalid-sig"), signerKey))
+
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Zero(t, raw.calls.Load(), "storage must not be touched for an unverified request")
+}
+
+// A validly signed request that is alone in its batch must not fetch either:
+// until quorum is reached the batch is not authorized to run.
+func TestHandleExecuteBelowQuorumNeverFetchesBinary(t *testing.T) {
+	const numSigners = 3
+	signerKeys := make([]ed25519.PrivateKey, numSigners)
+	signers := make([][]byte, numSigners)
+	for i := range numSigners {
+		publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		signerKeys[i] = privateKey
+		signers[i] = publicKey
+	}
+
+	raw := &countingRawFetcher{binary: []byte("binary")}
+	host := NewHostServer(t.Context(), &http.Client{Transport: &mockRoundTripper{}})
+	t.Cleanup(host.cancel)
+	// F=1 means quorum is 2 identical signed requests; we send one.
+	host.config = types.EnclaveConfig{Signers: signers, T: 1, F: 1}
+	host.binaries = testBinaryProvider(t, raw)
+
+	request := workflowExecuteRequest(t, "below-quorum")
+	done := make(chan struct{})
+	go func() {
+		host.handleExecute(httptest.NewRecorder(), signedExecuteRequest(t, request, signerKeys[0]))
+		close(done)
+	}()
+
+	// The lone request parks waiting for quorum. Give the handler room to run
+	// past signature verification before asserting nothing was fetched.
+	require.Eventually(t, func() bool {
+		host.processRequestMutex.Lock()
+		defer host.processRequestMutex.Unlock()
+		return host.pendingRequestsCache.Size() == 1
+	}, 2*time.Second, 10*time.Millisecond, "request should be batched awaiting quorum")
+	assert.Zero(t, raw.calls.Load(), "storage must not be touched before quorum")
+
+	host.cancel()
+	waitForTestSignal(t, done, "host response after shutdown")
+}
+
+// Once quorum is reached the binary is fetched exactly once for the batch and
+// forwarded to the enclave as unauthenticatedData.
+func TestHandleExecuteFetchesBinaryAfterQuorum(t *testing.T) {
+	const numSigners = 3
+	signerKeys := make([]ed25519.PrivateKey, numSigners)
+	signers := make([][]byte, numSigners)
+	for i := range numSigners {
+		publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		signerKeys[i] = privateKey
+		signers[i] = publicKey
+	}
+
+	request := workflowExecuteRequest(t, "after-quorum")
+	responseBody := util.MustMarshal(t, types.ExecuteResponse{RequestID: request.RequestID})
+	transport := &mockRoundTripper{response: &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader(responseBody)),
+	}}
+	raw := &countingRawFetcher{binary: []byte("binary")}
+	host := NewHostServer(t.Context(), &http.Client{Transport: transport})
+	t.Cleanup(host.cancel)
+	host.config = types.EnclaveConfig{Signers: signers, T: 1, F: 1}
+	host.binaries = testBinaryProvider(t, raw)
+
+	done := make([]chan struct{}, 2)
+	for i := range 2 {
+		done[i] = make(chan struct{})
+		httpRequest := signedExecuteRequest(t, request, signerKeys[i])
+		go func(index int) {
+			host.handleExecute(httptest.NewRecorder(), httpRequest)
+			close(done[index])
+		}(i)
+	}
+	for i := range 2 {
+		waitForTestSignal(t, done[i], "host response")
+	}
+
+	assert.Equal(t, int32(1), raw.calls.Load(), "one fetch serves the whole batch")
+	require.Len(t, transport.requests, 1)
+	body, err := io.ReadAll(transport.requests[0].Body)
+	require.NoError(t, err)
+	batch, err := types.UnmarshalExecuteBatch(body)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("binary"), batch.UnauthenticatedData, "fetched binary rides with the batch")
+}
+
+func TestHandleExecuteBinaryFetchFailureAndRetry(t *testing.T) {
+	signers := make([][]byte, 2)
+	keys := make([]ed25519.PrivateKey, 2)
+	for i := range keys {
+		pub, key, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		signers[i], keys[i] = pub, key
+	}
+	request := workflowExecuteRequest(t, "fetch-retry")
+	transport := &mockRoundTripper{response: &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader(util.MustMarshal(t, types.ExecuteResponse{RequestID: request.RequestID}))),
+	}}
+	host := NewHostServer(t.Context(), &http.Client{Transport: transport})
+	t.Cleanup(host.cancel)
+	host.config = types.EnclaveConfig{Signers: signers, T: 1, F: 1}
+	raw := &countingRawFetcher{binary: []byte("binary"), err: errors.New("storage unavailable")}
+	host.binaries = testBinaryProvider(t, raw)
+	for _, status := range []int{http.StatusInternalServerError, http.StatusOK} {
+		var wg sync.WaitGroup
+		recorders := make([]*httptest.ResponseRecorder, len(keys))
+		for i, key := range keys {
+			recorders[i] = httptest.NewRecorder()
+			req := signedExecuteRequest(t, request, key)
+			wg.Go(func() { host.handleExecute(recorders[i], req) })
+		}
+		wg.Wait()
+		for _, rec := range recorders {
+			assert.Equal(t, status, rec.Code)
+			if status == http.StatusInternalServerError {
+				assert.Contains(t, rec.Body.String(), "storage unavailable")
+			}
+		}
+		assert.Zero(t, host.pendingRequestsCache.Size())
+		if status == http.StatusInternalServerError {
+			assert.Empty(t, transport.requests)
+			assert.Zero(t, host.responseCache.Size(), "failures must remain retryable")
+		}
+		raw.err = nil
+	}
+	assert.Equal(t, int32(2), raw.calls.Load())
+	assert.Len(t, transport.requests, 1)
 }
