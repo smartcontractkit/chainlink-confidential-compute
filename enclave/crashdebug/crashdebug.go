@@ -64,6 +64,11 @@ func Init(logf func(format string, args ...any)) {
 		logf("crashdebug: cannot map %s: %v", ringPath, err)
 		return
 	}
+	// Touch every page now. The filesystem allocates a page on first write, and
+	// a record written later must never be the write that finds none left.
+	for i := 0; i < len(buf); i += os.Getpagesize() {
+		buf[i] = 0
+	}
 	ring, err := NewRing(buf, DefaultSlotSize, DefaultSlots)
 	if err != nil {
 		logf("crashdebug: %v", err)

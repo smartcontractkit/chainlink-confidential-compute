@@ -19,6 +19,9 @@ const (
 	ticksPerThreadSample = 5   // 1s
 	ticksPerLiveSample   = 25  // 5s
 	ticksPerProcSnapshot = 150 // 30s
+	// tickOfFullSnapshot is the one routine look at the app's address space,
+	// ten seconds after it starts and before it serves anything.
+	tickOfFullSnapshot = 50
 
 	// stallAfter is the heartbeat age that counts as a stalled runtime. The app
 	// stamps every 50ms.
@@ -32,10 +35,17 @@ const (
 	clockTicksPerSecond = 100
 )
 
-// procSnapshotFiles are the per-process files kept as "last known" state,
-// since /proc/<pid> is gone by the time the app has exited. Cheapest first:
-// smaps_rollup walks every page table.
-var procSnapshotFiles = []string{"status", "stat", "statm", "maps", "limits", "sched", "io", "cmdline", "environ", "smaps_rollup"}
+// The per-process files kept as "last known" state, since /proc/<pid> is gone
+// by the time the app has exited.
+var (
+	// procCheapFiles are read every 30s. None of them takes the app's
+	// address-space lock, so reading them cannot hold up its mmap calls.
+	procCheapFiles = []string{"status", "stat", "statm", "sched", "io"}
+	// procLockingFiles lock or walk the address space. They are read once at
+	// startup, for the layout a program counter is symbolised against, and
+	// after that only when something is already wrong.
+	procLockingFiles = []string{"limits", "cmdline", "environ", "maps", "smaps_rollup"}
+)
 
 // pressureLevels are the fractions of total memory left available at which a
 // memory snapshot is taken, each once per descent.
@@ -107,6 +117,9 @@ type sampler struct {
 	lastSeq     uint64
 	crashOff    int64
 	crashSnaps  int
+	crashSeen   time.Time
+	killApp     func() error
+	killed      bool
 	stallSince  time.Time
 	stallSnaps  int
 	prevTicks   map[int]uint64
@@ -215,12 +228,23 @@ func (s *sampler) tick(tick int) {
 	// core), when the kernel also exposes each thread's user sp and ip.
 	if grew := s.forwardCrashOutput(false); (grew || s.crashSnaps > 0) && s.crashSnaps < maxCrashSnapshots {
 		if s.crashSnaps == 0 {
+			s.crashSeen = time.Now()
 			s.notes.addf("fatal runtime output detected, capturing thread and mapping state")
-			s.procSnapshot()
+			s.procSnapshot(true)
 			s.forwardTrace()
 		}
 		s.crashSnaps++
 		s.threadSnapshot(true, "crash")
+	}
+	// An app that announced its own fatal error and then fails to exit would
+	// leave the enclave wedged until the pod's liveness probe gives up on it.
+	// It is already dead in every way that matters, so finish it.
+	if !s.crashSeen.IsZero() && !s.killed && s.killApp != nil && time.Since(s.crashSeen) > s.cfg.crashExitGrace {
+		s.killed = true
+		s.notes.addf("app still present %s after it began printing a fatal error; sending SIGKILL so the enclave can restart", s.cfg.crashExitGrace)
+		if err := s.killApp(); err != nil {
+			s.notes.addf("SIGKILL failed: %v", err)
+		}
 	}
 
 	s.checkHeartbeat()
@@ -234,7 +258,10 @@ func (s *sampler) tick(tick int) {
 		s.forwardAppDumps(false)
 	}
 	if tick%ticksPerProcSnapshot == 0 {
-		s.procSnapshot()
+		s.procSnapshot(tick == 0)
+	}
+	if tick == tickOfFullSnapshot {
+		s.procSnapshot(true)
 	}
 }
 
@@ -537,7 +564,7 @@ func (s *sampler) memorySnapshot(reason string) {
 
 	s.forwardTrace()
 	s.threadSnapshot(true, "memory")
-	s.procSnapshot()
+	s.procSnapshot(true)
 	if rollup := s.procSnapshots()["smaps_rollup"]; rollup != "" {
 		rollupLines := strings.Split(strings.TrimRight(rollup, "\n"), "\n")
 		for _, line := range rollupLines {
@@ -547,10 +574,15 @@ func (s *sampler) memorySnapshot(reason string) {
 	}
 }
 
-// procSnapshot refreshes the kept copy of the per-process files.
-func (s *sampler) procSnapshot() {
+// procSnapshot refreshes the kept copy of the per-process files; with full,
+// including the ones that lock the app's address space.
+func (s *sampler) procSnapshot(full bool) {
 	stamp := "captured " + time.Now().UTC().Format(time.RFC3339Nano) + "\n"
-	for _, name := range procSnapshotFiles {
+	files := procCheapFiles
+	if full {
+		files = append(append([]string(nil), procCheapFiles...), procLockingFiles...)
+	}
+	for _, name := range files {
 		data, err := os.ReadFile(s.proc(name))
 		if err != nil {
 			continue

@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/debug"
 )
 
 func main() {
@@ -32,7 +33,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "usage: %s <enclave-app> [args...]\n", os.Args[0])
 		os.Exit(2)
 	}
-	// The supervisor shares the enclave's vCPUs with the app; keep it small.
+	// The supervisor shares the enclave's vCPUs and memory with the app; keep
+	// it small. It is exempt from the OOM killer, so it must not be the one
+	// that uses the memory up.
 	runtime.GOMAXPROCS(2)
+	debug.SetMemoryLimit(256 << 20)
 	os.Exit(supervise(os.Args[1], os.Args[2:]))
 }

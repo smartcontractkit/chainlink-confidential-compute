@@ -18,12 +18,10 @@ readonly ENCLAVE_CID=16
 # attest all-zero PCRs, and copies its console to this container's output.
 readonly ENCLAVE_DEBUG_MODE="${ENCLAVE_DEBUG_MODE:-false}"
 
-# Seconds between checks that the enclave is still running.
-if [ "$ENCLAVE_DEBUG_MODE" = "true" ]; then
-    readonly ENCLAVE_POLL_SECONDS="${ENCLAVE_POLL_SECONDS:-5}"
-else
-    readonly ENCLAVE_POLL_SECONDS="${ENCLAVE_POLL_SECONDS:-30}"
-fi
+# Seconds between checks that the enclave is still running. Unchanged from the
+# release: a single failed check restarts this container, so checking more
+# often would only add chances for a spurious restart.
+readonly ENCLAVE_POLL_SECONDS="${ENCLAVE_POLL_SECONDS:-30}"
 
 timestamp() {
     date -u +"%Y-%m-%dT%H:%M:%S.%3NZ"

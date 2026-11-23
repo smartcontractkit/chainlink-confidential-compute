@@ -82,7 +82,7 @@ func (k *kmsgReader) run() {
 
 	go func() {
 		for range time.Tick(250 * time.Millisecond) {
-			k.flush()
+			guarded(k.notes, "kernel log flush", k.flush)
 		}
 	}()
 

@@ -38,6 +38,9 @@ type config struct {
 	sampleEvery time.Duration
 	// dialTimeout bounds one connection attempt to the host.
 	dialTimeout time.Duration
+	// crashExitGrace is how long an app that has started printing a fatal
+	// error may take to exit (traceback, then core dump) before it is killed.
+	crashExitGrace time.Duration
 	// systemSetup allows machine-wide changes: sysctls, a tmpfs mount, the
 	// core limit and OOM scores. Only the enclave entrypoint turns it on, so
 	// running the supervisor anywhere else leaves the machine alone.
@@ -49,12 +52,13 @@ const EnvSystemSetup = "ENCLAVE_CRASH_SYSTEM_SETUP"
 
 func loadConfig() config {
 	return config{
-		crashDir:      envOr(crashdebug.EnvCrashDir, "/crash"),
-		reportTimeout: envDuration("ENCLAVE_CRASH_REPORT_TIMEOUT", 120*time.Second),
-		consoleDrain:  envDuration("ENCLAVE_CRASH_CONSOLE_DRAIN", 5*time.Second),
-		sampleEvery:   envDuration("ENCLAVE_CRASH_SAMPLE_INTERVAL", 200*time.Millisecond),
-		dialTimeout:   3 * time.Second,
-		systemSetup:   os.Getenv(EnvSystemSetup) == "true",
+		crashDir:       envOr(crashdebug.EnvCrashDir, "/crash"),
+		reportTimeout:  envDuration("ENCLAVE_CRASH_REPORT_TIMEOUT", 120*time.Second),
+		consoleDrain:   envDuration("ENCLAVE_CRASH_CONSOLE_DRAIN", 5*time.Second),
+		sampleEvery:    envDuration("ENCLAVE_CRASH_SAMPLE_INTERVAL", 200*time.Millisecond),
+		dialTimeout:    3 * time.Second,
+		crashExitGrace: envDuration("ENCLAVE_CRASH_EXIT_GRACE", 90*time.Second),
+		systemSetup:    os.Getenv(EnvSystemSetup) == "true",
 	}
 }
 
@@ -202,6 +206,7 @@ func supervise(app string, args []string) int {
 	startUptime := uptimeSeconds()
 
 	smp := newSampler(cfg, pid, live, n)
+	smp.killApp = cmd.Process.Kill
 	go guarded(n, "sampler", smp.run)
 
 	var terminating atomic.Bool

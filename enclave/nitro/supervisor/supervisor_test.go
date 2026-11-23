@@ -52,6 +52,11 @@ func TestMain(m *testing.M) {
 		time.Sleep(600 * time.Millisecond)
 		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 		time.Sleep(10 * time.Second)
+	case "hang-after-fatal":
+		// An app that starts printing a fatal error and then never exits.
+		childInit()
+		_ = os.WriteFile(filepath.Join(os.Getenv(crashdebug.EnvCrashDir), crashdebug.GoCrashFile), []byte("fatal error: stuck on the way out\n"), 0o600)
+		time.Sleep(time.Minute)
 	case "kill":
 		childInit()
 		crashdebug.Tracef("killing myself")
@@ -303,6 +308,33 @@ func TestSummarizeMapsListsTheLargestWritableMappings(t *testing.T) {
 	require.Contains(t, lines[len(lines)-2], "7f0100000000-7f0300000000 rw-p 8192MiB")
 	require.Contains(t, lines[len(lines)-1], "00c000000000-00c040000000 rw-p 1024MiB")
 	require.NotContains(t, text, "7ffc00000000-7ffc00021000")
+}
+
+func TestSuperviseEndsAnAppThatHangsWhileDying(t *testing.T) {
+	t.Setenv("ENCLAVE_CRASH_EXIT_GRACE", "300ms")
+	started := time.Now()
+	code, host, _ := runSupervised(t, "hang-after-fatal")
+	require.Equal(t, 128+int(syscall.SIGKILL), code)
+	require.Less(t, time.Since(started), 20*time.Second, "the hung app must not hold the enclave for its whole sleep")
+
+	got := host.onlyReport(t)
+	require.Equal(t, "killed", got.report.Signal)
+	require.Contains(t, string(got.entries[crashdebug.GoCrashFile]), "stuck on the way out")
+	require.Contains(t, strings.Join(got.report.Notes, "\n"), "sending SIGKILL so the enclave can restart")
+}
+
+func TestHealthyAppIsNeverSignalled(t *testing.T) {
+	// No fatal output means the kill path stays disarmed however long the
+	// app runs, whatever the grace period.
+	live := newLiveStream(config{}, types.CrashStreamHeader{})
+	smp := newSampler(config{crashDir: t.TempDir(), sampleEvery: time.Millisecond, crashExitGrace: time.Nanosecond}, os.Getpid(), live, &notes{})
+	killed := false
+	smp.killApp = func() error { killed = true; return nil }
+	for tick := 0; tick < 400; tick++ {
+		smp.tick(tick)
+	}
+	require.False(t, killed)
+	require.True(t, smp.crashSeen.IsZero())
 }
 
 func TestSuperviseSurvivesAnUnreachableHost(t *testing.T) {
