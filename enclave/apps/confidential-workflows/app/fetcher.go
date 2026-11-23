@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/crashdebug"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 )
 
@@ -58,8 +59,10 @@ func (f *BinaryFetcher) Fetch(ctx context.Context, locator string, binaryHash []
 
 	cacheKey := fmt.Sprintf("%x", binaryHash)
 	if cached, ok := f.cacheGet(cacheKey); ok {
+		crashdebug.Tracef("binary cache hit hash=%x bytes=%d", binaryHash, len(cached))
 		return cached, nil
 	}
+	crashdebug.Tracef("binary cache miss hash=%x locator=%s", binaryHash, locator)
 
 	binary, err := raw.FetchBinary(ctx, locator)
 	if err != nil {

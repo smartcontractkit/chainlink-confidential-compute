@@ -71,6 +71,11 @@ COPY enclave/nitro/aws-k8s-plugin/run.sh  /home
 RUN chmod +x /home/run.sh && \
     chown -R 1000:1000 /home
 
+# DEBUG BUILD ONLY: "true" makes run.sh start the enclave with --debug-mode
+# (all-zero PCRs) and stream its console. The pod can override it.
+ARG ENCLAVE_DEBUG_MODE=false
+ENV ENCLAVE_DEBUG_MODE=$ENCLAVE_DEBUG_MODE
+
 # Switch to non-root user (matches pod securityContext)
 USER 1000
 

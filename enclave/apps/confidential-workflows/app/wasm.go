@@ -8,6 +8,7 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/crashdebug"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	"golang.org/x/sync/semaphore"
@@ -45,16 +46,19 @@ func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter,
 		modCfg.Timeout = &timeout
 	}
 
+	rid := crashdebug.Tag(ctx)
 	execCtx, cancel := ctx, func() {}
 	defer func() { cancel() }() // cancel is replaced once the timeout starts
 	var mod host.ModuleV2
 	queued := time.Now()
 	err := func() error {
+		crashdebug.Tracef("wasm rid=%s compile slot wait", rid)
 		if err := compileSlot.Acquire(ctx, 1); err != nil {
 			return err
 		}
 		defer compileSlot.Release(1)
 		started := time.Now()
+		crashdebug.Tracef("wasm rid=%s compile start binaryBytes=%d compressed=%v slotWait=%s timeout=%s", rid, len(binary), isCompressed, started.Sub(queued), timeout)
 		emitter.Emit("workflow_compilation_queue_wait", map[string]any{
 			"duration_seconds": started.Sub(queued).Seconds(),
 		})
@@ -66,6 +70,7 @@ func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter,
 		// meanwhile. Expiry decides the result; the log keeps any compile error.
 		ctxErr := execCtx.Err()
 		duration := time.Since(started)
+		crashdebug.Tracef("wasm rid=%s compile done dur=%s err=%v ctxErr=%v", rid, duration, compileErr, ctxErr)
 		emitter.Emit("workflow_compilation", map[string]any{
 			"success":          compileErr == nil && ctxErr == nil,
 			"duration_seconds": duration.Seconds(),
@@ -88,11 +93,18 @@ func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter,
 	if err != nil {
 		return nil, fmt.Errorf("creating wasm module: %w", err)
 	}
+	crashdebug.Tracef("wasm rid=%s module start", rid)
 	mod.Start()
-	defer mod.Close()
+	defer func() {
+		crashdebug.Tracef("wasm rid=%s module close start", rid)
+		mod.Close()
+		crashdebug.Tracef("wasm rid=%s module close done", rid)
+	}()
 
 	guestStarted := time.Now()
+	crashdebug.Tracef("wasm rid=%s guest execute start", rid)
 	result, err := mod.Execute(execCtx, execReq, helper)
+	crashdebug.Tracef("wasm rid=%s guest execute done dur=%s err=%v", rid, time.Since(guestStarted), err)
 	emitter.Emit("workflow_guest_execution", map[string]any{
 		"success":          err == nil,
 		"duration_seconds": time.Since(guestStarted).Seconds(),

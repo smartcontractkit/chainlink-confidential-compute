@@ -14,6 +14,7 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/crashdebug"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
 	valuespb "github.com/smartcontractkit/chainlink-protos/cre/go/values/pb"
@@ -82,8 +83,10 @@ func (h *enclaveExecutionHelper) CallCapability(ctx context.Context, req *sdkpb.
 	})
 
 	start := time.Now()
+	crashdebug.Tracef("cap rid=%x call id=%s method=%s cb=%d payloadBytes=%d", h.requestID[:8], req.GetId(), req.GetMethod(), req.GetCallbackId(), len(req.GetPayload().GetValue()))
 	resp, err := h.callCapability(ctx, req)
 	success := err == nil && resp.GetError() == ""
+	crashdebug.Tracef("cap rid=%x done id=%s method=%s cb=%d dur=%s respBytes=%d respErr=%q err=%v", h.requestID[:8], req.GetId(), req.GetMethod(), req.GetCallbackId(), time.Since(start), len(resp.GetPayload().GetValue()), resp.GetError(), err)
 
 	var errType, errMsg string
 	switch {
@@ -149,7 +152,9 @@ func (h *enclaveExecutionHelper) handleHTTPAction(ctx context.Context, req *sdkp
 	if err := req.GetPayload().UnmarshalTo(input); err != nil {
 		return errResponse(fmt.Sprintf("http-actions: unmarshalling request: %v", err)), nil
 	}
+	crashdebug.Tracef("http rid=%x %s %s bodyBytes=%d", h.requestID[:8], input.GetMethod(), input.GetUrl(), len(input.GetBody()))
 	resp, err := h.httpFetcher.Fetch(ctx, input)
+	crashdebug.Tracef("http rid=%x done status=%d bodyBytes=%d err=%v", h.requestID[:8], resp.GetStatusCode(), len(resp.GetBody()), err)
 	if err != nil {
 		return errResponse(fmt.Sprintf("http-actions: %v", err)), nil
 	}
@@ -202,6 +207,10 @@ func errResponse(msg string) *sdkpb.CapabilityResponse {
 func (h *enclaveExecutionHelper) GetSecrets(ctx context.Context, req *sdkpb.GetSecretsRequest) (resp []*sdkpb.SecretResponse, err error) {
 	h.logger.Infof("[ExecutionHelper.GetSecrets] called, remoteDispatcher=%v, numRequests=%d", h.remoteDispatcher != nil, len(req.GetRequests()))
 	start := time.Now()
+	crashdebug.Tracef("secrets rid=%x fetch start cb=%d requests=%v", h.requestID[:8], req.GetCallbackId(), req.GetRequests())
+	defer func() {
+		crashdebug.Tracef("secrets rid=%x fetch done dur=%s responses=%d err=%v", h.requestID[:8], time.Since(start), len(resp), err)
+	}()
 	defer func() {
 		details := map[string]any{
 			"success":          err == nil,
