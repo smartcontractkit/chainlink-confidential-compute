@@ -58,6 +58,8 @@ COPY --from=builder /enclave-app /usr/bin/
 
 ARG ALLOW_RECONFIG=
 ENV ALLOW_RECONFIG=$ALLOW_RECONFIG
+# Set Rayon width in the EIF guest before the Wasmtime-linked app starts.
+ENV RAYON_NUM_THREADS=2
 
 # Create startup script that initializes chrony and then runs the enclave app.
 RUN echo '#!/bin/sh' > /start.sh && \
