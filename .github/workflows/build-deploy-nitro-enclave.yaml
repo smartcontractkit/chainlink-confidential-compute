@@ -60,13 +60,14 @@ jobs:
             nitro_prefix: nitro-enclave
             plugin_prefix: enclave
             debug_mode: "false"
-          # DEBUG BRANCH ONLY: the workflows launcher starts its enclave with
-          # --debug-mode (all-zero PCRs) and streams the console.
+          # DEBUG BRANCH ONLY: "true" makes the launcher start the enclave with
+          # --debug-mode (all-zero PCRs) and stream its console. The crash
+          # supervisor and trace report over vsock in either mode.
           - name: confidential-workflows
             dockerfile: enclave/nitro/Dockerfile.cgo
             nitro_prefix: nitro-workflows
             plugin_prefix: enclave-workflows
-            debug_mode: "true"
+            debug_mode: "false"
         include:
           - arch: amd64
             family: c7i+c7a+c6i
