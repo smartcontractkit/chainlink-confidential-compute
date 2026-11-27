@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/host"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/crashdebug"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
@@ -323,7 +325,19 @@ func NewTestConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, opts
 	return a
 }
 
-func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, rawSignedRequests ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
+func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, rawSignedRequests ...types.SignedComputeRequest) (out []byte, execErr *types.ExecuteError) {
+	// rid matches the first 16 hex digits of the requestID the host logs.
+	rid := hex.EncodeToString(requestID[:8])
+	entered := time.Now()
+	crashdebug.Tracef("exec rid=%s enter app=%s inputBytes=%d secrets=%d signed=%d", rid, appID, len(inputData), len(secretsMap), len(rawSignedRequests))
+	defer func() {
+		if execErr != nil {
+			crashdebug.Tracef("exec rid=%s return ERROR code=%d err=%q total=%s", rid, execErr.Code, execErr.Error, time.Since(entered))
+			return
+		}
+		crashdebug.Tracef("exec rid=%s return ok outputBytes=%d total=%s", rid, len(out), time.Since(entered))
+	}()
+
 	// Bound concurrent executions so a burst can't exhaust the fixed enclave
 	// memory and wedge the VM. Fail fast when full rather than piling on.
 	if !a.limiter.tryAcquire() {
@@ -378,11 +392,17 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		}
 	}
 
+	crashdebug.Tracef("exec rid=%s validated wf=%s owner=%s org=%s execID=%s binaryHash=%x binaryURL=%s requestBytes=%d",
+		rid, execution.WorkflowId, execution.GetOwner(), execution.GetOrgId(), execution.GetExecutionId(),
+		execution.BinaryHash, execution.BinaryUrl, proto.Size(execution.SdkExecuteRequest))
+
 	// Hold every validated execution for the grace period before starting it.
 	// The execution slot is already taken at this point, so the wait costs
 	// throughput as well as latency.
 	if grace := time.Duration(a.gracePeriod.Load()); grace > 0 {
+		crashdebug.Tracef("exec rid=%s grace sleep %s", rid, grace)
 		time.Sleep(grace)
+		crashdebug.Tracef("exec rid=%s grace done, starting", rid)
 	}
 
 	emitter.Emit("workflow_execute_started", map[string]any{
@@ -397,7 +417,10 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	sf := a.storageFetcher
 	dispatcher := a.dispatcher
 	a.mu.Unlock()
+	fetchStarted := time.Now()
+	crashdebug.Tracef("exec rid=%s binary fetch start", rid)
 	binary, err := a.fetcher.Fetch(context.Background(), execution.BinaryUrl, execution.BinaryHash, sf)
+	crashdebug.Tracef("exec rid=%s binary fetch done bytes=%d dur=%s err=%v", rid, len(binary), time.Since(fetchStarted), err)
 	if err != nil {
 		return nil, &types.ExecuteError{
 			Error: fmt.Sprintf("fetching binary: %s", err.Error()),
@@ -432,7 +455,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	// The fetched binary is brotli-compressed.
 	// chainlink-common's WASM host applies workflow-scoped resource limits (e.g.
 	// concurrent capability calls) keyed off CRE metadata in the context.
-	execCtx := contexts.WithCRE(context.Background(), contexts.CRE{
+	execCtx := contexts.WithCRE(crashdebug.WithTag(context.Background(), rid), contexts.CRE{
 		Org:      execution.GetOrgId(),
 		Owner:    execution.GetOwner(),
 		Workflow: execution.WorkflowId,

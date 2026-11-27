@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/crashdebug"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/attestor"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/keychain"
@@ -525,6 +526,7 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		responseEmitter.WriteErrorResponse(w, "invalid json", http.StatusBadRequest)
 		return
 	}
+	crashdebug.Tracef("%s execute request read bodyBytes=%d signedRequests=%d", responseEmitter.traceLabel(), len(body), len(reqs))
 
 	if len(reqs) == 0 {
 		responseEmitter.WriteErrorResponse(w, "empty request batch", http.StatusBadRequest)
@@ -738,5 +740,6 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	s.reqsLock.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(respBytes)
+	written, writeErr := w.Write(respBytes)
+	crashdebug.Tracef("%s execute response written bytes=%d err=%v total=%s", responseEmitter.traceLabel(), written, writeErr, time.Since(startTime))
 }

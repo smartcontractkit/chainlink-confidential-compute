@@ -12,6 +12,7 @@ import (
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/gateway"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/httpfetch"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/apps/confidential-workflows/memlimit"
+	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/crashdebug"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/nitro/proxy-client"
 	"github.com/smartcontractkit/chainlink-confidential-compute/enclave/services/combiner"
@@ -37,6 +38,10 @@ func main() {
 	// logger.Logger (so the WASM host module gets a single shared instance,
 	// see app/app.go). Both default to stderr, so output interleaves cleanly.
 	logger := log.New(log.Writer(), "enclave: ", log.LstdFlags|log.Lshortfile)
+
+	// Debug builds only: flight recorder and fatal-output mirror for the
+	// enclave supervisor. Inert unless the supervisor started this process.
+	crashdebug.Init(logger.Printf)
 	appLogger, err := cllogger.New()
 	if err != nil {
 		logger.Fatalf("Failed to construct chainlink-common logger: %v", err)

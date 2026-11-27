@@ -5,6 +5,8 @@ on:
     types: [opened, synchronize, reopened, labeled]
     branches:
       - main
+      # DEBUG BRANCH ONLY: this PR is based on release/1.4.11.
+      - 'release/**'
   push:
     branches:
       - 'release/**'
@@ -57,10 +59,15 @@ jobs:
             dockerfile: enclave/nitro/Dockerfile
             nitro_prefix: nitro-enclave
             plugin_prefix: enclave
+            debug_mode: "false"
+          # DEBUG BRANCH ONLY: "true" makes the launcher start the enclave with
+          # --debug-mode (all-zero PCRs) and stream its console. The crash
+          # supervisor and trace report over vsock in either mode.
           - name: confidential-workflows
             dockerfile: enclave/nitro/Dockerfile.cgo
             nitro_prefix: nitro-workflows
             plugin_prefix: enclave-workflows
+            debug_mode: "false"
         include:
           - arch: amd64
             family: c7i+c7a+c6i
@@ -74,6 +81,9 @@ jobs:
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           fetch-depth: 0
+          # A PR run would otherwise build the merge with the base branch, which
+          # no longer carries the same dependency pins as this branch.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
@@ -200,6 +210,8 @@ jobs:
           context: .
           file: enclave/nitro/aws-k8s-plugin/Dockerfile
           platforms: linux/${{ matrix.arch }}
+          build-args: |
+            ENCLAVE_DEBUG_MODE=${{ matrix.app.debug_mode }}
           outputs: type=docker,dest=/tmp/${{ matrix.app.name }}-plugin-image-${{ matrix.arch }}.tar
           tags: ${{ matrix.app.plugin_prefix }}:latest
           labels: ${{ steps.plugin-meta.outputs.labels }}
@@ -347,6 +359,8 @@ jobs:
           context: .
           file: enclave/nitro/aws-k8s-plugin/Dockerfile
           platforms: linux/${{ matrix.arch }}
+          build-args: |
+            ENCLAVE_DEBUG_MODE=${{ matrix.app.debug_mode }}
           outputs: type=docker,dest=/tmp/${{ matrix.app.name }}-plugin-insecure-image-${{ matrix.arch }}.tar
           tags: ${{ matrix.app.plugin_prefix }}-insecure:latest
           labels: ${{ steps.insecure-plugin-meta.outputs.labels }}
@@ -388,6 +402,9 @@ jobs:
       # Mixing partial include entries with a separate `app:` key does NOT
       # cross-product; GitHub merges them and only the last account survives.
       matrix:
+        # DEBUG BRANCH ONLY: the two prod accounts (648030273096, 129896631554)
+        # are removed so these images cannot be pulled there, and the us-east-2
+        # stage account is added.
         include:
           - account: "312157985241"
             region: "us-west-2"
@@ -401,13 +418,7 @@ jobs:
               name: confidential-http
               nitro_prefix: nitro-enclave
               plugin_prefix: enclave
-          - account: "648030273096"
-            region: "us-west-2"
-            app:
-              name: confidential-http
-              nitro_prefix: nitro-enclave
-              plugin_prefix: enclave
-          - account: "129896631554"
+          - account: "008732161165"
             region: "us-east-2"
             app:
               name: confidential-http
@@ -425,13 +436,7 @@ jobs:
               name: confidential-workflows
               nitro_prefix: nitro-workflows
               plugin_prefix: enclave-workflows
-          - account: "648030273096"
-            region: "us-west-2"
-            app:
-              name: confidential-workflows
-              nitro_prefix: nitro-workflows
-              plugin_prefix: enclave-workflows
-          - account: "129896631554"
+          - account: "008732161165"
             region: "us-east-2"
             app:
               name: confidential-workflows
@@ -448,6 +453,9 @@ jobs:
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           fetch-depth: 0
+          # A PR run would otherwise build the merge with the base branch, which
+          # no longer carries the same dependency pins as this branch.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0

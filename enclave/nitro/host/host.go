@@ -999,6 +999,20 @@ func main() {
 	}()
 	lggr.Infow("started enclave outbound proxy", "port", types.ProxyPort)
 
+	// Debug builds only: the enclave supervisor's live stream and crash reports.
+	// The enclave runs without it, so a bind failure is not fatal.
+	if crashListener, errCrash := vsock.ListenAt(vsock.CIDAny, types.CrashReportPort, nil); errCrash != nil {
+		lggr.Errorw("failed to listen for enclave crash streams", "error", errCrash, "port", types.CrashReportPort)
+	} else {
+		defer crashListener.Close() //nolint:errcheck // best-effort cleanup
+		go func() {
+			if err := serveCrashStreams(crashListener, lggr, *crashDumpDir); err != nil {
+				lggr.Errorw("enclave crash stream listener stopped", "error", err)
+			}
+		}()
+		lggr.Infow("started enclave crash stream listener", "port", types.CrashReportPort, "dumpDir", *crashDumpDir)
+	}
+
 	// Start servers. Optionally handle the config endpoint on a different port.
 	host := NewHostServer(ctx, nil)
 	host.logger = lggr
