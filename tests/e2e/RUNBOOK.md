@@ -13,17 +13,17 @@ VSOCK and uses the production `memlimit` constants:
 the divisor. Guest RAM is smaller than the Nitro allocation; the test permits
 the one-slot boundary ambiguity introduced by `/memory` rounding to MiB.
 
-The test submits twice the capacity upper bound as distinct, signed workflow
-executions to the same host. Artifact downloads wait at a test-controlled
-barrier, so admitted slots cannot drain before overload is observed. Excess
+The test warms a temporary host binary cache with one successful execution, then
+submits twice the capacity upper bound as distinct, signed workflow executions
+to the same host. A 30-second workflow grace period holds enclave admission
+slots while the burst arrives; requests must arrive within that window. Excess
 requests must report the explicit `enclave at capacity: too many concurrent
 executions` error. The app assigns code 429, but the enclave server currently
 wraps all app errors in HTTP 500; the host then wraps that error again. The test
 checks the capacity reason rather than an HTTP status. Timeouts, EOFs and
-unrelated errors fail the test. Releasing the barrier sends the existing Go
-`hello` WASM fixture through the single-slot compilation queue, then runs the
-guests concurrently. All executions share one binary, so later compilations hit
-the Wasmtime cache; this is not a cold-compilation stress test. Every admitted
+unrelated errors fail the test. All executions share the existing Go `hello`
+WASM fixture, so the warmup also populates the Wasmtime cache; this is not a
+cold-compilation stress test. Every admitted
 execution must return its expected, attestation-validated result, and a fresh
 execution must succeed after the burst drains.
 
