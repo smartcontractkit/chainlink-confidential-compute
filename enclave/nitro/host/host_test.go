@@ -385,7 +385,7 @@ func TestHandleExecuteRecordsOneExecutionAfterQuorum(t *testing.T) {
 	transport := newControlledRoundTripper(responseBody, nil)
 	recordedMetrics := newRecordingExecutionMetrics()
 	host := NewHostServer(context.Background(), &http.Client{Transport: transport})
-	host.config = types.EnclaveConfig{Signers: signers, T: 1, F: 1}
+	setTestConfig(t, host, types.EnclaveConfig{Signers: signers, T: 1, F: 1})
 	host.metrics = recordedMetrics
 
 	recorders := make([]*httptest.ResponseRecorder, 2)
@@ -447,7 +447,7 @@ func TestHandleExecuteRecordsEnclaveError(t *testing.T) {
 	transport := newControlledRoundTripper(nil, errors.New("vsock unavailable"))
 	recordedMetrics := newRecordingExecutionMetrics()
 	host := NewHostServer(context.Background(), &http.Client{Transport: transport})
-	host.config = types.EnclaveConfig{Signers: signers, T: 1, F: 1}
+	setTestConfig(t, host, types.EnclaveConfig{Signers: signers, T: 1, F: 1})
 	host.metrics = recordedMetrics
 	request := types.ComputeRequest{
 		RequestID: sha256.Sum256([]byte("execution-metrics-error")),
@@ -497,7 +497,7 @@ func TestHandleExecuteRelaysEnclaveErrorResponse(t *testing.T) {
 		Status:     "500 Internal Server Error",
 		Body:       io.NopCloser(bytes.NewReader(enclaveBody)),
 	}}})
-	host.config = types.EnclaveConfig{Signers: [][]byte{publicKey}, T: 1, F: 0}
+	setTestConfig(t, host, types.EnclaveConfig{Signers: [][]byte{publicKey}, T: 1, F: 0})
 	request := types.ComputeRequest{
 		RequestID: sha256.Sum256([]byte("enclave-error-response")),
 		AppID:     types.AppIDConfidentialWorkflows,
@@ -745,8 +745,10 @@ func TestHandleSetConfig(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	assert.Equal(t, uint32(2), host.config.T)
-	assert.Equal(t, uint32(1), host.config.F)
+	got, ok := host.configs.lookup(config.Signers[0])
+	require.True(t, ok)
+	assert.Equal(t, uint32(2), got.T)
+	assert.Equal(t, uint32(1), got.F)
 }
 
 func TestHandleExecuteWithBatchingAndCaching(t *testing.T) {
@@ -791,7 +793,7 @@ func TestHandleExecuteWithBatchingAndCaching(t *testing.T) {
 	recordedMetrics := newRecordingExecutionMetrics()
 	host.metrics = recordedMetrics
 
-	host.config = config
+	setTestConfig(t, host, config)
 
 	executeRequests := make([]*http.Request, numRequests)
 	recorders := make([]*httptest.ResponseRecorder, numRequests)
@@ -867,7 +869,7 @@ func TestHandleExecuteWithBatchingAndCaching(t *testing.T) {
 
 	// Add the laggard's address to the allowed signers
 	config.Signers = append(config.Signers, laggardPubKey)
-	host.config = config
+	setTestConfig(t, host, config)
 
 	computeReq := types.ComputeRequest{
 		RequestID:   sha256.Sum256([]byte("test-request-id-batching-caching")),
@@ -912,7 +914,7 @@ func TestHandleExecuteWithZeroTF(t *testing.T) {
 
 	host := NewHostServer(context.Background(), nil)
 
-	host.config = config
+	setTestConfig(t, host, config)
 
 	execReq := types.SignedComputeRequest{
 		ComputeRequest: types.ComputeRequest{
@@ -960,7 +962,7 @@ func TestHandleExecuteWithBatchError(t *testing.T) {
 	}
 
 	host := NewHostServer(context.Background(), &http.Client{Transport: mockTransport})
-	host.config = config
+	setTestConfig(t, host, config)
 
 	executeRequests := make([]*http.Request, numRequests)
 	recorders := make([]*httptest.ResponseRecorder, numRequests)
@@ -1036,7 +1038,7 @@ func TestHandleExecuteWithBatchError(t *testing.T) {
 	}
 
 	newHost := NewHostServer(context.Background(), &http.Client{Transport: mockTransport})
-	newHost.config = newConfig
+	setTestConfig(t, newHost, newConfig)
 
 	newComputeReq := types.ComputeRequest{
 		RequestID:   sha256.Sum256([]byte("test-request-id-batch-error")),
@@ -1152,7 +1154,7 @@ func TestHandleExecuteWithSlowProcessingNoTimeout(t *testing.T) {
 	}
 
 	host := NewHostServer(context.Background(), &http.Client{Transport: slowTransport})
-	host.config = config
+	setTestConfig(t, host, config)
 
 	computeReq := types.ComputeRequest{
 		RequestID:   sha256.Sum256([]byte("test-request-slow-processing")),
@@ -1232,7 +1234,7 @@ func TestHandleExecuteWithQuorumTimeout(t *testing.T) {
 
 	mockTransport := &mockRoundTripper{}
 	host := NewHostServer(context.Background(), &http.Client{Transport: mockTransport})
-	host.config = config
+	setTestConfig(t, host, config)
 
 	computeReq := types.ComputeRequest{
 		RequestID:   sha256.Sum256([]byte("test-request-quorum-timeout")),
@@ -1313,7 +1315,7 @@ func TestHandleExecuteWithInvalidSigner(t *testing.T) {
 
 	mockTransport := &mockRoundTripper{}
 	host := NewHostServer(context.Background(), &http.Client{Transport: mockTransport})
-	host.config = config
+	setTestConfig(t, host, config)
 
 	computeReq := types.ComputeRequest{
 		RequestID:   sha256.Sum256([]byte("test-request-id")),
@@ -1500,7 +1502,7 @@ func TestHandleQuorumTimeoutGracefulShutdown(t *testing.T) {
 
 	mockTransport := &mockRoundTripper{}
 	host := NewHostServer(ctx, &http.Client{Transport: mockTransport})
-	host.config = config
+	setTestConfig(t, host, config)
 
 	computeReq := types.ComputeRequest{
 		RequestID:   sha256.Sum256([]byte("test-request-shutdown")),

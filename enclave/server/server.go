@@ -39,7 +39,7 @@ type enclaveServer struct {
 	keychain       keychain.Keychain
 	verifier       signatureverifier.SignatureVerifier
 	combiner       combiner.Combiner
-	config         types.EnclaveConfig
+	configs        *types.EnclaveConfigs
 	emitter        types.Emitter
 	configLock     sync.Mutex
 	configSet      bool
@@ -47,16 +47,25 @@ type enclaveServer struct {
 	inProgressReqs *util.Cache[struct{}]
 	executedReqs   *util.Cache[struct{}]
 	reqsLock       sync.RWMutex
-	// pendingConfigVotes accumulates signed config-update votes keyed by the
-	// proposed config hash. The value is the set of signer-public-key hashes that
-	// have voted for that config. Guarded by configLock.
-	pendingConfigVotes *util.Cache[map[[32]byte]struct{}]
+	// pendingConfigVotes accumulates signed config-update votes keyed by
+	// configVoteID(DON name, proposed config hash). Guarded by configLock.
+	pendingConfigVotes *util.Cache[configVotes]
 	// pubKeyAttestations caches attested /publicKeys responses keyed by the
 	// attestation-content hash (PublicKeyHash).
 	pubKeyAttestations *util.Cache[[]byte]
 	// attestationGroup collapses concurrent pubKeyAttestations misses for the
 	// same content into a single NSM attestation.
 	attestationGroup singleflight.Group
+}
+
+// configVotes is the set of signer-public-key hashes that voted for a proposed config of DON donName.
+type configVotes struct {
+	donName string
+	voters  map[[32]byte]struct{}
+}
+
+func configVoteID(donName string, configHash [32]byte) [32]byte {
+	return sha256.Sum256(append([]byte(fmt.Sprintf("%d:%s", len(donName), donName)), configHash[:]...))
 }
 
 type RequestTemplate struct {
@@ -82,9 +91,14 @@ func NewEnclaveServer(
 	inProgressReqs := util.NewBoundedCache[struct{}](&replayCacheTTL, nil, types.MaxReplayCacheEntries)
 	executedReqs := util.NewBoundedCache[struct{}](&replayCacheTTL, nil, types.MaxReplayCacheEntries)
 	configVoteTTL := types.ConfigVoteTTL
-	pendingConfigVotes := util.NewCache[map[[32]byte]struct{}](&configVoteTTL, nil)
+	pendingConfigVotes := util.NewCache[configVotes](&configVoteTTL, nil)
 	pubKeyAttestationTTL := types.PublicKeyAttestationCacheTTL
 	pubKeyAttestations := util.NewCache[[]byte](&pubKeyAttestationTTL, nil)
+
+	configs := types.NewEnclaveConfigs()
+	if !config.IsZero() {
+		_ = configs.Set("", config)
+	}
 
 	return &enclaveServer{
 		app:                app,
@@ -94,7 +108,7 @@ func NewEnclaveServer(
 		verifier:           verifier,
 		combiner:           combiner,
 		emitter:            emitter,
-		config:             config,
+		configs:            configs,
 		allowReconfig:      allowReconfig,
 		inProgressReqs:     inProgressReqs,
 		executedReqs:       executedReqs,
@@ -134,11 +148,18 @@ func (s *enclaveServer) handleGetPublicKeys(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Nodes name their DON; older nodes get the default config.
 	s.configLock.Lock()
-	config := s.config.Copy()
+	var config types.EnclaveConfig
+	var ok bool
+	if don := r.URL.Query().Get("don"); don != "" {
+		config, ok = s.configs.Lookup(don)
+	} else {
+		_, config, ok = s.configs.Default()
+	}
 	s.configLock.Unlock()
 
-	if config.IsZero() {
+	if !ok || config.IsZero() {
 		http.Error(w, "enclave config not set", http.StatusServiceUnavailable)
 		return
 	}
@@ -295,13 +316,28 @@ func (s *enclaveServer) handleSetConfig(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, fmt.Sprintf("failed to parse config request: %v", err), http.StatusBadRequest)
 		return
 	}
-	var newConfig types.EnclaveConfig
-	if err := json.Unmarshal(req.Config, &newConfig); err != nil {
-		http.Error(w, fmt.Sprintf("failed to parse new config: %v", err), http.StatusBadRequest)
-		return
+	next := types.NewEnclaveConfigs()
+	if len(req.Configs) > 0 {
+		for donName, cfg := range req.Configs {
+			if donName == "" {
+				http.Error(w, "per-DON configs need a DON name", http.StatusBadRequest)
+				return
+			}
+			if err := next.Set(donName, cfg); err != nil {
+				http.Error(w, fmt.Sprintf("invalid config for DON %q: %v", donName, err), http.StatusBadRequest)
+				return
+			}
+		}
+	} else {
+		var newConfig types.EnclaveConfig
+		if err := json.Unmarshal(req.Config, &newConfig); err != nil { //nolint:staticcheck // legacy clients
+			http.Error(w, fmt.Sprintf("failed to parse new config: %v", err), http.StatusBadRequest)
+			return
+		}
+		_ = next.Set("", newConfig)
 	}
 
-	s.config = newConfig
+	s.configs = next
 	s.configSet = true
 
 	// Notify the app if it supports config updates (e.g., to propagate
@@ -309,12 +345,17 @@ func (s *enclaveServer) handleSetConfig(w http.ResponseWriter, r *http.Request) 
 	type configurable interface {
 		OnConfigUpdate(types.EnclaveConfig)
 	}
-	if c, ok := s.app.(configurable); ok {
-		c.OnConfigUpdate(newConfig)
+	defaultDON, defaultConfig, hasDefault := next.Default()
+	if c, ok := s.app.(configurable); ok && hasDefault {
+		c.OnConfigUpdate(defaultConfig)
 	}
 
 	resp := types.SetConfigResponse{
-		Config: newConfig,
+		Config:  defaultConfig,
+		DONName: defaultDON,
+	}
+	if len(req.Configs) > 0 {
+		resp.Configs = next.Snapshot()
 	}
 	att, err := s.attestor.CreateAttestation(resp.UserDataHash())
 	if err != nil {
@@ -409,27 +450,31 @@ func (s *enclaveServer) handleUpdateConfig(w http.ResponseWriter, r *http.Reques
 	// Verify the vote was signed by a current signer.
 	newHash := newConfig.Hash()
 	prefixedHash := types.MakePeerIDSignatureDomainSeparatedPayload(util.GetConfidentialComputeConfigUpdatePrefix(), newHash[:])
-	signer, err := s.verifier.VerifySignature(prefixedHash, req.Signature, s.config.Signers)
+	signer, err := s.verifier.VerifySignature(prefixedHash, req.Signature, s.configs.AllSigners())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("config update signature verification failed: %v", err), http.StatusBadRequest)
 		return
 	}
+	// Signers are disjoint across DONs, so the vote updates the signer's DON.
+	donName, _ := s.configs.DONForSigner(signer)
+	current, _ := s.configs.Get(donName)
 
 	// If the proposed config already matches the current one there is nothing to
 	// change; acknowledge it as applied without recording a vote or re-running the
 	// config-update hook.
-	currentHash := s.config.Hash()
+	currentHash := current.Hash()
 	if newHash == currentHash {
-		setConfigResp := types.SetConfigResponse{Config: s.config}
+		setConfigResp := types.SetConfigResponse{Config: current, DONName: donName}
 		att, err := s.attestor.CreateAttestation(setConfigResp.UserDataHash())
 		if err != nil {
 			http.Error(w, fmt.Sprintf("error creating attestation: %v", err), http.StatusInternalServerError)
 			return
 		}
-		required := int(s.config.F) + 1
+		required := int(current.F) + 1
 		resp := types.UpdateConfigResponse{
 			Applied:          true,
-			Config:           s.config,
+			Config:           current,
+			DONName:          donName,
 			SignersCollected: required,
 			SignersRequired:  required,
 			Attestation:      att,
@@ -442,21 +487,23 @@ func (s *enclaveServer) handleUpdateConfig(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Record the vote for this proposed config.
-	votes, ok := s.pendingConfigVotes.Get(newHash)
+	voteID := configVoteID(donName, newHash)
+	votes, ok := s.pendingConfigVotes.Get(voteID)
 	if !ok {
-		votes = make(map[[32]byte]struct{})
+		votes = configVotes{donName: donName, voters: make(map[[32]byte]struct{})}
 	}
-	votes[sha256.Sum256(signer)] = struct{}{}
-	s.pendingConfigVotes.Set(newHash, votes, nil)
+	votes.voters[sha256.Sum256(signer)] = struct{}{}
+	s.pendingConfigVotes.Set(voteID, votes, nil)
 
-	required := int(s.config.F) + 1
+	required := int(current.F) + 1
 	resp := types.UpdateConfigResponse{
 		Config:           newConfig,
-		SignersCollected: len(votes),
+		DONName:          donName,
+		SignersCollected: len(votes.voters),
 		SignersRequired:  required,
 	}
 
-	if len(votes) < required {
+	if len(votes.voters) < required {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -465,21 +512,32 @@ func (s *enclaveServer) handleUpdateConfig(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Quorum reached: apply the new config and clear stale votes.
-	s.config = newConfig
-	s.pendingConfigVotes.Flush()
+	// Quorum reached: apply the new config and clear this DON's stale votes.
+	// The votes are kept on failure, so a later vote retries the apply.
+	next := s.configs.Clone()
+	if err := next.Set(donName, newConfig); err != nil {
+		http.Error(w, fmt.Sprintf("invalid config for DON %q: %v", donName, err), http.StatusBadRequest)
+		return
+	}
+	s.configs = next
+	for _, id := range s.pendingConfigVotes.Keys() {
+		if v, ok := s.pendingConfigVotes.Get(id); ok && v.donName == donName {
+			s.pendingConfigVotes.Delete(id)
+		}
+	}
 
 	// Notify the app if it supports config updates (e.g., to propagate
 	// MasterPublicKey and threshold to the remote dispatcher for TDH2).
 	type configurable interface {
 		OnConfigUpdate(types.EnclaveConfig)
 	}
-	if c, ok := s.app.(configurable); ok {
-		c.OnConfigUpdate(newConfig)
+	_, defaultConfig, hasDefault := s.configs.Default()
+	if c, ok := s.app.(configurable); ok && hasDefault {
+		c.OnConfigUpdate(defaultConfig)
 	}
 
 	resp.Applied = true
-	setConfigResp := types.SetConfigResponse{Config: newConfig}
+	setConfigResp := types.SetConfigResponse{Config: newConfig, DONName: donName}
 	att, err := s.attestor.CreateAttestation(setConfigResp.UserDataHash())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("error creating attestation: %v", err), http.StatusInternalServerError)
@@ -511,8 +569,9 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.configLock.Lock()
-	config := s.config.Copy()
+	configs := s.configs.Clone()
 	s.configLock.Unlock()
+	allSigners := configs.AllSigners()
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -534,6 +593,7 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	// Validate each request signature & hash.
 	sigVerifyStart := time.Now()
 	signerSet := make(map[[32]byte]struct{})
+	var donName string
 	hash := reqs[0].Hash()
 	for i, req := range reqs {
 		reqHash := req.Hash()
@@ -543,13 +603,21 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		}
 		prefixedRequestHash := types.MakePeerIDSignatureDomainSeparatedPayload(util.GetConfidentialComputePayloadPrefix(), reqHash[:])
 
-		signer, err := s.verifier.VerifySignature(prefixedRequestHash[:], req.Signature, config.Signers)
+		signer, err := s.verifier.VerifySignature(prefixedRequestHash[:], req.Signature, allSigners)
 		if err != nil {
 			responseEmitter.WriteErrorResponse(w, fmt.Sprintf("signature verification failed for request %d: %v", i, err), http.StatusBadRequest)
 			return
 		}
+		signerDON, _ := configs.DONForSigner(signer)
+		if i == 0 {
+			donName = signerDON
+		} else if signerDON != donName {
+			responseEmitter.WriteErrorResponse(w, fmt.Sprintf("request %d is signed by DON %q, batch is from DON %q", i, signerDON, donName), http.StatusBadRequest)
+			return
+		}
 		signerSet[sha256.Sum256(signer)] = struct{}{}
 	}
+	config, _ := configs.Get(donName)
 	responseEmitter.Emit("signature_verification_completed", map[string]any{
 		"duration_seconds": time.Since(sigVerifyStart).Seconds(),
 		"num_signatures":   len(reqs),
@@ -687,7 +755,7 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	appExecStart := time.Now()
 	// Forward the full F+1 signed batch to the app; confidential-workflows relays it
 	// to the relay DON as the authorization for any secrets requests.
-	execResp, execErr := s.app.Execute(req.RequestID, req.AppID, req.PublicData, secretsMap, responseEmitter, reqs...)
+	execResp, execErr := s.app.Execute(req.RequestID, req.AppID, req.PublicData, secretsMap, responseEmitter, types.ExecutionAuth{CapRegDONName: donName, SignedRequests: reqs})
 	responseEmitter.Emit("app_execution_completed", map[string]any{
 		"duration_seconds": time.Since(appExecStart).Seconds(),
 	})

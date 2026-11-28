@@ -100,7 +100,7 @@ func TestExecute_HelloWasm(t *testing.T) {
 	data, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
-	output, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+	output, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter(), types.ExecutionAuth{})
 	require.Nil(t, execErr, "expected no error, got: %+v", execErr)
 
 	var cwResp confworkflowtypes.ConfidentialWorkflowResponse
@@ -170,7 +170,7 @@ func TestExecute_HttpCallWasm(t *testing.T) {
 	}, util.NewUnrestrictedClient())
 
 	app, _ := newStorageBackedApp(t, binary, WithHTTPFetcher(fetcher))
-	output, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+	output, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter(), types.ExecutionAuth{})
 	require.Nil(t, execErr, "expected no error, got: %+v", execErr)
 
 	// 5. Unwrap ConfidentialWorkflowResponse -> ExecutionResult -> Value.
@@ -238,7 +238,7 @@ func TestExecute_HttpCallWasm_EmitsCapabilityMetric(t *testing.T) {
 	app, _ := newStorageBackedApp(t, binary, WithHTTPFetcher(permissiveFetcher()))
 
 	em := &recordingEmitter{}
-	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, em)
+	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, em, types.ExecutionAuth{})
 	require.Nil(t, execErr, "expected no error, got: %+v", execErr)
 
 	require.GreaterOrEqual(t, em.countOf("capability_execution"), 1,
@@ -300,7 +300,7 @@ func TestExecute_HTTPFailureDoesNotDiscloseRequestData(t *testing.T) {
 			data, err := proto.Marshal(execution)
 			require.NoError(t, err)
 			em := server.NewResponseEmitter()
-			output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialWorkflows, data, nil, em)
+			output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialWorkflows, data, nil, em, types.ExecutionAuth{})
 			require.Nil(t, execErr)
 			require.Equal(t, 1, calls)
 			var result confworkflowtypes.ConfidentialWorkflowResponse
@@ -338,7 +338,7 @@ func TestExecute_HTTPFailureDoesNotDiscloseRequestData(t *testing.T) {
 
 func TestExecute_InvalidAppID(t *testing.T) {
 	app := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t))
-	_, execErr := app.Execute([32]byte{}, "wrong-app-id", nil, nil, emitter.NewNoOpEmitter())
+	_, execErr := app.Execute([32]byte{}, "wrong-app-id", nil, nil, emitter.NewNoOpEmitter(), types.ExecutionAuth{})
 	require.NotNil(t, execErr)
 	assert.Equal(t, http.StatusBadRequest, execErr.Code)
 	assert.Contains(t, execErr.Error, "invalid app ID")
@@ -346,7 +346,7 @@ func TestExecute_InvalidAppID(t *testing.T) {
 
 func TestExecute_InvalidProto(t *testing.T) {
 	app := NewTestConfidentialWorkflowsApp(sdkpb.TeeType_TEE_TYPE_AWS_NITRO, logger.Test(t))
-	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, []byte("not a proto"), nil, emitter.NewNoOpEmitter())
+	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, []byte("not a proto"), nil, emitter.NewNoOpEmitter(), types.ExecutionAuth{})
 	require.NotNil(t, execErr)
 	assert.Equal(t, http.StatusBadRequest, execErr.Code)
 	assert.Contains(t, execErr.Error, "unable to unmarshal")
@@ -363,7 +363,7 @@ func TestExecute_MissingWorkflowID(t *testing.T) {
 	data, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
-	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter(), types.ExecutionAuth{})
 	require.NotNil(t, execErr)
 	assert.Equal(t, http.StatusBadRequest, execErr.Code)
 	assert.Contains(t, execErr.Error, "workflow_id is required")
@@ -380,7 +380,7 @@ func TestExecute_MissingBinaryURL(t *testing.T) {
 	data, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
-	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter(), types.ExecutionAuth{})
 	require.NotNil(t, execErr)
 	assert.Equal(t, http.StatusBadRequest, execErr.Code)
 	assert.Contains(t, execErr.Error, "binary_url is required")
@@ -396,7 +396,7 @@ func TestExecute_MissingExecuteRequest(t *testing.T) {
 	data, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
-	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter(), types.ExecutionAuth{})
 	require.NotNil(t, execErr)
 	assert.Equal(t, http.StatusBadRequest, execErr.Code)
 	assert.Contains(t, execErr.Error, "execute_request is required")
@@ -413,7 +413,7 @@ func TestExecute_WasmExecutionFailure(t *testing.T) {
 	data, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
-	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter(), types.ExecutionAuth{})
 	require.NotNil(t, execErr)
 	assert.Equal(t, http.StatusInternalServerError, execErr.Code)
 	assert.Contains(t, execErr.Error, "executing wasm")
@@ -428,7 +428,7 @@ func TestExecute_FetchFailure(t *testing.T) {
 	data, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
-	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter(), types.ExecutionAuth{})
 	require.NotNil(t, execErr)
 	assert.Equal(t, http.StatusBadGateway, execErr.Code)
 	assert.Contains(t, execErr.Error, "fetching binary")
@@ -484,7 +484,7 @@ func TestExecute_EngineTestWasm_RemoteGetSecrets(t *testing.T) {
 
 	app, _ := newStorageBackedApp(t, binary, WithRemoteDispatcher(stubDispatcher))
 
-	output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+	output, execErr := app.Execute([32]byte{1}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter(), types.ExecutionAuth{})
 	require.Nil(t, execErr, "expected no error, got: %+v", execErr)
 
 	assert.True(t, secretsCalled, "expected GetSecrets to be called by WASM binary")
@@ -533,7 +533,7 @@ func TestExecute_ExecutionTimeout(t *testing.T) {
 	data, err := proto.Marshal(execution)
 	require.NoError(t, err)
 
-	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter())
+	_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, emitter.NewNoOpEmitter(), types.ExecutionAuth{})
 	require.NotNil(t, execErr)
 	assert.Equal(t, http.StatusGatewayTimeout, execErr.Code)
 	assert.Contains(t, execErr.Error, context.DeadlineExceeded.Error())
@@ -576,7 +576,7 @@ func TestExecute_GracePeriod(t *testing.T) {
 		// slow under -race, does not count against the bound.
 		started := &startTimer{}
 		start := time.Now()
-		_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, started)
+		_, execErr := app.Execute([32]byte{}, types.AppIDConfidentialWorkflows, data, nil, started, types.ExecutionAuth{})
 		require.Nil(t, execErr, "expected no error, got: %+v", execErr)
 		require.False(t, started.at.IsZero(), "workflow_execute_started was not emitted")
 		return started.at.Sub(start)

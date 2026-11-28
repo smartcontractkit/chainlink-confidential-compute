@@ -11,6 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/semaphore"
+	"google.golang.org/protobuf/proto"
+
 	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
@@ -19,8 +22,6 @@ import (
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
 	"github.com/smartcontractkit/chainlink-confidential-compute/util"
 	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
-	"golang.org/x/sync/semaphore"
-	"google.golang.org/protobuf/proto"
 )
 
 // confidentialWorkflowsApp is an EnclaveApp that executes CRE workflow WASM binaries inside a TEE.
@@ -323,7 +324,7 @@ func NewTestConfidentialWorkflowsApp(tpe sdkpb.TeeType, lggr logger.Logger, opts
 	return a
 }
 
-func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, rawSignedRequests ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
+func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, auth types.ExecutionAuth) ([]byte, *types.ExecuteError) {
 	// Bound concurrent executions so a burst can't exhaust the fixed enclave
 	// memory and wedge the VM. Fail fast when full rather than piling on.
 	if !a.limiter.tryAcquire() {
@@ -406,12 +407,13 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 	}
 
 	var helper host.ExecutionHelper = &enclaveExecutionHelper{
-		requestID:        requestID,
-		workflowID:       execution.WorkflowId,
-		owner:            execution.GetOwner(),
-		executionID:      execution.GetExecutionId(),
-		orgID:            execution.GetOrgId(),
-		signedRequests:   rawSignedRequests,
+		requestID:      requestID,
+		workflowID:     execution.WorkflowId,
+		owner:          execution.GetOwner(),
+		executionID:    execution.GetExecutionId(),
+		orgID:          execution.GetOrgId(),
+		signedRequests: auth.SignedRequests,
+		// TODO(PRIV-790) Use auth.CapRegDONName in enclaveExecutionHelper and Gateway requests sent by RemoteDispatcher.
 		logger:           a.logger,
 		emitter:          emitter,
 		remoteDispatcher: dispatcher,
