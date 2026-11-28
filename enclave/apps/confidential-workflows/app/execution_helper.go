@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
+	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	httpcap "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http"
 	httpserver "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/http/server"
 	consensusserver "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/consensus/server"
@@ -47,6 +49,10 @@ type enclaveExecutionHelper struct {
 	emitter          types.Emitter
 	remoteDispatcher RemoteDispatcher
 	httpFetcher      *httpfetch.Fetcher
+	// Limits are nil unless both request inclusion and enclave enforcement are on.
+	httpLimits *httpActionLimits
+	wasmLimits *confworkflowtypes.WASMLimits
+	userLogs   atomic.Uint64
 }
 
 var _ host.ExecutionHelper = (*enclaveExecutionHelper)(nil)
@@ -142,6 +148,17 @@ func (h *enclaveExecutionHelper) callCapability(ctx context.Context, req *sdkpb.
 }
 
 func (h *enclaveExecutionHelper) handleHTTPAction(ctx context.Context, req *sdkpb.CapabilityRequest) (*sdkpb.CapabilityResponse, error) {
+	var fetchLimits *httpfetch.Limits
+	if l := h.httpLimits; l != nil {
+		if l.countCall() {
+			h.emitLimitEvent("cre_limit_exceeded", httpCallLimitKey)
+			return errResponse(fmt.Sprintf("http-actions: capability call limit exceeded (%s: %d)", httpCallLimitKey, *l.callLimit)), nil
+		}
+		fl := l.fetch
+		fl.Exceeded = func(key string) { h.emitLimitEvent("cre_limit_exceeded", key) }
+		fl.Clamped = func(key string) { h.emitLimitEvent("cre_limit_clamped", key) }
+		fetchLimits = &fl
+	}
 	if h.httpFetcher == nil {
 		return errResponse("http-actions: no HTTP fetcher configured"), nil
 	}
@@ -149,7 +166,7 @@ func (h *enclaveExecutionHelper) handleHTTPAction(ctx context.Context, req *sdkp
 	if err := req.GetPayload().UnmarshalTo(input); err != nil {
 		return errResponse("http-actions: unmarshalling request failed"), nil
 	}
-	resp, err := h.httpFetcher.Fetch(ctx, input)
+	resp, err := h.httpFetcher.Fetch(ctx, input, fetchLimits)
 	if err != nil {
 		return errResponse(fmt.Sprintf("http-actions: %v", err)), nil
 	}
@@ -160,6 +177,17 @@ func (h *enclaveExecutionHelper) handleHTTPAction(ctx context.Context, req *sdkp
 	return &sdkpb.CapabilityResponse{
 		Response: &sdkpb.CapabilityResponse_Payload{Payload: payload},
 	}, nil
+}
+
+// emitLimitEvent records a CRE limit the execution exceeded (cre_limit_exceeded)
+// or a response the enclave's fixed cap rejected although the CRE limit allowed
+// it (cre_limit_clamped). Limit errors reach the engine as workflow errors,
+// which count as user errors, so these events are the platform-side signal.
+func (h *enclaveExecutionHelper) emitLimitEvent(event, key string) {
+	h.emit(event, map[string]any{
+		"limit_key":     key,
+		"capability_id": httpserver.ClientID,
+	})
 }
 
 func (h *enclaveExecutionHelper) handleConsensusSimple(req *sdkpb.CapabilityRequest) (*sdkpb.CapabilityResponse, error) {
@@ -250,6 +278,16 @@ func (h *enclaveExecutionHelper) GetDONTime() (time.Time, error) { return time.N
 // per-execution count are already bounded by the WASM host (MaxLogLenBytes /
 // MaxLogCountNodeMode) before this is called, so the response stays bounded.
 func (h *enclaveExecutionHelper) EmitUserLog(msg string) error {
+	// The host treats zero numeric log settings as defaults. These checks keep
+	// explicit zero restrictive, including on direct helper calls.
+	if l := h.wasmLimits; l != nil {
+		if l.LogEventLimit != nil && h.userLogs.Add(1) > uint64(l.GetLogEventLimit()) {
+			return nil
+		}
+		if l.LogLineLimitBytes != nil && uint64(len(msg)) > l.GetLogLineLimitBytes() {
+			return nil
+		}
+	}
 	h.emit("user_log", map[string]any{
 		"message":      msg,
 		"workflow_id":  h.workflowID,

@@ -57,6 +57,8 @@ type confidentialWorkflowsApp struct {
 	// host's own default). Injected via InjectSettings, read on every Execute,
 	// so it is atomic rather than guarded by mu.
 	executionTimeout atomic.Int64
+	enforceCRELimits atomic.Bool
+	settingsMu       sync.Mutex
 
 	// gracePeriod is how long a validated execution waits before it starts
 	// running (nanoseconds; non-positive = no wait). Same reasoning as above for
@@ -189,6 +191,9 @@ func WithMaxConcurrentExecutions(n int64) Option {
 // fall back to the built-in defaults when omitted. Safe to call again (e.g. key
 // rotation), as long as the payload stays complete.
 func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
+
 	var req WorkflowSettings
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return fmt.Errorf("parsing settings: %w", err)
@@ -256,7 +261,16 @@ func (a *confidentialWorkflowsApp) InjectSettings(raw json.RawMessage) error {
 		a.logger.Infof("[app] remote dispatch enabled (gateway=%s)", req.GatewayURL)
 	}
 	a.mu.Unlock()
+	// A failed settings update must not change the enforcement policy.
+	a.enforceCRELimits.Store(req.EnforceCRELimits)
+	a.logger.Infow("CRE limits enforcement configured", "enforceCRELimits", req.EnforceCRELimits)
 	return nil
+}
+
+// SettingsStatus exposes only non-secret operator controls, not the injected
+// storage credentials or endpoints. It is diagnostic, not attested.
+func (a *confidentialWorkflowsApp) SettingsStatus() map[string]any {
+	return map[string]any{"enforceCRELimits": a.enforceCRELimits.Load()}
 }
 
 // OnConfigUpdate propagates the enclave config to the remote dispatcher so it
@@ -378,6 +392,18 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		}
 	}
 
+	// A per-execution snapshot keeps runtime toggles from changing policy mid-run.
+	// The signed request bytes remain unchanged.
+	enforceLimits := a.enforceCRELimits.Load()
+	appliedLimits := execution.GetLimits()
+	if !enforceLimits {
+		appliedLimits = nil
+	}
+	emitter.Emit("cre_limits_policy", map[string]any{
+		"enforced":       enforceLimits,
+		"limits_present": execution.GetLimits() != nil,
+	})
+
 	// Hold every validated execution for the grace period before starting it.
 	// The execution slot is already taken at this point, so the wait costs
 	// throughput as well as latency.
@@ -416,6 +442,8 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		emitter:          emitter,
 		remoteDispatcher: dispatcher,
 		httpFetcher:      a.httpFetcher,
+		httpLimits:       newHTTPActionLimits(appliedLimits),
+		wasmLimits:       appliedLimits.GetWasm(),
 	}
 
 	if !host.CheckRequirements(context.Background(), a.requirementsHandler, execution.Requirements) {
@@ -438,7 +466,7 @@ func (a *confidentialWorkflowsApp) Execute(requestID [32]byte, appID string, inp
 		Workflow: execution.WorkflowId,
 	})
 	execTimeout := time.Duration(a.executionTimeout.Load())
-	result, err := executeWasm(execCtx, a.logger, emitter, a.compileSlots.Load(), binary, execution.SdkExecuteRequest, true, helper, execTimeout)
+	result, err := executeWasm(execCtx, a.logger, emitter, a.compileSlots.Load(), binary, execution.SdkExecuteRequest, true, helper, execTimeout, appliedLimits.GetWasm())
 	if err != nil {
 		// A timed-out execution is a caller-facing condition, not an enclave
 		// failure: the WASM host normalizes its epoch deadline to

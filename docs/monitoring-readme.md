@@ -170,9 +170,39 @@ confidential-compute/
 
 | Event Name | Line | Details Captured |
 |------------|------|------------------|
-| `workflow_compilation_queue_wait` | 63-65 | `duration_seconds` |
-| `workflow_compilation` | 74-77 | `success`, `duration_seconds` |
-| `workflow_guest_execution` | 101-104 | `success` (false only when the runtime fails, e.g. a timeout; a workflow error result still counts as success), `duration_seconds` |
+| `workflow_compilation_queue_wait` | 66-68 | `duration_seconds` |
+| `workflow_compilation` | 77-80 | `success`, `duration_seconds` |
+| `workflow_guest_execution` | 104-108 | `success` (false only when the runtime fails, e.g. a timeout; a workflow error result still counts as success), `outcome` (`success`, `workflow_error` when the workflow returned an error, `error` when the runtime failed), `duration_seconds` |
+
+### Confidential Workflow Limits
+
+`cre_limits_policy{enforced,limits_present}` records the enclave's per-execution
+snapshot of the default-off `enforceCRELimits` setting and signed-limit presence.
+GET `/settings` on each host's loopback config port provides non-secret readback
+for idle enclaves. Neither signal attests to the operator-controlled policy.
+
+`PerWorkflow.ConfidentialWorkflows.IncludeExecutionLimits` is a separate
+default-off DON inclusion gate. Off omits limits and preserves legacy request
+bytes; on signs scoped limits. Gate and limits use one captured settings source.
+An unloaded source or invalid gate returns system `Unavailable` before dispatch;
+a loaded source with no scoped opt-in is off. Monitor node-side failures and
+settings subscription/update errors; they cannot emit enclave execution metrics.
+
+Alert on `workflow_guest_execution{outcome="workflow_error"}` ratios above the
+per-org baseline (PRIV-758), alongside HTTP `cre_limit_exceeded` and
+`cre_limit_clamped` events keyed by `limit_key`. Runtime failures still need
+system-error monitoring; their error-path metrics may lack org/workflow labels.
+Policy and violation counters are not complete usage or would-exceed telemetry,
+especially with enforcement off. Host memory/response instruments must be exported
+and missing per-execution HTTP/target comparisons added before using telemetry
+alone to justify enabling enforcement.
+
+Emergency rollback changes only enclave enforcement, not signed limits. Keep
+watching new executions, readback on every serving host, capacity and quorum
+failures. Changing DON inclusion in either direction changes request hashes:
+pause admission, drain active executions including retries, update and verify
+settings/readiness across all signers, then resume. Later scoped-limit updates
+also require coordinated propagation. Enclave-only rollback needs no hash change.
 
 ---
 

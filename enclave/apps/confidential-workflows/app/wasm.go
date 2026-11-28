@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	confworkflowtypes "github.com/smartcontractkit/chainlink-common/pkg/capabilities/v2/actions/confidentialworkflow"
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host"
 	"github.com/smartcontractkit/chainlink-confidential-compute/types"
@@ -36,13 +37,20 @@ import (
 //
 // emitter receives the compilation queue wait, compilation, and guest execution
 // durations.
-func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter, compileSlot *semaphore.Weighted, binary []byte, execReq *sdkpb.ExecuteRequest, isCompressed bool, helper host.ExecutionHelper, timeout time.Duration) (*sdkpb.ExecutionResult, error) {
+//
+// wasmLimits carries the CRE WASM limits the workflow DON sent; see
+// applyWASMLimits.
+func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter, compileSlot *semaphore.Weighted, binary []byte, execReq *sdkpb.ExecuteRequest, isCompressed bool, helper host.ExecutionHelper, timeout time.Duration, wasmLimits *confworkflowtypes.WASMLimits) (*sdkpb.ExecutionResult, error) {
 	modCfg := &host.ModuleConfig{
 		Logger:         lggr,
 		IsUncompressed: !isCompressed,
 	}
 	if timeout > 0 {
 		modCfg.Timeout = &timeout
+	}
+	defer applyWASMLimits(modCfg, wasmLimits, execReq)()
+	if modCfg.Timeout != nil {
+		timeout = *modCfg.Timeout
 	}
 
 	execCtx, cancel := ctx, func() {}
@@ -58,7 +66,7 @@ func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter,
 		emitter.Emit("workflow_compilation_queue_wait", map[string]any{
 			"duration_seconds": started.Sub(queued).Seconds(),
 		})
-		if timeout > 0 {
+		if modCfg.Timeout != nil {
 			execCtx, cancel = context.WithTimeout(ctx, timeout)
 		}
 		compiled, compileErr := host.NewModule(execCtx, modCfg, binary)
@@ -95,6 +103,7 @@ func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter,
 	result, err := mod.Execute(execCtx, execReq, helper)
 	emitter.Emit("workflow_guest_execution", map[string]any{
 		"success":          err == nil,
+		"outcome":          guestOutcome(result, err),
 		"duration_seconds": time.Since(guestStarted).Seconds(),
 	})
 	if err != nil {
@@ -102,4 +111,19 @@ func executeWasm(ctx context.Context, lggr logger.Logger, emitter types.Emitter,
 	}
 
 	return result, nil
+}
+
+// guestOutcome separates a run whose workflow returned an error from a clean
+// one; both count as success because the runtime itself did not fail. CRE
+// limit errors and other user errors only surface as "workflow_error", so
+// per-org alerting on a jump in that ratio catches regressions that the
+// system-error metrics never see (INCIDENT-2784).
+func guestOutcome(result *sdkpb.ExecutionResult, err error) string {
+	if err != nil || result == nil {
+		return "error"
+	}
+	if _, ok := result.GetResult().(*sdkpb.ExecutionResult_Error); ok {
+		return "workflow_error"
+	}
+	return "success"
 }
