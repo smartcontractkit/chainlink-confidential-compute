@@ -3,8 +3,10 @@ package types
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"hash"
 	"net/http"
+	"sort"
 	"time"
 )
 
@@ -394,12 +396,22 @@ func (ec *EnclaveConfig) Copy() EnclaveConfig {
 }
 
 type ConfigRequest struct {
+	// Deprecated: use Configs. Config is the legacy single config: a JSON-marshaled
+	// EnclaveConfig, so on the wire it is base64 of JSON. Enclaves that support Configs
+	// ignore it when Configs is set.
 	Config []byte `json:"config"`
+	// Configs holds the config of every workflow DON, keyed by CapReg DON name.
+	// The enclave accepts configs only once, so all DONs must be sent together.
+	Configs map[string]EnclaveConfig `json:"configs,omitempty"`
 }
 
 type SetConfigResponse struct {
 	Config      EnclaveConfig `json:"config"`
 	Attestation []byte        `json:"attestation"`
+	// DONName is the CapReg name of the DON of Config; empty for the legacy config.
+	DONName string `json:"donName,omitempty"`
+	// Configs is set when the request set per-DON configs.
+	Configs map[string]EnclaveConfig `json:"configs,omitempty"`
 }
 
 type UpdateConfigRequest struct {
@@ -410,6 +422,7 @@ type UpdateConfigRequest struct {
 type UpdateConfigResponse struct {
 	Applied          bool          `json:"applied"`
 	Config           EnclaveConfig `json:"config"`
+	DONName          string        `json:"donName,omitempty"` // DON of the voter, whose config the vote updates
 	SignersCollected int           `json:"signersCollected"`
 	SignersRequired  int           `json:"signersRequired"`
 	Attestation      []byte        `json:"attestation,omitempty"` // set, over Config, only when Applied
@@ -421,6 +434,23 @@ func (sr *SetConfigResponse) UserDataHash() []byte {
 	data = append(data, []byte("\nSetConfigResponse\n")...)
 	enclaveConfigHash := sr.Config.Hash()
 	data = append(data, enclaveConfigHash[:]...)
+	if sr.DONName != "" {
+		data = append(data, []byte("\nDONName\n"+sr.DONName)...)
+	}
+	if len(sr.Configs) > 0 {
+		keys := make([]string, 0, len(sr.Configs))
+		for k := range sr.Configs {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		data = append(data, []byte("\nConfigs\n")...)
+		for _, k := range keys {
+			cfg := sr.Configs[k]
+			cfgHash := cfg.Hash()
+			data = append(data, []byte(fmt.Sprintf("%d:%s", len(k), k))...)
+			data = append(data, cfgHash[:]...)
+		}
+	}
 	hash := sha256.Sum256(data)
 	return hash[:]
 }
@@ -440,10 +470,18 @@ type Emitter interface {
 	Emit(event string, details map[string]any)
 }
 
+// ExecutionAuth describes who authorized an execution.
+type ExecutionAuth struct {
+	// CapRegDONName is the CapReg name of the DON whose signers signed the batch,
+	// e.g. "workflow_1_zone-a_shard-1"; empty for the legacy config.
+	CapRegDONName string
+	// SignedRequests is the signed compute-request batch this execution came from;
+	// confidential-workflows forwards it to the relay DON for authorization.
+	SignedRequests []SignedComputeRequest
+}
+
 type EnclaveApp interface {
-	// rawSignedRequests is the signed compute-request batch this execution came from;
-	// confidential-workflows forwards it to the relay DON for authorization, other apps ignore it.
-	Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter Emitter, rawSignedRequests ...SignedComputeRequest) ([]byte, *ExecuteError)
+	Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter Emitter, auth ExecutionAuth) ([]byte, *ExecuteError)
 }
 
 type MemoryEstimateResponse struct {

@@ -77,7 +77,7 @@ type hostServer struct {
 	ctx                  context.Context
 	cancel               context.CancelFunc
 	enclaveClient        *http.Client
-	config               types.EnclaveConfig
+	configs              *configMirror
 	configMutex          sync.RWMutex
 	processRequestMutex  sync.Mutex
 	pendingRequestsCache *util.Cache[*batchRequest]
@@ -88,6 +88,7 @@ type hostServer struct {
 }
 
 type batchRequest struct {
+	config            types.EnclaveConfig // config of the DON whose signers signed the batch
 	requests          []types.SignedComputeRequest
 	responseCh        []chan *batchResponse
 	signersSeen       map[string]bool // track unique signers by their public keys
@@ -147,7 +148,7 @@ func NewHostServer(ctx context.Context, clientOverride *http.Client) *hostServer
 		enclaveClient:        client,
 		pendingRequestsCache: util.NewCache[*batchRequest](&cacheDefaultTTL, &cacheGCInterval),
 		responseCache:        util.NewCache[*types.ExecuteResponse](&cacheDefaultTTL, &cacheGCInterval),
-		config:               types.EnclaveConfig{},
+		configs:              &configMirror{},
 		verifier:             signatureverifier.NewEd25519SignatureVerifier(),
 		// No-op by default so tests stay quiet; main injects the real logger.
 		logger:  cllogger.Sugared(cllogger.Nop()),
@@ -184,6 +185,10 @@ func (h *hostServer) handleGetPublicKeys(w http.ResponseWriter, r *http.Request)
 	q := req.URL.Query()
 	if requestID := r.URL.Query().Get("requestID"); requestID != "" {
 		q.Set("requestID", requestID)
+	}
+	// Forward don so the enclave returns that DON's config.
+	if don := r.URL.Query().Get("don"); don != "" {
+		q.Set("don", don)
 	}
 	req.URL.RawQuery = q.Encode()
 
@@ -242,13 +247,12 @@ func (h *hostServer) handleGetPublicKeys(w http.ResponseWriter, r *http.Request)
 		"waitDuration", time.Since(arrivalTime).String())
 }
 
-// maybeRecoverConfig restores an empty config, ie. when the host container restarted but the enclave stayed alive.
+// maybeRecoverConfig learns the config of a DON the host does not know yet, ie. when the host container
+// restarted but the enclave stayed alive. Nodes fetch public keys before sending requests, so this
+// covers every DON.
 func (h *hostServer) maybeRecoverConfig(body []byte) error {
 	h.configMutex.Lock()
 	defer h.configMutex.Unlock()
-	if !h.config.IsZero() {
-		return nil
-	}
 
 	var resp types.PublicKeyResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -257,7 +261,10 @@ func (h *hostServer) maybeRecoverConfig(body []byte) error {
 	if resp.Config.T == 0 || len(resp.Config.Signers) == 0 || len(resp.Config.MasterPublicKey) == 0 {
 		return errors.New("incomplete enclave config")
 	}
-	h.config = resp.Config
+	if known, ok := h.configs.lookup(resp.Config.Signers[0]); ok && known.Hash() == resp.Config.Hash() {
+		return nil
+	}
+	h.configs.insert(resp.Config)
 	h.logger.Infow("host recovered local config", "source", "publicKeys", "configHash", fmt.Sprintf("%x", resp.Config.Hash()), "T", resp.Config.T, "F", resp.Config.F)
 	return nil
 }
@@ -271,7 +278,12 @@ func (h *hostServer) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		h.configMutex.Lock()
-		h.config = configResp.Config
+		if len(configResp.Configs) == 0 {
+			h.configs.insert(configResp.Config)
+		}
+		for _, cfg := range configResp.Configs {
+			h.configs.insert(cfg)
+		}
 		h.configMutex.Unlock()
 		h.logger.Infow("host updated local config", "T", configResp.Config.T, "F", configResp.Config.F)
 		return nil
@@ -289,7 +301,7 @@ func (h *hostServer) handleUpdateConfig(w http.ResponseWriter, r *http.Request) 
 		}
 		if configResp.Applied {
 			h.configMutex.Lock()
-			h.config = configResp.Config
+			h.configs.insert(configResp.Config)
 			h.configMutex.Unlock()
 			h.logger.Infow("host updated local config via quorum update", "T", configResp.Config.T, "F", configResp.Config.F)
 		}
@@ -513,16 +525,15 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.configMutex.RLock()
-	config := h.config.Copy()
+	configs := h.configs.clone()
 	h.configMutex.RUnlock()
-	t, f := config.T, config.F
-	// If T and F are both zero, the node is not configured. Reject the request.
-	if t == 0 && f == 0 {
+	// If there are no configs, the node is not configured. Reject the request.
+	if configs.len() == 0 {
 		reqLog.Warnw("rejecting request: not configured",
 			"event", "REJECT",
 			"reason", "not_configured",
-			"T", t,
-			"F", f)
+			"T", 0,
+			"F", 0)
 		http.Error(w, "service not accepting requests (T and F are zero)", http.StatusServiceUnavailable)
 		return
 	}
@@ -535,7 +546,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	// Validate the domain separated hash of the request.
 	var signer []byte
 	prefixedRequestHash := types.MakePeerIDSignatureDomainSeparatedPayload(util.GetConfidentialComputePayloadPrefix(), requestHash[:])
-	if signer, err = h.verifier.VerifySignature(prefixedRequestHash, execReq.Signature, config.Signers); err != nil {
+	if signer, err = h.verifier.VerifySignature(prefixedRequestHash, execReq.Signature, configs.allSigners()); err != nil {
 		h.processRequestMutex.Unlock()
 		reqLog.Warnw("rejecting request: signature verification failed",
 			"event", "REJECT",
@@ -545,6 +556,8 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	signerStr := hex.EncodeToString(signer)
+	config, _ := configs.lookup(signer)
+	t, f := config.T, config.F
 	reqLog = reqLog.With("signer", signerStr)
 
 	// If the response to this request is already cached, return it.
@@ -579,6 +592,7 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 			"F", f,
 			"threshold", quorumThreshold(f))
 		br = &batchRequest{
+			config:      config,
 			requests:    make([]types.SignedComputeRequest, 0, len(config.Signers)),
 			responseCh:  make([]chan *batchResponse, 0, len(config.Signers)),
 			signersSeen: make(map[string]bool),
@@ -588,6 +602,13 @@ func (h *hostServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 
 		// Start a timeout goroutine for this batch
 		go h.handleQuorumTimeout(requestHash, f, br.doneCh)
+	} else if !containsSigner(br.config, signer) {
+		h.processRequestMutex.Unlock()
+		reqLog.Warnw("rejecting request: batch belongs to another DON",
+			"event", "REJECT",
+			"reason", "don_mismatch")
+		http.Error(w, "request hash is batched for another DON", http.StatusBadRequest)
+		return
 	} else {
 		reqLog.Infow("joining existing batch",
 			"event", "BATCH_JOIN",

@@ -91,7 +91,7 @@ func newMockEnclaveApp() *mockEnclaveApp {
 	}
 }
 
-func (m *mockEnclaveApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, _ ...types.SignedComputeRequest) ([]byte, *types.ExecuteError) {
+func (m *mockEnclaveApp) Execute(requestID [32]byte, appID string, inputData []byte, secretsMap map[string][]byte, emitter types.Emitter, _ types.ExecutionAuth) ([]byte, *types.ExecuteError) {
 	return m.executeFunc(requestID, appID, inputData, secretsMap, emitter)
 }
 
@@ -315,9 +315,7 @@ func TestSetConfig(t *testing.T) {
 				req, err = http.NewRequest(tt.method, serverURL+"/config", bytes.NewReader([]byte(tt.body)))
 				require.NoError(t, err)
 			} else if tt.config != nil {
-				reqBody := types.ConfigRequest{
-					Config: tt.config,
-				}
+				reqBody := legacyConfigRequest(tt.config)
 				body, err := json.Marshal(reqBody)
 				require.NoError(t, err)
 				req, err = http.NewRequest(tt.method, serverURL+"/config", bytes.NewReader(body))
@@ -380,7 +378,7 @@ func setInitialConfig(t *testing.T, serverURL string, config types.EnclaveConfig
 	t.Helper()
 	configBytes, err := json.Marshal(config)
 	require.NoError(t, err)
-	body, err := json.Marshal(types.ConfigRequest{Config: configBytes})
+	body, err := json.Marshal(legacyConfigRequest(configBytes))
 	require.NoError(t, err)
 	req, err := http.NewRequest(http.MethodPost, serverURL+"/config", bytes.NewReader(body))
 	require.NoError(t, err)
@@ -541,9 +539,7 @@ func TestPublicKey(t *testing.T) {
 	configBytes, err := json.Marshal(testConfig)
 	require.NoError(t, err)
 
-	configReq := types.ConfigRequest{
-		Config: configBytes,
-	}
+	configReq := legacyConfigRequest(configBytes)
 	configBody, err := json.Marshal(configReq)
 	require.NoError(t, err)
 
@@ -610,7 +606,7 @@ func configureTestServer(t *testing.T, serverURL string) {
 		F:               0,
 	})
 	require.NoError(t, err)
-	body, err := json.Marshal(types.ConfigRequest{Config: configBytes})
+	body, err := json.Marshal(legacyConfigRequest(configBytes))
 	require.NoError(t, err)
 	req, err := http.NewRequest(http.MethodPost, serverURL+"/config", bytes.NewReader(body))
 	require.NoError(t, err)
@@ -790,9 +786,7 @@ func TestHandleExecute_QuorumValidation(t *testing.T) {
 			configBytes, err := json.Marshal(testConfig)
 			require.NoError(t, err)
 
-			configReq := types.ConfigRequest{
-				Config: configBytes,
-			}
+			configReq := legacyConfigRequest(configBytes)
 			configBody, err := json.Marshal(configReq)
 			require.NoError(t, err)
 
@@ -914,9 +908,7 @@ func TestHandleExecute_ServerConcerns(t *testing.T) {
 	configBytes, err := json.Marshal(testConfig)
 	require.NoError(t, err)
 
-	configReq := types.ConfigRequest{
-		Config: configBytes,
-	}
+	configReq := legacyConfigRequest(configBytes)
 	configBody, err := json.Marshal(configReq)
 	require.NoError(t, err)
 	configHttpReq, err := http.NewRequest(http.MethodPost, serverURL+"/config", bytes.NewReader(configBody))
@@ -1181,7 +1173,7 @@ func TestHandleExecute_ShareFallback(t *testing.T) {
 	}
 	configBytes, err := json.Marshal(testConfig)
 	require.NoError(t, err)
-	configReq := types.ConfigRequest{Config: configBytes}
+	configReq := legacyConfigRequest(configBytes)
 	configBody, err := json.Marshal(configReq)
 	require.NoError(t, err)
 
@@ -1290,7 +1282,7 @@ func TestHandleExecute_ShortSharesNoPanic(t *testing.T) {
 	}
 	configBytes, err := json.Marshal(testConfig)
 	require.NoError(t, err)
-	configReq := types.ConfigRequest{Config: configBytes}
+	configReq := legacyConfigRequest(configBytes)
 	configBody, err := json.Marshal(configReq)
 	require.NoError(t, err)
 
@@ -1403,7 +1395,7 @@ func TestHandleExecute_ReplayProtection(t *testing.T) {
 	configBytes, err := json.Marshal(testConfig)
 	require.NoError(t, err)
 
-	configReq := types.ConfigRequest{Config: configBytes}
+	configReq := legacyConfigRequest(configBytes)
 	configBody, err := json.Marshal(configReq)
 	require.NoError(t, err)
 
@@ -1687,4 +1679,9 @@ func TestHandleMemory(t *testing.T) {
 	require.NoError(t, err)
 	defer util.SafeClose(resp)
 	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+}
+
+// legacyConfigRequest builds a request with the legacy single config.
+func legacyConfigRequest(configBytes []byte) types.ConfigRequest {
+	return types.ConfigRequest{Config: configBytes} //nolint:staticcheck // exercises the legacy field
 }

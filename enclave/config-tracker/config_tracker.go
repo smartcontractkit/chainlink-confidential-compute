@@ -208,7 +208,7 @@ func postConfig(ctx context.Context, client *http.Client, configPort string, con
 	if err != nil {
 		return false, fmt.Errorf("failed to marshal enclave config: %w", err)
 	}
-	payload, err := json.Marshal(types.ConfigRequest{Config: configBytes})
+	payload, err := json.Marshal(types.ConfigRequest{Config: configBytes}) //nolint:staticcheck // replaced by Configs in the per-DON tracker
 	if err != nil {
 		return false, fmt.Errorf("failed to marshal config request: %w", err)
 	}
