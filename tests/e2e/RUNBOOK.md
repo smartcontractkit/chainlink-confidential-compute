@@ -8,10 +8,23 @@ Nitro allocator; do not run this against a shared or production host.
 `TestConfidentialWorkflowsCapacityE2E` in `tests/workflow_capacity_test.go` starts
 one 2048 MiB confidential-workflows enclave (4096 MiB allocator pool). No
 Chainlink node images or DON deployment are needed. It reads guest RAM over
-VSOCK and uses the production `memlimit` constants:
-`max(1, (guest RAM MiB - 1024) / 100)`. The 1024 MiB value is the reserve, not
-the divisor. Guest RAM is smaller than the Nitro allocation; the test permits
-the one-slot boundary ambiguity introduced by `/memory` rounding to MiB.
+VSOCK and calls the production `memlimit.ForMemory`. With the current constants,
+`available = guest RAM MiB - 1024 - 128`,
+`compileCapacity = min(8, floor(available / (128 + 384)))`, and
+`executionCapacity = floor((available - compileCapacity * 384) / 128)`.
+Guest RAM below 1664 MiB fails startup. Guest RAM is smaller than the Nitro
+allocation. `/memory` rounds to MiB while startup truncates, so the test accepts
+the minimum/maximum capacities from `ForMemory(totalMB)` and
+`ForMemory(totalMB - 1)`; a compile-pool transition can change capacity by more
+than one slot. For example, rounded 1992 MiB yields 3 executions / 1 compile
+capacity at either endpoint; rounded 2048 MiB permits 3..4 executions / 1 compile.
+
+If a separate development/debug fixture already captured startup logs,
+`Confidential workflows concurrency limit` gives exact `totalMemMB`,
+`maxConcurrentExecutions` and `compileCapacity`; `compilation admission configured`
+gives the installed `maxConcurrentCompilations`. These are supplementary test
+evidence, not required by this E2E: release-mode staging does not export guest
+stderr. Do not enable Nitro debug mode for the deployment smoke.
 
 The test submits twice the capacity upper bound as distinct, signed workflow
 executions to the same host. Artifact downloads wait at a test-controlled
@@ -33,6 +46,33 @@ the normal request signature, binary hash and Nitro attestation checks remain
 enabled. Only artifact storage is a fixture. The test skips fake, legacy and
 remote enclaves and is included automatically in the existing real-enclave CI
 `go test ./...` run (nightly, release pushes, or the `e2e-real-enclaves` PR label).
+
+Retain the candidate SHA, `guest RAM=... capacity=... burst=...` and
+`admitted=... rejected=...` output, and the final
+`--- PASS: TestConfidentialWorkflowsCapacityE2E` line. A `SKIP`, timeout, zero
+rejections, admission outside the printed bounds, failed admitted result or
+failed post-burst request is not a pass. Existing real-enclave CI logs can supply
+this evidence only if they ran this test without skipping on the candidate SHA.
+For a known run, inspect it without provisioning another host:
+
+```sh
+gh run view "$RUN_ID" --repo smartcontractkit/chainlink-confidential-compute --log |
+  rg 'TestConfidentialWorkflowsCapacityE2E|guest RAM=|admitted=|slots must be released'
+```
+
+Gate reuse and settings rejection are automated separately, not a manual
+mid-burst operation. From `enclave/apps/confidential-workflows`:
+
+```sh
+GOMAXPROCS=1 go test -p 1 -count=1 ./memlimit ./app \
+  -run '^(TestForMemory|TestInjectSettings_MaxConcurrentCompilations|TestExecute_CompilationQueueRetainsAdmissionUntilFailure|TestExecuteWasm_Hello)$'
+```
+
+These tests cover budget boundaries, unchanged/omitted settings reusing the
+gate, rejected concurrency changes preserving it, queued work retaining
+execution slots, the rejection event's `max_concurrent`, and successful WASM
+phase events. They do not prove staging's telemetry export is configured; use
+the [deployment smoke checks](../../staging-validation/4c9199d1.md) for that.
 
 ### Runbook for Bumping Chainlink/v2 in our E2E Tests
 1. At the top of our `go.mod`, we have a block of chainlink imports that are all fixed at the same version. Bump the following imports to all have the same updated version:
